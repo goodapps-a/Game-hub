@@ -1,0 +1,6 @@
+{
+  "name": "ایوان — پلتفرم بازی‌های فکری و سنتی",
+  "description": "پلتفرم بازی‌های فکری و سنتی با هویت ایرانی مدرن و نسخه آزمایشی کامل بازی حکم چهارنفره.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

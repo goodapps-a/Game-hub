@@ -1,0 +1,406 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Vazirmatn", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+  /* Eyvan Royal Twilight & Antique Gold Palette */
+  --color-midnight: #08101E;
+  --color-navy-card: #0F1B30;
+  --color-navy-elevated: #15243E;
+  --color-gold: #D4AE58;
+  --color-gold-bright: #F2D27B;
+  --color-gold-dim: #9C7B32;
+  --color-turquoise: #19A2A2;
+  --color-jade: #155947;
+  --color-jade-deep: #0B352A;
+  --color-ivory: #F5EFE4;
+  --color-muted-slate: #9EB0C8;
+}
+
+/* ============================================================================
+   Theme System:
+   - Dark Mode: Royal Persian Twilight (Deep Lapis + Antique Gold)
+   - Light Mode: Isfahan Pearl & Royal Turquoise (Airy Porcelain + Crisp Teal + Gold)
+   ============================================================================ */
+:root,
+[data-theme="dark"] {
+  --eyvan-bg: #08101E;
+  --eyvan-text: #F5EFE4;
+  --eyvan-text-strong: #FFFFFF;
+  --eyvan-muted: #9EB0C8;
+  --eyvan-gold: #F3D179;
+  --eyvan-gold-border: rgba(212, 174, 88, 0.36);
+  --eyvan-card-bg: linear-gradient(180deg, rgba(21, 35, 60, 0.9) 0%, rgba(12, 22, 40, 0.95) 100%);
+  --eyvan-card-shadow: inset 0 1px 0 rgba(242, 210, 123, 0.16), 0 10px 28px rgba(0, 0, 0, 0.42);
+  --eyvan-bar-bg: rgba(8, 17, 33, 0.9);
+  --eyvan-dock-bg: rgba(11, 21, 40, 0.96);
+  --eyvan-modal-bg: rgba(12, 24, 45, 0.96);
+  --eyvan-pill-bg: rgba(15, 28, 50, 0.92);
+  --eyvan-subcard-bg: rgba(11, 22, 42, 0.9);
+  --eyvan-backdrop-opacity: 0.46;
+  --eyvan-backdrop-scrim: linear-gradient(180deg, rgba(8, 16, 30, 0.52) 0%, rgba(9, 20, 38, 0.78) 55%, rgba(7, 14, 27, 0.95) 100%);
+}
+
+[data-theme="light"] {
+  --eyvan-bg: #EFF4FA;
+  --eyvan-text: #102542;
+  --eyvan-text-strong: #0A1B33;
+  --eyvan-muted: #526784;
+  --eyvan-gold: #0C8284;
+  --eyvan-gold-border: rgba(16, 124, 130, 0.22);
+  --eyvan-card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(247, 251, 255, 0.96) 100%);
+  --eyvan-card-shadow: inset 0 1px 0 rgba(255, 255, 255, 1), 0 10px 26px rgba(15, 39, 77, 0.08), 0 2px 6px rgba(13, 138, 138, 0.05);
+  --eyvan-bar-bg: rgba(255, 255, 255, 0.92);
+  --eyvan-dock-bg: rgba(255, 255, 255, 0.96);
+  --eyvan-modal-bg: rgba(255, 255, 255, 0.98);
+  --eyvan-pill-bg: #F1F7FA;
+  --eyvan-subcard-bg: #F2F7FB;
+  --eyvan-backdrop-opacity: 0.14;
+  --eyvan-backdrop-scrim:
+    radial-gradient(ellipse at 20% 0%, rgba(25, 162, 162, 0.14) 0%, transparent 55%),
+    radial-gradient(ellipse at 85% 12%, rgba(212, 174, 88, 0.13) 0%, transparent 50%),
+    linear-gradient(180deg, rgba(242, 247, 252, 0.88) 0%, rgba(238, 244, 250, 0.95) 55%, rgba(232, 240, 248, 0.98) 100%);
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    -webkit-tap-highlight-color: transparent;
+    background-color: var(--eyvan-bg);
+    color: var(--eyvan-text);
+  }
+
+  body {
+    background-color: var(--eyvan-bg);
+    color: var(--eyvan-text);
+    overflow-x: hidden;
+  }
+
+  img {
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Luxury Persian Card — crisp frosted porcelain in Light Mode, royal lapis glass in Dark Mode */
+.eyvan-card {
+  background: var(--eyvan-card-bg);
+  border: 1px solid var(--eyvan-gold-border);
+  box-shadow: var(--eyvan-card-shadow);
+  color: var(--eyvan-text);
+}
+
+.eyvan-card-hover {
+  transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), border-color 180ms ease, box-shadow 180ms ease;
+}
+
+[data-theme="dark"] .eyvan-card-hover:hover {
+  border-color: rgba(212, 174, 88, 0.78);
+  box-shadow:
+    inset 0 1px 0 rgba(242, 210, 123, 0.34),
+    0 14px 32px rgba(0, 0, 0, 0.25),
+    0 0 20px rgba(212, 174, 88, 0.16);
+}
+
+[data-theme="light"] .eyvan-card-hover:hover {
+  border-color: rgba(13, 138, 138, 0.48);
+  box-shadow:
+    0 14px 30px rgba(15, 39, 77, 0.12),
+    0 0 0 1px rgba(13, 138, 138, 0.12);
+}
+
+/* Warm antique gold metallic title over dark artwork */
+.eyvan-gold-title {
+  color: #F3D179;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.58);
+}
+
+[data-theme="light"] .eyvan-gold-title-adaptive {
+  color: #0F274D;
+  text-shadow: none;
+}
+
+[data-theme="dark"] .eyvan-gold-title-adaptive {
+  color: #F3D179;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.55);
+}
+
+/* Subtle Persian bottom carpet/tile border trim for mobile dock */
+.persian-dock-strip {
+  background-color: var(--eyvan-bg);
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      rgba(212, 174, 88, 0.32) 0px,
+      rgba(212, 174, 88, 0.32) 2px,
+      transparent 2px,
+      transparent 16px
+    ),
+    repeating-linear-gradient(
+      45deg,
+      rgba(13, 138, 138, 0.24) 0px,
+      rgba(13, 138, 138, 0.24) 4px,
+      transparent 4px,
+      transparent 14px
+    );
+}
+
+/* Traditional Persian Hokm Table Backdrop */
+.hokm-traditional-arena {
+  background-color: #092B21;
+  transform: translateZ(0);
+}
+
+/* Light/Dark semantic helpers */
+[data-theme="light"] .theme-heading {
+  color: #0F274D;
+}
+[data-theme="dark"] .theme-heading {
+  color: #F5EFE4;
+}
+
+[data-theme="light"] .theme-muted {
+  color: #526784;
+}
+[data-theme="dark"] .theme-muted {
+  color: #9EB0C8;
+}
+
+[data-theme="light"] .theme-subcard {
+  background-color: #F2F7FB;
+  border-color: rgba(15, 118, 128, 0.18);
+}
+[data-theme="dark"] .theme-subcard {
+  background-color: rgba(14, 28, 52, 0.88);
+  border-color: rgba(212, 174, 88, 0.25);
+}
+
+[data-theme="light"] .theme-drawer {
+  background-color: #FFFFFF;
+  color: #0F274D;
+}
+[data-theme="dark"] .theme-drawer {
+  background-color: #0B1528;
+  color: #F5EFE4;
+}
+
+[data-theme="light"] .theme-panel-tint {
+  background: linear-gradient(135deg, #EEF7F8 0%, #F7F3E8 100%);
+}
+[data-theme="dark"] .theme-panel-tint {
+  background-color: rgba(16, 30, 54, 0.78);
+}
+
+[data-theme="light"] .theme-tab-track {
+  background-color: #E7F0F7;
+  border-color: rgba(15, 118, 128, 0.18);
+}
+[data-theme="dark"] .theme-tab-track {
+  background-color: rgba(9, 19, 37, 0.9);
+  border-color: rgba(212, 174, 88, 0.22);
+}
+
+[data-theme="light"] .theme-btn-secondary {
+  background-color: #FFFFFF;
+  border-color: rgba(15, 118, 128, 0.26);
+  color: #0F274D;
+  box-shadow: 0 2px 6px rgba(15, 39, 77, 0.05);
+}
+[data-theme="light"] .theme-btn-secondary:hover {
+  background-color: #EEF7F8;
+  border-color: rgba(13, 138, 138, 0.45);
+}
+[data-theme="dark"] .theme-btn-secondary {
+  background-color: rgba(22, 39, 68, 0.88);
+  border-color: rgba(212, 174, 88, 0.35);
+  color: #F5EFE4;
+}
+[data-theme="dark"] .theme-btn-secondary:hover {
+  background-color: #1E355A;
+}
+
+[data-theme="light"] .theme-input {
+  background-color: #FFFFFF;
+  border-color: rgba(15, 118, 128, 0.28);
+  color: #0F274D;
+}
+[data-theme="light"] .theme-input::placeholder {
+  color: #7A8EA8;
+}
+[data-theme="dark"] .theme-input {
+  background-color: rgba(9, 19, 37, 0.92);
+  border-color: rgba(212, 174, 88, 0.32);
+  color: #F5EFE4;
+}
+[data-theme="dark"] .theme-input::placeholder {
+  color: #7D91AE;
+}
+
+[data-theme="light"] .theme-accent-teal {
+  color: #0B7C7E;
+}
+[data-theme="dark"] .theme-accent-teal {
+  color: #4CD4CE;
+}
+
+[data-theme="light"] .theme-accent-gold {
+  color: #B47E14;
+}
+[data-theme="dark"] .theme-accent-gold {
+  color: #F3D179;
+}
+
+[data-theme="light"] .theme-win {
+  color: #107C41;
+}
+[data-theme="dark"] .theme-win {
+  color: #4ADE80;
+}
+
+[data-theme="light"] .theme-loss {
+  color: #C22D38;
+}
+[data-theme="dark"] .theme-loss {
+  color: #F87171;
+}
+
+[data-theme="light"] .theme-bar-track {
+  background-color: #DCE8F2;
+}
+[data-theme="dark"] .theme-bar-track {
+  background-color: #1C2F50;
+}
+
+.pb-safe {
+  padding-bottom: max(0.35rem, env(safe-area-inset-bottom));
+}
+
+/* ============================================================================
+   Telegram-Style Chat Wallpaper & Message Bubbles (Dark & Light Adaptive)
+   ============================================================================ */
+[data-theme="dark"] .telegram-chat-wallpaper {
+  background-color: #0B1626;
+  background-image:
+    radial-gradient(circle at 18% 22%, rgba(25, 162, 162, 0.14) 0%, transparent 45%),
+    radial-gradient(circle at 84% 78%, rgba(212, 174, 88, 0.09) 0%, transparent 48%),
+    radial-gradient(rgba(212, 174, 88, 0.08) 1px, transparent 1px),
+    radial-gradient(rgba(25, 162, 162, 0.07) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 26px 26px, 26px 26px;
+  background-position: 0 0, 0 0, 0 0, 13px 13px;
+}
+
+[data-theme="light"] .telegram-chat-wallpaper {
+  background-color: #DFECEB;
+  background-image:
+    radial-gradient(circle at 20% 18%, rgba(25, 162, 162, 0.16) 0%, transparent 48%),
+    radial-gradient(circle at 82% 80%, rgba(212, 174, 88, 0.14) 0%, transparent 50%),
+    radial-gradient(rgba(13, 138, 138, 0.11) 1px, transparent 1px),
+    radial-gradient(rgba(180, 126, 20, 0.08) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 26px 26px, 26px 26px;
+  background-position: 0 0, 0 0, 0 0, 13px 13px;
+}
+
+[data-theme="dark"] .telegram-bubble-out {
+  background: linear-gradient(135deg, #0E7C7B 0%, #0A5F65 100%);
+  color: #FFFFFF;
+}
+
+[data-theme="light"] .telegram-bubble-out {
+  background: linear-gradient(135deg, #0F8B8D 0%, #0B6E75 100%);
+  color: #FFFFFF;
+}
+
+[data-theme="dark"] .telegram-bubble-in {
+  background-color: #16263F;
+  border: 1px solid rgba(212, 174, 88, 0.2);
+  color: #F5EFE4;
+}
+
+[data-theme="light"] .telegram-bubble-in {
+  background-color: #FFFFFF;
+  border: 1px solid rgba(15, 118, 128, 0.14);
+  color: #0F274D;
+}
+
+/* ============================================================================
+   Subtle, Refined GPU-Only Game Menu Micro-Animations
+   ============================================================================ */
+@keyframes eyvanHeroBreathe {
+  0%, 100% {
+    transform: scale(1.01);
+  }
+  50% {
+    transform: scale(1.055);
+  }
+}
+
+@keyframes eyvanHeroSheen {
+  0%, 72% {
+    transform: translateX(0%) skewX(-14deg);
+    opacity: 0;
+  }
+  78% {
+    opacity: 0.9;
+  }
+  96% {
+    transform: translateX(460%) skewX(-14deg);
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(460%) skewX(-14deg);
+    opacity: 0;
+  }
+}
+
+@keyframes eyvanSparkleFloat {
+  0%, 100% {
+    transform: translateY(0px) scale(0.85);
+    opacity: 0.25;
+  }
+  50% {
+    transform: translateY(-7px) scale(1.2);
+    opacity: 0.9;
+  }
+}
+
+@keyframes eyvanGentlePulse {
+  0%, 100% {
+    opacity: 0.72;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.eyvan-hero-breathe {
+  animation: eyvanHeroBreathe 11s ease-in-out infinite;
+  will-change: transform;
+}
+
+.eyvan-hero-sheen {
+  animation: eyvanHeroSheen 7.5s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.eyvan-sparkle-float {
+  animation: eyvanSparkleFloat 4.6s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.eyvan-gentle-pulse {
+  animation: eyvanGentlePulse 3.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
