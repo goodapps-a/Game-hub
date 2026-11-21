@@ -72,7 +72,14 @@ export interface CfWorkerEnv {
   EYVAN_ASSETS: R2BucketLike;
   DISCONNECT_GRACE_MS?: string;
   ALLOWED_ORIGINS?: string;
+  APP_URL?: string;
+  PUBLIC_APP_URL?: string;
+  ENVIRONMENT?: string;
   COOKIE_DOMAIN?: string;
   ROOM_CLEANUP_TTL_MS?: string;
   AUTH_SESSION_TTL_SEC?: string;
+  EMAIL_PROVIDER?: string;
+  RESEND_API_KEY?: string;
+  EMAIL_FROM?: string;
+  EMAIL_SENDER?: import('./auth/emailService').EmailSender;
 }

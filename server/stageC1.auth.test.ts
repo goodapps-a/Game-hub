@@ -23,6 +23,7 @@ import {
   AUTH_COOKIE_NAME,
   parseAuthCookieFromHeader,
 } from '../cloudflare/src/lib/auth/authCookie';
+import { EmailSender } from '../cloudflare/src/lib/auth/emailService';
 import { handleAuthHttpRequest } from '../cloudflare/src/lib/auth/httpHandler';
 import { SESSION_COOKIE_NAME } from '../cloudflare/src/lib/sessionCookie';
 import { EyvanDatabase } from './database';
@@ -84,6 +85,7 @@ interface TestWorkerContext {
   env: CfWorkerEnv;
   eyvanDb: EyvanDatabase;
   rawDb: Database.Database;
+  capturedVerifyTokens: string[];
   cleanup: () => void;
 }
 
@@ -93,11 +95,26 @@ function createWorkerTestContext(overrides?: Partial<CfWorkerEnv>): TestWorkerCo
   const eyvanDb = new EyvanDatabase(dbPath);
   const rawDb = new Database(dbPath);
   const dos = new Map<string, HokmRoomDO>();
+  const capturedVerifyTokens: string[] = [];
+
+  const mockEmailSender: EmailSender = {
+    async sendVerificationEmail(payload) {
+      const hash = new URL(payload.verifyUrl).hash.replace(/^#/, '');
+      const tok = new URLSearchParams(hash).get('verify-email');
+      if (tok) capturedVerifyTokens.push(tok);
+      return { configured: true, sent: true, provider: 'mock' };
+    },
+    async sendPasswordResetEmail() {
+      return { configured: true, sent: true, provider: 'mock' };
+    },
+  };
 
   const env: CfWorkerEnv = {
     EYVAN_DB: eyvanDb.getD1Adapter(),
     EYVAN_ASSETS: { get: async () => null },
     ALLOWED_ORIGINS: 'https://eyvan.test',
+    PUBLIC_APP_URL: 'https://eyvan.test',
+    EMAIL_SENDER: mockEmailSender,
     HOKM_ROOM: {
       idFromName(name: string) {
         return name;
@@ -119,12 +136,23 @@ function createWorkerTestContext(overrides?: Partial<CfWorkerEnv>): TestWorkerCo
     env,
     eyvanDb,
     rawDb,
+    capturedVerifyTokens,
     cleanup: () => {
       rawDb.close();
       eyvanDb.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });
     },
   };
+}
+
+async function verifyLatestRegisteredEmail(ctx: TestWorkerContext): Promise<void> {
+  const token = ctx.capturedVerifyTokens[ctx.capturedVerifyTokens.length - 1];
+  assert.ok(token, 'Expected verification token to be dispatched on registration');
+  const res = await worker.fetch(
+    makeAuthPost('/api/auth/verify-email', { token }),
+    ctx.env
+  );
+  assert.equal(res.status, 200);
 }
 
 function extractCookiePair(setCookie: string | null, name: string): string | null {
@@ -194,7 +222,7 @@ describe('Stage C1 — Central Account Registration, Login, Logout & Secure Sess
     assert.equal(legacyVerify.needsRehash, true);
   });
 
-  it('2. Registers a new manual account, issues HttpOnly eyvan_auth_sess cookie, and never exposes raw token in JSON or DB', async () => {
+  it('2. Registers, verifies email, logs in with HttpOnly eyvan_auth_sess cookie, and never exposes raw token in JSON or DB', async () => {
     const ctx = createWorkerTestContext({ COOKIE_DOMAIN: '.eyvan.test' });
     try {
       const regRes = await worker.fetch(
@@ -209,9 +237,51 @@ describe('Stage C1 — Central Account Registration, Login, Logout & Secure Sess
 
       assert.equal(regRes.status, 201);
       assert.equal(regRes.headers.get('Cache-Control'), 'no-store, private');
+      assert.equal(regRes.headers.get('Referrer-Policy'), 'no-referrer');
+      assert.equal(regRes.headers.get('Set-Cookie'), null);
 
-      const setCookie = regRes.headers.get('Set-Cookie');
-      assert.ok(setCookie, 'Registration must emit Set-Cookie');
+      const regBodyText = await regRes.text();
+      assert.equal(regBodyText.includes('StrongPassword99'), false, 'Raw password must NEVER appear in API JSON');
+      assert.equal(regBodyText.includes('password_hash'), false);
+
+      const regJson = JSON.parse(regBodyText) as {
+        ok: boolean;
+        authenticated: boolean;
+        verificationRequired: boolean;
+        user: {
+          userId: string;
+          username: string;
+          email: string;
+          emailVerified: boolean;
+          authProvider: string;
+          accountStatus: string;
+        };
+      };
+      assert.equal(regJson.ok, true);
+      assert.equal(regJson.authenticated, false);
+      assert.equal(regJson.verificationRequired, true);
+      assert.ok(regJson.user.userId.startsWith('usr_'));
+      assert.equal(regJson.user.username, 'Amir_Hero');
+      assert.equal(regJson.user.email, 'Amir.Player@Example.com');
+      assert.equal(regJson.user.emailVerified, false);
+      assert.equal(regJson.user.authProvider, 'password');
+      assert.equal(regJson.user.accountStatus, 'pending_verification');
+
+      // Verify email, then sign in and check HttpOnly session cookie flags
+      await verifyLatestRegisteredEmail(ctx);
+
+      const loginRes = await worker.fetch(
+        makeAuthPost('/api/auth/login', {
+          identifier: 'Amir_Hero',
+          password: 'StrongPassword99',
+        }),
+        ctx.env
+      );
+      assert.equal(loginRes.status, 200);
+      assert.equal(loginRes.headers.get('Cache-Control'), 'no-store, private');
+
+      const setCookie = loginRes.headers.get('Set-Cookie');
+      assert.ok(setCookie, 'Login must emit Set-Cookie');
       assert.match(setCookie, /^eyvan_auth_sess=/);
       assert.match(setCookie, /HttpOnly/i);
       assert.match(setCookie, /Path=\//);
@@ -224,37 +294,15 @@ describe('Stage C1 — Central Account Registration, Login, Logout & Secure Sess
       const rawToken = parseAuthCookieFromHeader(setCookie);
       assert.ok(rawToken && rawToken.length >= 32);
 
-      const bodyText = await regRes.text();
-      assert.equal(bodyText.includes(rawToken), false, 'Raw session token must NEVER appear in API JSON');
-      assert.equal(bodyText.includes('StrongPassword99'), false, 'Raw password must NEVER appear in API JSON');
-      assert.equal(bodyText.includes('password_hash'), false);
-
-      const json = JSON.parse(bodyText) as {
-        ok: boolean;
-        authenticated: boolean;
-        user: {
-          userId: string;
-          username: string;
-          email: string;
-          emailVerified: boolean;
-          authProvider: string;
-          accountStatus: string;
-        };
-      };
-      assert.equal(json.ok, true);
-      assert.equal(json.authenticated, true);
-      assert.ok(json.user.userId.startsWith('usr_'));
-      assert.equal(json.user.username, 'Amir_Hero');
-      assert.equal(json.user.email, 'Amir.Player@Example.com');
-      assert.equal(json.user.emailVerified, false);
-      assert.equal(json.user.authProvider, 'password');
-      assert.equal(json.user.accountStatus, 'active');
+      const loginBodyText = await loginRes.text();
+      assert.equal(loginBodyText.includes(rawToken), false, 'Raw session token must NEVER appear in API JSON');
+      assert.equal(loginBodyText.includes('StrongPassword99'), false);
 
       // Verify DB stores ONLY SHA-256 hash of session token (never raw token)
       const expectedHash = await sha256Hex(rawToken);
       const sessRow = ctx.rawDb
         .prepare(`SELECT session_id, user_id, token_hash, revoked_at FROM auth_sessions WHERE user_id = ?`)
-        .get(json.user.userId) as {
+        .get(regJson.user.userId) as {
         session_id: string;
         user_id: string;
         token_hash: string;
@@ -282,7 +330,7 @@ describe('Stage C1 — Central Account Registration, Login, Logout & Secure Sess
         user: { userId: string; username: string };
       };
       assert.equal(meJson.authenticated, true);
-      assert.equal(meJson.user.userId, json.user.userId);
+      assert.equal(meJson.user.userId, regJson.user.userId);
       assert.equal(meJson.user.username, 'Amir_Hero');
     } finally {
       ctx.cleanup();
@@ -384,6 +432,7 @@ describe('Stage C1 — Central Account Registration, Login, Logout & Secure Sess
         ctx.env
       );
       assert.equal(reg.status, 201);
+      await verifyLatestRegisteredEmail(ctx);
 
       // Login with email (different case)
       const byEmail = await worker.fetch(
@@ -475,8 +524,18 @@ describe('Stage C1 — Central Account Registration, Login, Logout & Secure Sess
         ctx.env
       );
       assert.equal(reg.status, 201);
-      const cookiePair = extractCookiePair(reg.headers.get('Set-Cookie'), AUTH_COOKIE_NAME)!;
       const regJson = (await reg.json()) as { user: { userId: string } };
+      await verifyLatestRegisteredEmail(ctx);
+
+      const initLogin = await worker.fetch(
+        makeAuthPost('/api/auth/login', {
+          identifier: 'banned@example.com',
+          password: 'Password123',
+        }),
+        ctx.env
+      );
+      assert.equal(initLogin.status, 200);
+      const cookiePair = extractCookiePair(initLogin.headers.get('Set-Cookie'), AUTH_COOKIE_NAME)!;
 
       // Suspend user in DB
       ctx.rawDb
@@ -535,7 +594,17 @@ describe('Stage C1 — Central Account Registration, Login, Logout & Secure Sess
         ctx.env
       );
       assert.equal(reg.status, 201);
-      const cookieA = extractCookiePair(reg.headers.get('Set-Cookie'), AUTH_COOKIE_NAME)!;
+      await verifyLatestRegisteredEmail(ctx);
+
+      const loginA = await worker.fetch(
+        makeAuthPost('/api/auth/login', {
+          identifier: 'dara@example.com',
+          password: 'Password123',
+        }),
+        ctx.env
+      );
+      assert.equal(loginA.status, 200);
+      const cookieA = extractCookiePair(loginA.headers.get('Set-Cookie'), AUTH_COOKIE_NAME)!;
 
       // Second login (device B)
       const loginB = await worker.fetch(
@@ -711,7 +780,7 @@ describe('Stage C1 — Central Account Registration, Login, Logout & Secure Sess
       );
       assert.ok(hokmCookie, 'Guest Hokm room must issue eyvan_hokm_sess without auth');
 
-      // B) User registers a central account -> gets eyvan_auth_sess
+      // B) User registers, verifies email, and logs into central account -> gets eyvan_auth_sess
       const regRes = await worker.fetch(
         makeAuthPost('/api/auth/register', {
           email: 'independent@example.com',
@@ -722,8 +791,18 @@ describe('Stage C1 — Central Account Registration, Login, Logout & Secure Sess
         ctx.env
       );
       assert.equal(regRes.status, 201);
+      await verifyLatestRegisteredEmail(ctx);
+
+      const loginRes = await worker.fetch(
+        makeAuthPost('/api/auth/login', {
+          identifier: 'independent@example.com',
+          password: 'Password123',
+        }),
+        ctx.env
+      );
+      assert.equal(loginRes.status, 200);
       const authCookie = extractCookiePair(
-        regRes.headers.get('Set-Cookie'),
+        loginRes.headers.get('Set-Cookie'),
         AUTH_COOKIE_NAME
       )!;
       assert.ok(authCookie);

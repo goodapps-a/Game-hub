@@ -22,7 +22,7 @@ import {
   validateUsernameFormat,
   UsernameValidationResult,
 } from '../data/guestDefaults';
-import { AuthUserSummary } from '../auth/authClient';
+import { AuthUserSummary, PendingAuthUrlAction } from '../auth/authClient';
 import { AccountAuthPanel } from './AccountAuthPanel';
 
 interface ProfileDrawerProps {
@@ -33,6 +33,8 @@ interface ProfileDrawerProps {
   authUser: AuthUserSummary | null;
   authLoading: boolean;
   onAuthChange: (user: AuthUserSummary | null) => void;
+  pendingAuthAction?: PendingAuthUrlAction | null;
+  onClearPendingAuthAction?: () => void;
 }
 
 type DrawerSection = 'overview' | 'edit' | 'account' | 'app';
@@ -55,6 +57,8 @@ export const ProfileDrawer: React.FC<ProfileDrawerProps> = ({
   authUser,
   authLoading,
   onAuthChange,
+  pendingAuthAction = null,
+  onClearPendingAuthAction,
 }) => {
   const [section, setSection] = useState<DrawerSection>('overview');
   const [draftName, setDraftName] = useState(profile.username);
@@ -75,6 +79,12 @@ export const ProfileDrawer: React.FC<ProfileDrawerProps> = ({
       setSavedFeedback(false);
     }
   }, [isOpen, profile.avatarCode, profile.username]);
+
+  useEffect(() => {
+    if (pendingAuthAction) {
+      setSection('account');
+    }
+  }, [pendingAuthAction]);
 
   const winRate =
     profile.stats.gamesPlayed > 0
@@ -424,6 +434,8 @@ export const ProfileDrawer: React.FC<ProfileDrawerProps> = ({
                       authUser={authUser}
                       authLoading={authLoading}
                       onAuthChange={onAuthChange}
+                      pendingAuthAction={pendingAuthAction}
+                      onClearPendingAuthAction={onClearPendingAuthAction}
                     />
                     <h3 className="text-sm font-bold theme-heading pt-1">
                       تنظیمات حساب

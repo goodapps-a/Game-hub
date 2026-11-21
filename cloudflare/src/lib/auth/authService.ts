@@ -16,11 +16,18 @@ import { D1DatabaseLike } from '../types';
 import {
   AccountStatus,
   AuthProvider,
+  AuthRegisterResult,
   AuthRequestContext,
   AuthSessionResult,
   PublicAuthUser,
   VerifySessionResult,
 } from './types';
+import {
+  EmailSender,
+  buildVerificationLink,
+  createEmailSender,
+} from './emailService';
+import { EMAIL_VERIFICATION_TTL_MS } from './c2Service';
 import {
   dummyVerifyPassword,
   generateOpaqueToken,
@@ -34,9 +41,9 @@ import {
   LOGIN_ID_RATE_LIMIT,
   LOGIN_IP_RATE_LIMIT,
   REGISTER_IP_RATE_LIMIT,
-  checkRateLimit,
   clearRateLimit,
-  recordRateLimitAttempt,
+  consumeRateLimitSlot,
+  releaseRateLimitSlot,
 } from './rateLimit';
 import { validateLoginPayload, validateRegisterPayload } from './validation';
 
@@ -89,8 +96,11 @@ function mapUserRowToPublic(row: UserDbRow): PublicAuthUser {
   };
 }
 
-function isAccountAllowedToSignIn(status: AccountStatus): boolean {
-  return status === 'active' || status === 'pending_verification';
+function isAccountActiveAndVerified(
+  status: AccountStatus,
+  emailVerified: number
+): boolean {
+  return status === 'active' && emailVerified === 1;
 }
 
 function isUniqueConstraintError(err: unknown): boolean {
@@ -101,34 +111,42 @@ function isUniqueConstraintError(err: unknown): boolean {
 }
 
 /**
- * Registers a new manual password-based central account and issues a server-side session.
+ * Registers a new manual password-based central account in `pending_verification` state,
+ * creates a single-use SHA-256 hashed email verification token (24h TTL), and sends the
+ * verification email. Does NOT issue a privileged account session until email is verified.
  */
 export async function registerManualAccount(
   db: D1DatabaseLike,
   body: Record<string, unknown>,
-  ctx: AuthRequestContext
-): Promise<AuthSessionResult> {
+  ctx: AuthRequestContext,
+  emailSender?: EmailSender
+): Promise<AuthRegisterResult> {
   const now = ctx.now ?? Date.now();
-  const ttlSec = resolveAuthSessionTtlSec(ctx.sessionTtlSec);
+  const sender = emailSender ?? createEmailSender({ provider: 'disabled' });
 
   const ipHash = await sha256Hex(`ip:${ctx.clientIp || 'unknown'}`);
-  const uaHash = await sha256Hex(`ua:${ctx.userAgent || 'unknown'}`);
   const regRateKey = `register:ip:${ipHash}`;
 
-  const rlCheck = await checkRateLimit(db, regRateKey, REGISTER_IP_RATE_LIMIT, now);
-  if (!rlCheck.allowed) {
+  // Atomic check-and-increment prevents concurrent bursts from exceeding 10 attempts / 15 min
+  const rlSlot = await consumeRateLimitSlot(
+    db,
+    regRateKey,
+    REGISTER_IP_RATE_LIMIT,
+    now
+  );
+  if (!rlSlot.allowed) {
     return {
       ok: false,
       status: 429,
       code: 'RATE_LIMITED',
-      message: 'تعداد تلاش‌های ثبت‌نام بیش از حد مجاز است. لطفاً کمی بعد دوباره تلاش کنید.',
-      retryAfterSec: rlCheck.retryAfterSec,
+      message:
+        'تعداد تلاش‌های ثبت‌نام بیش از حد مجاز است. لطفاً کمی بعد دوباره تلاش کنید.',
+      retryAfterSec: rlSlot.retryAfterSec,
     };
   }
 
   const validated = validateRegisterPayload(body);
   if (validated.ok === false) {
-    await recordRateLimitAttempt(db, regRateKey, REGISTER_IP_RATE_LIMIT, now);
     return {
       ok: false,
       status: 400,
@@ -136,9 +154,6 @@ export async function registerManualAccount(
       message: validated.message,
     };
   }
-
-  // Record attempt before uniqueness check to throttle account probing
-  await recordRateLimitAttempt(db, regRateKey, REGISTER_IP_RATE_LIMIT, now);
 
   // Check case-insensitive uniqueness across BOTH `email_key` and `username_key`
   // without leaking which field matched or any details about existing accounts.
@@ -164,10 +179,9 @@ export async function registerManualAccount(
 
   const userId = generatePrefixedId('usr', 12);
   const identityId = generatePrefixedId('idn', 12);
-  const sessionId = generatePrefixedId('ses', 12);
-  const rawSessionToken = generateOpaqueToken(32);
-  const tokenHash = await sha256Hex(rawSessionToken);
-  const expiresAt = now + ttlSec * 1000;
+  const rawVerifyToken = generateOpaqueToken(32);
+  const verifyTokenHash = await sha256Hex(rawVerifyToken);
+  const verifyExpiresAt = now + EMAIL_VERIFICATION_TTL_MS;
   const pwdRecord = await hashPassword(validated.password);
 
   try {
@@ -180,7 +194,7 @@ export async function registerManualAccount(
              avatar_code, avatar_url,
              auth_provider, account_status,
              created_at, last_seen_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, 0, 'portrait', NULL, 'password', 'active', ?, ?, ?)`
+           ) VALUES (?, ?, ?, ?, ?, ?, 0, 'portrait', NULL, 'password', 'pending_verification', ?, ?, ?)`
         )
         .bind(
           userId,
@@ -213,12 +227,17 @@ export async function registerManualAccount(
         ),
       db
         .prepare(
-          `INSERT INTO auth_sessions (
-             session_id, user_id, token_hash, ip_hash, user_agent_hash,
-             created_at, last_seen_at, expires_at, revoked_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+          `INSERT INTO email_verification_tokens (
+             token_hash, user_id, email_key, created_at, expires_at, consumed_at
+           ) VALUES (?, ?, ?, ?, ?, NULL)`
         )
-        .bind(sessionId, userId, tokenHash, ipHash, uaHash, now, now, expiresAt),
+        .bind(
+          verifyTokenHash,
+          userId,
+          validated.emailKey,
+          now,
+          verifyExpiresAt
+        ),
     ]);
   } catch (err) {
     if (isUniqueConstraintError(err)) {
@@ -233,9 +252,30 @@ export async function registerManualAccount(
     throw err;
   }
 
+  const baseUrl = ctx.publicAppBaseUrl ?? 'http://localhost:3000';
+  const verifyUrl = buildVerificationLink(baseUrl, rawVerifyToken);
+  const delivery = await sender.sendVerificationEmail({
+    to: validated.email,
+    username: validated.username,
+    verifyUrl,
+    expiresInHours: Math.round(EMAIL_VERIFICATION_TTL_MS / (60 * 60 * 1000)),
+  });
+
+  const message = delivery.sent
+    ? 'حساب کاربری شما ساخته شد. لطفاً لینک تأیید ارسال‌شده به ایمیل خود را باز کنید تا حساب فعال شود.'
+    : delivery.configured
+    ? 'حساب کاربری شما ساخته شد اما ارسال ایمیل تأیید با خطا مواجه شد. لطفاً از گزینه «ارسال مجدد ایمیل تأیید» استفاده کنید.'
+    : 'حساب کاربری شما در وضعیت در انتظار تأیید ایمیل ثبت شد. سرویس ارسال ایمیل روی سرور پیکربندی نشده است.';
+
   return {
     ok: true,
     status: 201,
+    verificationRequired: true,
+    emailDelivery: {
+      configured: delivery.configured,
+      sent: delivery.sent,
+    },
+    message,
     user: {
       userId,
       username: validated.username,
@@ -245,23 +285,16 @@ export async function registerManualAccount(
       avatarCode: 'portrait',
       avatarUrl: null,
       authProvider: 'password',
-      accountStatus: 'active',
+      accountStatus: 'pending_verification',
       createdAt: now,
       lastSeenAt: now,
     },
-    session: {
-      sessionId,
-      createdAt: now,
-      expiresAt,
-    },
-    rawSessionToken,
-    sessionTtlSec: ttlSec,
   };
 }
 
 /**
- * Authenticates a user by email or username + password, enforcing rate limits,
- * timing-safe verification, and account status checks.
+ * Authenticates a user by email or username + password, enforcing atomic rate limits
+ * (reserve-before-hash, release-on-success), timing-safe verification, and account status checks.
  */
 export async function loginWithCredentials(
   db: D1DatabaseLike,
@@ -275,20 +308,26 @@ export async function loginWithCredentials(
   const uaHash = await sha256Hex(`ua:${ctx.userAgent || 'unknown'}`);
   const ipRateKey = `login:ip:${ipHash}`;
 
-  const ipLimit = await checkRateLimit(db, ipRateKey, LOGIN_IP_RATE_LIMIT, now);
-  if (!ipLimit.allowed) {
+  // Atomically reserve 1 IP slot BEFORE password verification (released on success)
+  const ipSlot = await consumeRateLimitSlot(
+    db,
+    ipRateKey,
+    LOGIN_IP_RATE_LIMIT,
+    now
+  );
+  if (!ipSlot.allowed) {
     return {
       ok: false,
       status: 429,
       code: 'RATE_LIMITED',
-      message: 'تعداد تلاش‌های ورود بیش از حد مجاز است. لطفاً کمی بعد دوباره تلاش کنید.',
-      retryAfterSec: ipLimit.retryAfterSec,
+      message:
+        'تعداد تلاش‌های ورود بیش از حد مجاز است. لطفاً کمی بعد دوباره تلاش کنید.',
+      retryAfterSec: ipSlot.retryAfterSec,
     };
   }
 
   const validated = validateLoginPayload(body);
   if (validated.ok === false) {
-    await recordRateLimitAttempt(db, ipRateKey, LOGIN_IP_RATE_LIMIT, now);
     return {
       ok: false,
       status: 401,
@@ -302,14 +341,21 @@ export async function loginWithCredentials(
   );
   const idRateKey = `login:id:${idHash}`;
 
-  const idLimit = await checkRateLimit(db, idRateKey, LOGIN_ID_RATE_LIMIT, now);
-  if (!idLimit.allowed) {
+  // Atomically reserve 1 IP+identifier slot BEFORE password verification (cleared on success)
+  const idSlot = await consumeRateLimitSlot(
+    db,
+    idRateKey,
+    LOGIN_ID_RATE_LIMIT,
+    now
+  );
+  if (!idSlot.allowed) {
     return {
       ok: false,
       status: 429,
       code: 'RATE_LIMITED',
-      message: 'تعداد تلاش‌های ناموفق ورود بیش از حد مجاز است. لطفاً کمی بعد دوباره تلاش کنید.',
-      retryAfterSec: idLimit.retryAfterSec,
+      message:
+        'تعداد تلاش‌های ناموفق ورود بیش از حد مجاز است. لطفاً کمی بعد دوباره تلاش کنید.',
+      retryAfterSec: idSlot.retryAfterSec,
     };
   }
 
@@ -343,8 +389,6 @@ export async function loginWithCredentials(
   ) {
     // Always run equal-cost PBKDF2 to prevent timing-based account existence leaks
     await dummyVerifyPassword(validated.password);
-    await recordRateLimitAttempt(db, ipRateKey, LOGIN_IP_RATE_LIMIT, now);
-    await recordRateLimitAttempt(db, idRateKey, LOGIN_ID_RATE_LIMIT, now);
     return {
       ok: false,
       status: 401,
@@ -360,8 +404,6 @@ export async function loginWithCredentials(
   });
 
   if (!pwdCheck.valid) {
-    await recordRateLimitAttempt(db, ipRateKey, LOGIN_IP_RATE_LIMIT, now);
-    await recordRateLimitAttempt(db, idRateKey, LOGIN_ID_RATE_LIMIT, now);
     return {
       ok: false,
       status: 401,
@@ -370,8 +412,8 @@ export async function loginWithCredentials(
     };
   }
 
-  // Only reveal disabled/suspended state AFTER verifying the caller knows the valid password
-  if (!isAccountAllowedToSignIn(row.account_status)) {
+  // Only reveal account status AFTER verifying the caller knows the valid password
+  if (row.account_status === 'suspended' || row.account_status === 'deleted' || row.account_status === 'guest') {
     return {
       ok: false,
       status: 403,
@@ -380,8 +422,23 @@ export async function loginWithCredentials(
     };
   }
 
-  // Reset per-identifier rate limit upon valid login
+  if (row.account_status === 'pending_verification' || row.email_verified !== 1) {
+    // Password was valid; do not penalize rate-limit failure counter, but block login until email verified
+    await clearRateLimit(db, idRateKey);
+    await releaseRateLimitSlot(db, ipRateKey, LOGIN_IP_RATE_LIMIT, now);
+    return {
+      ok: false,
+      status: 403,
+      code: 'EMAIL_NOT_VERIFIED',
+      verificationRequired: true,
+      message:
+        'ایمیل این حساب هنوز تأیید نشده است. لطفاً ابتدا لینک تأیید ارسال‌شده به ایمیل خود را باز کنید.',
+    };
+  }
+
+  // Valid login: clear per-identifier counter and release the reserved IP slot
   await clearRateLimit(db, idRateKey);
+  await releaseRateLimitSlot(db, ipRateKey, LOGIN_IP_RATE_LIMIT, now);
 
   const sessionId = generatePrefixedId('ses', 12);
   const rawSessionToken = generateOpaqueToken(32);
@@ -482,7 +539,7 @@ export async function verifyAuthSession(
     !row ||
     row.session_revoked_at !== null ||
     row.session_expires_at <= now ||
-    !isAccountAllowedToSignIn(row.account_status)
+    !isAccountActiveAndVerified(row.account_status, row.email_verified)
   ) {
     return {
       authenticated: false,

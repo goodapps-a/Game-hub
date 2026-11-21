@@ -1,6 +1,6 @@
 /**
- * Unified HTTP handler for Eyvan Central Auth (`/api/auth/*`, C1).
- * Shared 1:1 by Cloudflare Worker (`cloudflare/src/index.ts`) and Express (`server.ts`)
+ * Unified HTTP handler for Eyvan Central Auth (`/api/auth/*`, C1 + C2).
+ * Shared 1:1 by Cloudflare Worker (`cloudflare/src/index.ts`) and Express (`server/createExpressApp.ts`)
  * so security checks, CSRF guards, cookie flags, status codes, and response shapes are identical.
  *
  * Routes:
@@ -9,6 +9,10 @@
  * - POST /api/auth/logout
  * - POST /api/auth/logout-all
  * - GET  /api/auth/me
+ * - POST /api/auth/verify-email
+ * - POST /api/auth/resend-verification
+ * - POST /api/auth/forgot-password
+ * - POST /api/auth/reset-password
  */
 
 import { readBoundedUtf8Body } from '../httpBounds';
@@ -27,6 +31,13 @@ import {
   revokeAuthSessionByToken,
   verifyAuthSession,
 } from './authService';
+import {
+  requestPasswordReset,
+  resendVerificationEmail,
+  resetPasswordWithToken,
+  verifyEmailWithToken,
+} from './c2Service';
+import { EmailSender, createEmailSender } from './emailService';
 
 const MAX_AUTH_BODY_BYTES = 8 * 1024; // 8KB strict cap for auth payloads
 export const CSRF_CLIENT_HEADER_NAME = 'X-Requested-With';
@@ -42,6 +53,8 @@ export interface AuthHttpEnv {
   readonly userAgent: string;
   readonly sessionTtlSec?: string | number;
   readonly now?: number;
+  readonly publicAppBaseUrl?: string;
+  readonly emailSender?: EmailSender;
 }
 
 function buildAuthResponse(
@@ -54,6 +67,7 @@ function buildAuthResponse(
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store, private',
     Pragma: 'no-cache',
+    'Referrer-Policy': 'no-referrer',
     'X-Content-Type-Options': 'nosniff',
     ...corsHeaders,
   });
@@ -197,6 +211,7 @@ export async function handleAuthHttpRequest(
   const now = env.now ?? Date.now();
   const ttlSec =
     env.sessionTtlSec !== undefined ? Number(env.sessionTtlSec) : undefined;
+  const emailSender = env.emailSender ?? createEmailSender({ provider: 'disabled' });
 
   // 1) GET /api/auth/me — Verify central account session via `eyvan_auth_sess`
   if (pathname === '/api/auth/me' && method === 'GET') {
@@ -251,7 +266,10 @@ export async function handleAuthHttpRequest(
         env.corsHeaders
       );
     } catch (err) {
-      console.error('[Auth] /api/auth/me error:', err instanceof Error ? err.message : 'unknown');
+      console.error(
+        '[Auth] /api/auth/me error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
       return buildAuthResponse(
         {
           ok: false,
@@ -264,7 +282,7 @@ export async function handleAuthHttpRequest(
     }
   }
 
-  // 2) POST /api/auth/register — Manual registration + secure session issuance
+  // 2) POST /api/auth/register — Manual registration in pending_verification state + verification email
   if (pathname === '/api/auth/register' && method === 'POST') {
     const csrfErr = verifyMutatingCsrf(request, env, true);
     if (csrfErr) return csrfErr;
@@ -273,12 +291,18 @@ export async function handleAuthHttpRequest(
     if (parsedBody.ok === false) return parsedBody.response;
 
     try {
-      const result = await registerManualAccount(env.db, parsedBody.data, {
-        clientIp: env.clientIp,
-        userAgent: env.userAgent,
-        now,
-        sessionTtlSec: ttlSec,
-      });
+      const result = await registerManualAccount(
+        env.db,
+        parsedBody.data,
+        {
+          clientIp: env.clientIp,
+          userAgent: env.userAgent,
+          now,
+          sessionTtlSec: ttlSec,
+          publicAppBaseUrl: env.publicAppBaseUrl,
+        },
+        emailSender
+      );
 
       if (result.ok === false) {
         const extra =
@@ -297,26 +321,24 @@ export async function handleAuthHttpRequest(
         );
       }
 
-      const setCookie = buildSetAuthCookieHeader(
-        result.rawSessionToken,
-        env.secureCookie,
-        result.sessionTtlSec,
-        env.cookieOptions
-      );
-
+      // No privileged eyvan_auth_sess cookie until email is verified
       return buildAuthResponse(
         {
           ok: true,
-          authenticated: true,
+          authenticated: false,
+          verificationRequired: true,
+          emailDelivery: result.emailDelivery,
+          message: result.message,
           user: result.user,
-          session: result.session,
         },
         result.status,
-        env.corsHeaders,
-        { 'Set-Cookie': setCookie }
+        env.corsHeaders
       );
     } catch (err) {
-      console.error('[Auth] /api/auth/register error:', err instanceof Error ? err.message : 'unknown');
+      console.error(
+        '[Auth] /api/auth/register error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
       return buildAuthResponse(
         {
           ok: false,
@@ -329,7 +351,7 @@ export async function handleAuthHttpRequest(
     }
   }
 
-  // 3) POST /api/auth/login — Login by email or username + password
+  // 3) POST /api/auth/login — Login by email or username + password (requires verified active account)
   if (pathname === '/api/auth/login' && method === 'POST') {
     const csrfErr = verifyMutatingCsrf(request, env, true);
     if (csrfErr) return csrfErr;
@@ -355,6 +377,7 @@ export async function handleAuthHttpRequest(
             ok: false,
             code: result.code,
             message: result.message,
+            ...(result.verificationRequired ? { verificationRequired: true } : {}),
           },
           result.status,
           env.corsHeaders,
@@ -381,7 +404,10 @@ export async function handleAuthHttpRequest(
         { 'Set-Cookie': setCookie }
       );
     } catch (err) {
-      console.error('[Auth] /api/auth/login error:', err instanceof Error ? err.message : 'unknown');
+      console.error(
+        '[Auth] /api/auth/login error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
       return buildAuthResponse(
         {
           ok: false,
@@ -416,7 +442,10 @@ export async function handleAuthHttpRequest(
         }
       );
     } catch (err) {
-      console.error('[Auth] /api/auth/logout error:', err instanceof Error ? err.message : 'unknown');
+      console.error(
+        '[Auth] /api/auth/logout error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
       return buildAuthResponse(
         {
           ok: false,
@@ -473,12 +502,268 @@ export async function handleAuthHttpRequest(
         }
       );
     } catch (err) {
-      console.error('[Auth] /api/auth/logout-all error:', err instanceof Error ? err.message : 'unknown');
+      console.error(
+        '[Auth] /api/auth/logout-all error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
       return buildAuthResponse(
         {
           ok: false,
           code: 'DATABASE_ERROR',
           message: 'خطا در لغو نشست‌های فعال.',
+        },
+        500,
+        env.corsHeaders
+      );
+    }
+  }
+
+  // 6) POST /api/auth/verify-email — Single-use email verification token activation
+  if (pathname === '/api/auth/verify-email' && method === 'POST') {
+    const csrfErr = verifyMutatingCsrf(request, env, true);
+    if (csrfErr) return csrfErr;
+
+    const parsedBody = await parseJsonObjectBody(request, env.corsHeaders);
+    if (parsedBody.ok === false) return parsedBody.response;
+
+    try {
+      const result = await verifyEmailWithToken(env.db, parsedBody.data, {
+        clientIp: env.clientIp,
+        userAgent: env.userAgent,
+        now,
+      });
+
+      if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: result.code,
+            message: result.message,
+          },
+          result.status,
+          env.corsHeaders,
+          extra
+        );
+      }
+
+      return buildAuthResponse(
+        {
+          ok: true,
+          verified: true,
+          message: result.message,
+        },
+        result.status,
+        env.corsHeaders
+      );
+    } catch (err) {
+      console.error(
+        '[Auth] /api/auth/verify-email error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      return buildAuthResponse(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'خطای داخلی در تأیید ایمیل رخ داد.',
+        },
+        500,
+        env.corsHeaders
+      );
+    }
+  }
+
+  // 7) POST /api/auth/resend-verification — Non-enumerating resend with rate limit & prior token invalidation
+  if (pathname === '/api/auth/resend-verification' && method === 'POST') {
+    const csrfErr = verifyMutatingCsrf(request, env, true);
+    if (csrfErr) return csrfErr;
+
+    const parsedBody = await parseJsonObjectBody(request, env.corsHeaders);
+    if (parsedBody.ok === false) return parsedBody.response;
+
+    try {
+      const result = await resendVerificationEmail(
+        env.db,
+        parsedBody.data,
+        {
+          clientIp: env.clientIp,
+          userAgent: env.userAgent,
+          now,
+          publicAppBaseUrl: env.publicAppBaseUrl,
+        },
+        emailSender
+      );
+
+      if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: result.code,
+            message: result.message,
+          },
+          result.status,
+          env.corsHeaders,
+          extra
+        );
+      }
+
+      return buildAuthResponse(
+        {
+          ok: true,
+          message: result.message,
+        },
+        result.status,
+        env.corsHeaders
+      );
+    } catch (err) {
+      console.error(
+        '[Auth] /api/auth/resend-verification error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      return buildAuthResponse(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'خطای داخلی در ارسال مجدد ایمیل تأیید رخ داد.',
+        },
+        500,
+        env.corsHeaders
+      );
+    }
+  }
+
+  // 8) POST /api/auth/forgot-password — Non-enumerating password reset request with rate limit
+  if (pathname === '/api/auth/forgot-password' && method === 'POST') {
+    const csrfErr = verifyMutatingCsrf(request, env, true);
+    if (csrfErr) return csrfErr;
+
+    const parsedBody = await parseJsonObjectBody(request, env.corsHeaders);
+    if (parsedBody.ok === false) return parsedBody.response;
+
+    try {
+      const result = await requestPasswordReset(
+        env.db,
+        parsedBody.data,
+        {
+          clientIp: env.clientIp,
+          userAgent: env.userAgent,
+          now,
+          publicAppBaseUrl: env.publicAppBaseUrl,
+        },
+        emailSender
+      );
+
+      if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: result.code,
+            message: result.message,
+          },
+          result.status,
+          env.corsHeaders,
+          extra
+        );
+      }
+
+      return buildAuthResponse(
+        {
+          ok: true,
+          message: result.message,
+        },
+        result.status,
+        env.corsHeaders
+      );
+    } catch (err) {
+      console.error(
+        '[Auth] /api/auth/forgot-password error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      return buildAuthResponse(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'خطای داخلی در ثبت درخواست بازیابی رمز عبور رخ داد.',
+        },
+        500,
+        env.corsHeaders
+      );
+    }
+  }
+
+  // 9) POST /api/auth/reset-password — Atomic single-use reset + revoke all sessions + clear auth cookie
+  if (pathname === '/api/auth/reset-password' && method === 'POST') {
+    const csrfErr = verifyMutatingCsrf(request, env, true);
+    if (csrfErr) return csrfErr;
+
+    const parsedBody = await parseJsonObjectBody(request, env.corsHeaders);
+    if (parsedBody.ok === false) return parsedBody.response;
+
+    try {
+      const result = await resetPasswordWithToken(env.db, parsedBody.data, {
+        clientIp: env.clientIp,
+        userAgent: env.userAgent,
+        now,
+      });
+
+      if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: result.code,
+            message: result.message,
+          },
+          result.status,
+          env.corsHeaders,
+          extra
+        );
+      }
+
+      const hadAuthCookie = hasAuthCookieInHeader(request.headers.get('Cookie'));
+      const extra = hadAuthCookie
+        ? {
+            'Set-Cookie': buildClearAuthCookieHeader(
+              env.secureCookie,
+              env.cookieOptions
+            ),
+          }
+        : undefined;
+
+      return buildAuthResponse(
+        {
+          ok: true,
+          passwordReset: true,
+          message: result.message,
+        },
+        result.status,
+        env.corsHeaders,
+        extra
+      );
+    } catch (err) {
+      console.error(
+        '[Auth] /api/auth/reset-password error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      return buildAuthResponse(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'خطای داخلی در تغییر رمز عبور رخ داد.',
         },
         500,
         env.corsHeaders

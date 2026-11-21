@@ -36,11 +36,18 @@ export interface PublicAuthSessionInfo {
   readonly expiresAt: number;
 }
 
+export interface PublicEmailDeliveryInfo {
+  readonly configured: boolean;
+  readonly sent: boolean;
+}
+
 export type AuthErrorCode =
   | 'INVALID_INPUT'
   | 'INVALID_CREDENTIALS'
   | 'ACCOUNT_CONFLICT'
   | 'ACCOUNT_DISABLED'
+  | 'EMAIL_NOT_VERIFIED'
+  | 'INVALID_OR_EXPIRED_TOKEN'
   | 'UNAUTHORIZED'
   | 'CSRF_REJECTED'
   | 'FORBIDDEN_ORIGIN'
@@ -52,6 +59,7 @@ export interface AuthRequestContext {
   readonly userAgent: string;
   readonly now?: number;
   readonly sessionTtlSec?: number;
+  readonly publicAppBaseUrl?: string;
 }
 
 export interface AuthSuccessWithSession {
@@ -64,15 +72,36 @@ export interface AuthSuccessWithSession {
   readonly sessionTtlSec: number;
 }
 
+export interface AuthRegisterPendingVerification {
+  readonly ok: true;
+  readonly status: number;
+  readonly verificationRequired: true;
+  readonly user: PublicAuthUser;
+  readonly emailDelivery: PublicEmailDeliveryInfo;
+  readonly message: string;
+}
+
+export interface AuthActionSuccess {
+  readonly ok: true;
+  readonly status: number;
+  readonly message: string;
+  readonly verified?: boolean;
+  readonly passwordReset?: boolean;
+  readonly emailDelivery?: PublicEmailDeliveryInfo;
+}
+
 export interface AuthFailure {
   readonly ok: false;
   readonly status: number;
   readonly code: AuthErrorCode;
   readonly message: string;
   readonly retryAfterSec?: number;
+  readonly verificationRequired?: boolean;
 }
 
 export type AuthSessionResult = AuthSuccessWithSession | AuthFailure;
+export type AuthRegisterResult = AuthRegisterPendingVerification | AuthFailure;
+export type AuthActionResult = AuthActionSuccess | AuthFailure;
 
 export interface VerifySessionResult {
   readonly authenticated: boolean;

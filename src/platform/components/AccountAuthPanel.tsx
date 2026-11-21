@@ -1,56 +1,152 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
+  ArrowRight,
   CheckCircle2,
+  KeyRound,
   LogIn,
   LogOut,
+  MailCheck,
+  RefreshCw,
   ShieldCheck,
   UserPlus,
 } from 'lucide-react';
 import {
   AuthUserSummary,
+  PendingAuthUrlAction,
+  forgotPasswordRequest,
   loginAccount,
   logoutAccount,
   logoutAllAccountSessions,
   registerAccount,
+  resendVerificationRequest,
+  resetPasswordRequest,
+  verifyEmailWithTokenRequest,
 } from '../auth/authClient';
 
 interface AccountAuthPanelProps {
   authUser: AuthUserSummary | null;
   authLoading: boolean;
   onAuthChange: (user: AuthUserSummary | null) => void;
+  pendingAuthAction?: PendingAuthUrlAction | null;
+  onClearPendingAuthAction?: () => void;
 }
 
-type AuthFormMode = 'login' | 'register';
+type AuthFormMode =
+  | 'login'
+  | 'register'
+  | 'pending_verify'
+  | 'forgot'
+  | 'verify_token'
+  | 'reset_password';
 
 export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
   authUser,
   authLoading,
   onAuthChange,
+  pendingAuthAction = null,
+  onClearPendingAuthAction,
 }) => {
   const [mode, setMode] = useState<AuthFormMode>('login');
   const [identifier, setIdentifier] = useState('');
   const [email, setEmail] = useState('');
+  const [resendEmail, setResendEmail] = useState('');
+  const [forgotEmail, setForgotEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [resetToken, setResetToken] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
+  const [unverifiedNotice, setUnverifiedNotice] = useState(false);
+  const [verifyState, setVerifyState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [resetDone, setResetDone] = useState(false);
+
+  const lastAutoVerifiedTokenRef = useRef<string | null>(null);
 
   const resetFeedback = () => {
     setErrorMsg(null);
     setInfoMsg(null);
+    setUnverifiedNotice(false);
   };
+
+  // React to incoming `#verify-email=` or `#reset-password=` actions (already scrubbed from URL)
+  useEffect(() => {
+    if (!pendingAuthAction) return;
+
+    if (pendingAuthAction.type === 'verify-email') {
+      const tok = pendingAuthAction.token;
+      if (lastAutoVerifiedTokenRef.current === tok) return;
+      lastAutoVerifiedTokenRef.current = tok;
+
+      setMode('verify_token');
+      setVerifyState('loading');
+      setErrorMsg(null);
+      setInfoMsg(null);
+
+      let active = true;
+      verifyEmailWithTokenRequest(tok)
+        .then((res) => {
+          if (!active) return;
+          if (res.ok && res.verified) {
+            setVerifyState('success');
+            setInfoMsg(
+              res.message ??
+                'ایمیل شما با موفقیت تأیید شد. اکنون می‌توانید وارد حساب کاربری خود شوید.'
+            );
+          } else {
+            setVerifyState('error');
+            setErrorMsg(
+              res.message ?? 'لینک تأیید ایمیل نامعتبر، استفاده‌شده یا منقضی شده است.'
+            );
+          }
+        })
+        .catch((err) => {
+          if (!active) return;
+          setVerifyState('error');
+          setErrorMsg(
+            err instanceof Error ? err.message : 'خطا در تأیید ایمیل.'
+          );
+        })
+        .finally(() => {
+          onClearPendingAuthAction?.();
+        });
+
+      return () => {
+        active = false;
+      };
+    }
+
+    if (pendingAuthAction.type === 'reset-password') {
+      setResetToken(pendingAuthAction.token);
+      setResetDone(false);
+      setNewPassword('');
+      setConfirmNewPassword('');
+      setErrorMsg(null);
+      setInfoMsg(null);
+      setMode('reset_password');
+      onClearPendingAuthAction?.();
+    }
+  }, [pendingAuthAction, onClearPendingAuthAction]);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     resetFeedback();
     setSubmitting(true);
     try {
       const res = await loginAccount({ identifier, password });
       if (!res.ok || !res.user) {
         setErrorMsg(res.message ?? 'ورود انجام نشد.');
+        if (res.code === 'EMAIL_NOT_VERIFIED' || res.verificationRequired) {
+          setUnverifiedNotice(true);
+          if (identifier.includes('@')) {
+            setResendEmail(identifier.trim());
+          }
+        }
         return;
       }
       setPassword('');
@@ -68,6 +164,7 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
 
   const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     resetFeedback();
     setSubmitting(true);
     try {
@@ -77,14 +174,18 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
         password,
         confirmPassword,
       });
-      if (!res.ok || !res.user) {
+      if (!res.ok) {
         setErrorMsg(res.message ?? 'ثبت‌نام انجام نشد.');
         return;
       }
       setPassword('');
       setConfirmPassword('');
-      onAuthChange(res.user);
-      setInfoMsg('حساب کاربری شما با موفقیت ساخته شد.');
+      setResendEmail(email.trim());
+      setMode('pending_verify');
+      setInfoMsg(
+        res.message ??
+          'حساب شما ساخته شد. لطفاً لینک تأیید ارسال‌شده به ایمیل خود را باز کنید.'
+      );
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : 'خطا در برقراری ارتباط با سرور.'
@@ -94,7 +195,99 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
     }
   };
 
+  const handleResendVerification = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (submitting) return;
+    const targetEmail = resendEmail.trim();
+    if (!targetEmail) {
+      setErrorMsg('لطفاً ایمیل خود را برای ارسال مجدد لینک تأیید وارد کنید.');
+      return;
+    }
+    setErrorMsg(null);
+    setInfoMsg(null);
+    setSubmitting(true);
+    try {
+      const res = await resendVerificationRequest(targetEmail);
+      if (!res.ok) {
+        setErrorMsg(res.message ?? 'ارسال مجدد ایمیل تأیید انجام نشد.');
+        return;
+      }
+      setInfoMsg(
+        res.message ??
+          'در صورت وجود حساب تأییدنشده با این ایمیل، لینک تأیید جدید ارسال خواهد شد.'
+      );
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'خطا در ارسال مجدد ایمیل تأیید.'
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleForgotSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (submitting) return;
+    resetFeedback();
+    setSubmitting(true);
+    try {
+      const res = await forgotPasswordRequest(forgotEmail.trim());
+      if (!res.ok) {
+        setErrorMsg(res.message ?? 'ثبت درخواست بازیابی انجام نشد.');
+        return;
+      }
+      setInfoMsg(
+        res.message ??
+          'اگر حساب کاربری با این ایمیل ثبت شده باشد، لینک بازیابی رمز عبور ارسال خواهد شد.'
+      );
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'خطا در ارتباط با سرور.'
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleResetPasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (submitting) return;
+    if (!resetToken) {
+      setErrorMsg('توکن بازیابی رمز عبور موجود نیست. لطفاً مجدداً درخواست بازیابی ثبت کنید.');
+      return;
+    }
+    resetFeedback();
+    setSubmitting(true);
+    try {
+      const res = await resetPasswordRequest({
+        token: resetToken,
+        password: newPassword,
+        confirmPassword: confirmNewPassword,
+      });
+      if (!res.ok) {
+        setErrorMsg(res.message ?? 'تغییر رمز عبور انجام نشد.');
+        return;
+      }
+      setResetToken(null);
+      setNewPassword('');
+      setConfirmNewPassword('');
+      setResetDone(true);
+      onAuthChange(null);
+      setInfoMsg(
+        res.message ??
+          'رمز عبور شما با موفقیت تغییر یافت و تمام نشست‌های قبلی لغو شدند.'
+      );
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'خطا در ارتباط با سرور.'
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const handleLogout = async () => {
+    if (submitting) return;
     resetFeedback();
     setSubmitting(true);
     try {
@@ -113,6 +306,7 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
   };
 
   const handleLogoutAll = async () => {
+    if (submitting) return;
     resetFeedback();
     setSubmitting(true);
     try {
@@ -129,6 +323,192 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
       setSubmitting(false);
     }
   };
+
+  // Dedicated C2 token flows take priority even if a stale session was previously shown
+  if (mode === 'verify_token') {
+    return (
+      <div
+        className="p-3.5 rounded-2xl theme-subcard border space-y-3"
+        data-testid="auth-verify-email-panel"
+      >
+        <div className="flex items-center gap-2 text-xs font-extrabold theme-heading">
+          <MailCheck className="w-4 h-4 theme-accent-teal shrink-0" />
+          <span>تأیید ایمیل حساب کاربری</span>
+        </div>
+
+        {verifyState === 'loading' && (
+          <div className="p-3 rounded-xl theme-input border text-xs theme-muted text-center">
+            در حال بررسی و تأیید لینک ایمیل...
+          </div>
+        )}
+
+        {errorMsg && (
+          <div
+            role="alert"
+            data-testid="auth-verify-error"
+            className="p-2.5 rounded-xl bg-[#DC2626]/10 border border-[#DC2626]/40 flex items-start gap-2 text-xs font-semibold theme-loss"
+          >
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>{errorMsg}</span>
+          </div>
+        )}
+
+        {infoMsg && (
+          <div
+            data-testid="auth-verify-success"
+            className="p-2.5 rounded-xl bg-[#0D8A8A]/10 border border-[#0D8A8A]/40 flex items-start gap-2 text-xs font-semibold theme-win"
+          >
+            <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>{infoMsg}</span>
+          </div>
+        )}
+
+        <div className="flex flex-col gap-2">
+          <button
+            type="button"
+            data-testid="auth-verify-go-login"
+            onClick={() => {
+              setMode('login');
+              setVerifyState('idle');
+            }}
+            className="w-full min-h-[40px] rounded-xl bg-[#D4AE58] hover:bg-[#E5BF69] text-[#0B1528] text-xs font-extrabold cursor-pointer transition-colors"
+          >
+            ورود به حساب کاربری
+          </button>
+          {verifyState === 'error' && (
+            <button
+              type="button"
+              data-testid="auth-verify-open-resend"
+              onClick={() => {
+                setMode('pending_verify');
+                setVerifyState('idle');
+                resetFeedback();
+              }}
+              className="w-full min-h-[38px] rounded-xl border border-[var(--eyvan-gold-border)] text-xs font-bold theme-heading hover:bg-black/10 cursor-pointer transition-colors"
+            >
+              درخواست ارسال مجدد لینک تأیید
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (mode === 'reset_password') {
+    return (
+      <div
+        className="p-3.5 rounded-2xl theme-subcard border space-y-3"
+        data-testid="auth-reset-password-panel"
+      >
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs font-extrabold theme-heading">
+            <KeyRound className="w-4 h-4 theme-accent-gold shrink-0" />
+            <span>تنظیم رمز عبور جدید</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setResetToken(null);
+              setMode('login');
+              resetFeedback();
+            }}
+            className="text-[11px] font-bold theme-muted hover:theme-heading flex items-center gap-1 cursor-pointer"
+          >
+            <ArrowRight className="w-3.5 h-3.5" />
+            <span>بازگشت</span>
+          </button>
+        </div>
+
+        {errorMsg && (
+          <div
+            role="alert"
+            data-testid="auth-reset-error"
+            className="p-2.5 rounded-xl bg-[#DC2626]/10 border border-[#DC2626]/40 flex items-start gap-2 text-xs font-semibold theme-loss"
+          >
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>{errorMsg}</span>
+          </div>
+        )}
+
+        {infoMsg && (
+          <div
+            data-testid="auth-reset-success"
+            className="p-2.5 rounded-xl bg-[#0D8A8A]/10 border border-[#0D8A8A]/40 flex items-start gap-2 text-xs font-semibold theme-win"
+          >
+            <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>{infoMsg}</span>
+          </div>
+        )}
+
+        {resetDone ? (
+          <button
+            type="button"
+            data-testid="auth-reset-go-login"
+            onClick={() => {
+              setMode('login');
+              setResetDone(false);
+            }}
+            className="w-full min-h-[42px] rounded-xl bg-[#D4AE58] hover:bg-[#E5BF69] text-[#0B1528] text-xs font-extrabold cursor-pointer transition-colors"
+          >
+            ورود با رمز عبور جدید
+          </button>
+        ) : (
+          <form onSubmit={handleResetPasswordSubmit} className="space-y-2.5">
+            <div>
+              <label
+                htmlFor="auth-reset-password"
+                className="block text-[11px] font-bold theme-heading mb-1"
+              >
+                رمز عبور جدید (حداقل ۸ کاراکتر، شامل حرف و عدد)
+              </label>
+              <input
+                id="auth-reset-password"
+                data-testid="auth-reset-password"
+                type="password"
+                dir="ltr"
+                autoComplete="new-password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                minLength={8}
+                maxLength={128}
+                required
+                className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="auth-reset-confirm"
+                className="block text-[11px] font-bold theme-heading mb-1"
+              >
+                تکرار رمز عبور جدید
+              </label>
+              <input
+                id="auth-reset-confirm"
+                data-testid="auth-reset-confirm"
+                type="password"
+                dir="ltr"
+                autoComplete="new-password"
+                value={confirmNewPassword}
+                onChange={(e) => setConfirmNewPassword(e.target.value)}
+                minLength={8}
+                maxLength={128}
+                required
+                className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={submitting}
+              data-testid="auth-reset-submit"
+              className="w-full min-h-[42px] rounded-xl bg-[#D4AE58] hover:bg-[#E5BF69] disabled:opacity-50 text-[#0B1528] text-xs font-extrabold cursor-pointer transition-colors"
+            >
+              {submitting ? 'در حال ثبت رمز جدید...' : 'ثبت رمز عبور جدید'}
+            </button>
+          </form>
+        )}
+      </div>
+    );
+  }
 
   if (authLoading) {
     return (
@@ -231,7 +611,7 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
         </div>
         <p className="text-[11px] theme-muted leading-relaxed">
           اکنون در حالت مهمان هستید. برای بازی حکم نیازی به ثبت‌نام نیست، اما با
-          ساخت حساب، هویت کاربری شما در تمام بازی‌های ایوان حفظ می‌شود.
+          ساخت و تأیید حساب، هویت کاربری شما در تمام بازی‌های ایوان حفظ می‌شود.
         </p>
       </div>
 
@@ -245,7 +625,7 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
             resetFeedback();
           }}
           className={`min-h-[34px] rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
-            mode === 'login'
+            mode === 'login' || mode === 'forgot'
               ? 'bg-[#D4AE58] text-[#0B1528]'
               : 'theme-muted'
           }`}
@@ -261,7 +641,7 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
             resetFeedback();
           }}
           className={`min-h-[34px] rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
-            mode === 'register'
+            mode === 'register' || mode === 'pending_verify'
               ? 'bg-[#D4AE58] text-[#0B1528]'
               : 'theme-muted'
           }`}
@@ -292,57 +672,107 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
         </div>
       )}
 
-      {mode === 'login' ? (
-        <form onSubmit={handleLoginSubmit} className="space-y-2.5">
-          <div>
-            <label
-              htmlFor="auth-login-identifier"
-              className="block text-[11px] font-bold theme-heading mb-1"
+      {mode === 'login' && (
+        <div className="space-y-2.5">
+          <form onSubmit={handleLoginSubmit} className="space-y-2.5">
+            <div>
+              <label
+                htmlFor="auth-login-identifier"
+                className="block text-[11px] font-bold theme-heading mb-1"
+              >
+                ایمیل یا نام کاربری
+              </label>
+              <input
+                id="auth-login-identifier"
+                data-testid="auth-login-identifier"
+                type="text"
+                dir="ltr"
+                autoComplete="username"
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+                placeholder="name@example.com or player_one"
+                required
+                className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
+              />
+            </div>
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label
+                  htmlFor="auth-login-password"
+                  className="block text-[11px] font-bold theme-heading"
+                >
+                  رمز عبور
+                </label>
+                <button
+                  type="button"
+                  data-testid="auth-forgot-link"
+                  onClick={() => {
+                    setForgotEmail(identifier.includes('@') ? identifier.trim() : '');
+                    setMode('forgot');
+                    resetFeedback();
+                  }}
+                  className="text-[11px] font-bold theme-accent-gold hover:underline cursor-pointer"
+                >
+                  فراموشی رمز عبور؟
+                </button>
+              </div>
+              <input
+                id="auth-login-password"
+                data-testid="auth-login-password"
+                type="password"
+                dir="ltr"
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={submitting}
+              data-testid="auth-login-submit"
+              className="w-full min-h-[42px] rounded-xl bg-[#D4AE58] hover:bg-[#E5BF69] disabled:opacity-50 text-[#0B1528] text-xs font-extrabold cursor-pointer transition-colors"
             >
-              ایمیل یا نام کاربری
-            </label>
-            <input
-              id="auth-login-identifier"
-              data-testid="auth-login-identifier"
-              type="text"
-              dir="ltr"
-              autoComplete="username"
-              value={identifier}
-              onChange={(e) => setIdentifier(e.target.value)}
-              placeholder="name@example.com or player_one"
-              required
-              className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
-            />
-          </div>
-          <div>
-            <label
-              htmlFor="auth-login-password"
-              className="block text-[11px] font-bold theme-heading mb-1"
+              {submitting ? 'در حال ورود...' : 'ورود به حساب'}
+            </button>
+          </form>
+
+          {unverifiedNotice && (
+            <div
+              data-testid="auth-unverified-resend-box"
+              className="p-2.5 rounded-xl border border-[#D4AE58]/40 bg-[#D4AE58]/10 space-y-2"
             >
-              رمز عبور
-            </label>
-            <input
-              id="auth-login-password"
-              data-testid="auth-login-password"
-              type="password"
-              dir="ltr"
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
-            />
-          </div>
-          <button
-            type="submit"
-            disabled={submitting}
-            data-testid="auth-login-submit"
-            className="w-full min-h-[42px] rounded-xl bg-[#D4AE58] hover:bg-[#E5BF69] disabled:opacity-50 text-[#0B1528] text-xs font-extrabold cursor-pointer transition-colors"
-          >
-            {submitting ? 'در حال ورود...' : 'ورود به حساب'}
-          </button>
-        </form>
-      ) : (
+              <div className="text-[11px] font-bold theme-heading">
+                حساب شما در انتظار تأیید ایمیل است
+              </div>
+              <div className="flex gap-1.5">
+                <input
+                  type="email"
+                  dir="ltr"
+                  data-testid="auth-inline-resend-email"
+                  value={resendEmail}
+                  onChange={(e) => setResendEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  className="flex-1 min-h-[36px] px-2.5 rounded-lg theme-input border text-xs text-left focus:outline-none focus:border-[#0D8A8A]"
+                />
+                <button
+                  type="button"
+                  disabled={submitting}
+                  data-testid="auth-inline-resend-btn"
+                  onClick={() => handleResendVerification()}
+                  className="px-3 min-h-[36px] rounded-lg bg-[#0D8A8A] hover:bg-[#0F9F9F] disabled:opacity-50 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0 transition-colors"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>ارسال مجدد</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {mode === 'register' && (
         <form onSubmit={handleRegisterSubmit} className="space-y-2.5">
           <div>
             <label
@@ -434,6 +864,125 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
             className="w-full min-h-[42px] rounded-xl bg-[#D4AE58] hover:bg-[#E5BF69] disabled:opacity-50 text-[#0B1528] text-xs font-extrabold cursor-pointer transition-colors"
           >
             {submitting ? 'در حال ثبت‌نام...' : 'ساخت حساب کاربری'}
+          </button>
+        </form>
+      )}
+
+      {mode === 'pending_verify' && (
+        <form
+          onSubmit={handleResendVerification}
+          className="space-y-2.5"
+          data-testid="auth-pending-verify-panel"
+        >
+          <div className="p-2.5 rounded-xl border border-[#D4AE58]/40 bg-[#D4AE58]/10 space-y-1">
+            <div className="flex items-center gap-1.5 text-xs font-extrabold theme-heading">
+              <MailCheck className="w-4 h-4 theme-accent-gold shrink-0" />
+              <span>تأیید ایمیل برای فعال‌سازی حساب</span>
+            </div>
+            <p className="text-[11px] theme-muted leading-relaxed">
+              پس از باز کردن لینک تأیید در ایمیل، حساب شما فعال می‌شود و می‌توانید
+              وارد شوید.
+            </p>
+          </div>
+
+          <div>
+            <label
+              htmlFor="auth-resend-email"
+              className="block text-[11px] font-bold theme-heading mb-1"
+            >
+              ایمیل برای ارسال مجدد لینک تأیید
+            </label>
+            <input
+              id="auth-resend-email"
+              data-testid="auth-resend-email"
+              type="email"
+              dir="ltr"
+              autoComplete="email"
+              value={resendEmail}
+              onChange={(e) => setResendEmail(e.target.value)}
+              placeholder="you@example.com"
+              required
+              className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={submitting}
+            data-testid="auth-resend-submit"
+            className="w-full min-h-[40px] rounded-xl bg-[#0D8A8A] hover:bg-[#0F9F9F] disabled:opacity-50 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>{submitting ? 'در حال ارسال...' : 'ارسال مجدد ایمیل تأیید'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setMode('login');
+              resetFeedback();
+            }}
+            className="w-full min-h-[36px] rounded-xl border border-[var(--eyvan-gold-border)] text-xs font-bold theme-muted hover:theme-heading cursor-pointer transition-colors"
+          >
+            بازگشت به صفحه ورود
+          </button>
+        </form>
+      )}
+
+      {mode === 'forgot' && (
+        <form
+          onSubmit={handleForgotSubmit}
+          className="space-y-2.5"
+          data-testid="auth-forgot-panel"
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-xs font-extrabold theme-heading">
+              <KeyRound className="w-4 h-4 theme-accent-gold shrink-0" />
+              <span>بازیابی رمز عبور</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setMode('login');
+                resetFeedback();
+              }}
+              className="text-[11px] font-bold theme-muted hover:theme-heading flex items-center gap-1 cursor-pointer"
+            >
+              <ArrowRight className="w-3.5 h-3.5" />
+              <span>بازگشت به ورود</span>
+            </button>
+          </div>
+          <p className="text-[11px] theme-muted leading-relaxed">
+            ایمیل ثبت‌شده خود را وارد کنید تا لینک یک‌بارمصرف بازیابی رمز عبور
+            برای شما ارسال شود.
+          </p>
+          <div>
+            <label
+              htmlFor="auth-forgot-email"
+              className="block text-[11px] font-bold theme-heading mb-1"
+            >
+              ایمیل
+            </label>
+            <input
+              id="auth-forgot-email"
+              data-testid="auth-forgot-email"
+              type="email"
+              dir="ltr"
+              autoComplete="email"
+              value={forgotEmail}
+              onChange={(e) => setForgotEmail(e.target.value)}
+              placeholder="you@example.com"
+              required
+              className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={submitting}
+            data-testid="auth-forgot-submit"
+            className="w-full min-h-[42px] rounded-xl bg-[#D4AE58] hover:bg-[#E5BF69] disabled:opacity-50 text-[#0B1528] text-xs font-extrabold cursor-pointer transition-colors"
+          >
+            {submitting ? 'در حال ارسال...' : 'ارسال لینک بازیابی رمز عبور'}
           </button>
         </form>
       )}

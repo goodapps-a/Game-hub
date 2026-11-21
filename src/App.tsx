@@ -9,6 +9,8 @@ import { PLATFORM_ASSETS } from './platform/data/assets';
 import { createInitialGuestProfile } from './platform/data/guestDefaults';
 import {
   AuthUserSummary,
+  PendingAuthUrlAction,
+  consumeAuthActionFromUrlHash,
   fetchCurrentAuthSession,
 } from './platform/auth/authClient';
 import { TopBar } from './platform/components/TopBar';
@@ -83,6 +85,8 @@ export default function App() {
   );
   const [authUser, setAuthUser] = useState<AuthUserSummary | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [pendingAuthAction, setPendingAuthAction] =
+    useState<PendingAuthUrlAction | null>(null);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isInChatRoom, setIsInChatRoom] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
@@ -134,6 +138,22 @@ export default function App() {
       });
     return () => {
       active = false;
+    };
+  }, []);
+
+  // Capture & immediately scrub `#verify-email=` / `#reset-password=` tokens from URL
+  useEffect(() => {
+    const syncAuthHashAction = () => {
+      const action = consumeAuthActionFromUrlHash();
+      if (action) {
+        setPendingAuthAction(action);
+        setIsProfileOpen(true);
+      }
+    };
+    syncAuthHashAction();
+    window.addEventListener('hashchange', syncAuthHashAction);
+    return () => {
+      window.removeEventListener('hashchange', syncAuthHashAction);
     };
   }, []);
 
@@ -377,6 +397,8 @@ export default function App() {
           authUser={authUser}
           authLoading={authLoading}
           onAuthChange={applyAuthenticatedUser}
+          pendingAuthAction={pendingAuthAction}
+          onClearPendingAuthAction={() => setPendingAuthAction(null)}
         />
       </div>
     </div>

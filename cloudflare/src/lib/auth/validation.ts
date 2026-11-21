@@ -238,3 +238,35 @@ export function validateLoginPayload(
     password: body.password,
   };
 }
+
+const OPAQUE_TOKEN_RE = /^[A-Za-z0-9_-]{32,128}$/;
+
+export function validateOpaqueActionToken(
+  raw: unknown
+): { ok: true; token: string } | ValidationFailure {
+  if (typeof raw !== 'string') {
+    return { ok: false, message: 'توکن ارسال‌شده معتبر نیست.' };
+  }
+  const token = raw.trim();
+  if (!OPAQUE_TOKEN_RE.test(token)) {
+    return { ok: false, message: 'توکن ارسال‌شده معتبر نیست.' };
+  }
+  return { ok: true, token };
+}
+
+export function validateResetPasswordPayload(
+  body: Record<string, unknown>
+): { ok: true; token: string; password: string } | ValidationFailure {
+  const tokenRes = validateOpaqueActionToken(body.token);
+  if (tokenRes.ok === false) return tokenRes;
+
+  const passRes = validateNewPassword(body.password, body.confirmPassword);
+  if (passRes.ok === false) return passRes;
+
+  return {
+    ok: true,
+    token: tokenRes.token,
+    password: passRes.password,
+  };
+}
+

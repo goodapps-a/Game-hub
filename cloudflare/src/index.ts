@@ -32,6 +32,14 @@ import {
   parseSessionCookieFromHeader,
 } from './lib/sessionCookie';
 import { handleAuthHttpRequest } from './lib/auth/httpHandler';
+import {
+  createEmailSender,
+  resolvePublicAppBaseUrl,
+} from './lib/auth/emailService';
+import {
+  evaluateOriginPolicy,
+  resolveClientIp,
+} from './lib/auth/securityPolicy';
 
 export { HokmRoomDO };
 
@@ -49,57 +57,75 @@ function generateShortRoomCode(): string {
   return code;
 }
 
-function parseAllowedOrigins(env: CfWorkerEnv): string[] {
-  return (env.ALLOWED_ORIGINS ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+function isWorkerProduction(request: Request, env: CfWorkerEnv): boolean {
+  const envName = env.ENVIRONMENT?.trim().toLowerCase();
+  if (envName === 'production') return true;
+  if (envName === 'development' || envName === 'test') return false;
+  try {
+    const reqUrl = new URL(request.url);
+    return reqUrl.hostname !== 'localhost' && reqUrl.hostname !== '127.0.0.1';
+  } catch {
+    return true;
+  }
 }
 
 /**
- * Checks whether the request's Origin is permitted:
- * - No Origin header (same-origin navigation / non-browser client): allowed.
- * - Origin matches request's own origin: allowed.
- * - If `ALLOWED_ORIGINS` is configured: Origin MUST be in the allowlist.
- * - If `ALLOWED_ORIGINS` is empty (local dev): allow localhost/127.0.0.1 only.
- * Never returns wildcard `*`.
+ * Evaluates Origin / Referer / Sec-Fetch-Site using the shared strict security policy:
+ * - Zero wildcards (`*` or `*.run.app`).
+ * - Exact Same-Origin or explicitly configured `ALLOWED_ORIGINS` / `APP_URL` only.
+ * - In Production, missing `ALLOWED_ORIGINS` never falls back to localhost or wildcard access.
  */
 export function isOriginAllowed(request: Request, env: CfWorkerEnv): boolean {
-  const origin = request.headers.get('Origin');
-  if (!origin) return true;
-
-  let parsedOrigin: URL;
-  let reqUrl: URL;
+  let requestOrigin = '';
   try {
-    parsedOrigin = new URL(origin);
-    reqUrl = new URL(request.url);
+    requestOrigin = new URL(request.url).origin;
   } catch {
     return false;
   }
 
-  if (parsedOrigin.origin === reqUrl.origin) return true;
-
-  const allowed = parseAllowedOrigins(env);
-  if (allowed.length > 0) {
-    return allowed.includes(parsedOrigin.origin);
-  }
-
-  return (
-    parsedOrigin.hostname === 'localhost' ||
-    parsedOrigin.hostname === '127.0.0.1'
-  );
+  return evaluateOriginPolicy({
+    originHeader: request.headers.get('Origin'),
+    refererHeader: request.headers.get('Referer'),
+    secFetchSite: request.headers.get('Sec-Fetch-Site'),
+    requestOrigin,
+    method: request.method,
+    config: {
+      allowedOriginsRaw: env.ALLOWED_ORIGINS,
+      appUrlRaw: env.APP_URL ?? env.PUBLIC_APP_URL,
+      isProduction: isWorkerProduction(request, env),
+    },
+  }).allowed;
 }
 
 function buildCorsHeaders(request: Request, env: CfWorkerEnv): Record<string, string> {
-  const origin = request.headers.get('Origin');
   const base: Record<string, string> = {
     'X-Content-Type-Options': 'nosniff',
   };
 
-  if (origin && isOriginAllowed(request, env)) {
+  let requestOrigin = '';
+  try {
+    requestOrigin = new URL(request.url).origin;
+  } catch {
+    return base;
+  }
+
+  const evaluation = evaluateOriginPolicy({
+    originHeader: request.headers.get('Origin'),
+    refererHeader: request.headers.get('Referer'),
+    secFetchSite: request.headers.get('Sec-Fetch-Site'),
+    requestOrigin,
+    method: request.method,
+    config: {
+      allowedOriginsRaw: env.ALLOWED_ORIGINS,
+      appUrlRaw: env.APP_URL ?? env.PUBLIC_APP_URL,
+      isProduction: isWorkerProduction(request, env),
+    },
+  });
+
+  if (evaluation.allowed && evaluation.corsOrigin) {
     return {
       ...base,
-      'Access-Control-Allow-Origin': origin,
+      'Access-Control-Allow-Origin': evaluation.corsOrigin,
       'Access-Control-Allow-Credentials': 'true',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, X-Requested-With',
@@ -183,10 +209,21 @@ export default {
 
     // 1b) Central Platform Authentication (`/api/auth/*` — independent of Hokm room sessions)
     if (url.pathname.startsWith('/api/auth/')) {
-      const clientIp =
-        request.headers.get('CF-Connecting-IP') ??
-        request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ??
-        'unknown';
+      // On Cloudflare Workers, trust ONLY edge-injected CF-Connecting-IP (never raw X-Forwarded-For)
+      const clientIp = resolveClientIp({
+        cfConnectingIp: request.headers.get('CF-Connecting-IP'),
+      });
+      const emailSender =
+        env.EMAIL_SENDER ??
+        createEmailSender({
+          provider: env.EMAIL_PROVIDER,
+          resendApiKey: env.RESEND_API_KEY,
+          emailFrom: env.EMAIL_FROM,
+        });
+      const publicAppBaseUrl = resolvePublicAppBaseUrl(
+        [env.PUBLIC_APP_URL, env.APP_URL, env.ALLOWED_ORIGINS],
+        request.url
+      );
       const authRes = await handleAuthHttpRequest(request, url.pathname, {
         db: env.EYVAN_DB,
         corsHeaders: cors,
@@ -196,6 +233,8 @@ export default {
         clientIp,
         userAgent: request.headers.get('User-Agent') ?? 'unknown',
         sessionTtlSec: env.AUTH_SESSION_TTL_SEC,
+        publicAppBaseUrl,
+        emailSender,
       });
       if (authRes) return authRes;
     }

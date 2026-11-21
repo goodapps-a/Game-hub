@@ -13,6 +13,14 @@ ALLOWED_ORIGINS = ""
 # OPTIONAL FOR CROSS-SUBDOMAIN PRODUCTION (e.g. play.example.com + api.example.com):
 # Set COOKIE_DOMAIN = ".example.com" so both set and clear cookies share the exact parent domain.
 # COOKIE_DOMAIN = ""
+# Set ENVIRONMENT = "production" on production deploys
+ENVIRONMENT = "production"
+# Public frontend origin used inside verification & password reset links (e.g. "https://eyvan.example.com")
+PUBLIC_APP_URL = ""
+# Transactional email provider for C2 (configure RESEND_API_KEY via `wrangler secret put RESEND_API_KEY`, NEVER commit keys)
+EMAIL_PROVIDER = "resend"
+EMAIL_FROM = "Eyvan <no-reply@example.com>"
+
 
 [[durable_objects.bindings]]
 name = "HOKM_ROOM"
