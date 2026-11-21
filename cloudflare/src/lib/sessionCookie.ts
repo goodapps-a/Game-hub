@@ -62,6 +62,19 @@ export function parseSessionCookieFromHeader(
   return null;
 }
 
+export interface CookieHeaderOptions {
+  readonly domain?: string;
+}
+
+const COOKIE_DOMAIN_RE = /^\.?[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$/;
+
+function sanitizeCookieDomain(domain?: string): string | null {
+  if (!domain) return null;
+  const trimmed = domain.trim().toLowerCase();
+  if (!trimmed || !COOKIE_DOMAIN_RE.test(trimmed)) return null;
+  return trimmed;
+}
+
 export function isHttpsRequest(request: Request): boolean {
   const forwardedProto = request.headers.get('X-Forwarded-Proto');
   if (forwardedProto) {
@@ -76,7 +89,8 @@ export function isHttpsRequest(request: Request): boolean {
 
 export function buildSetSessionCookieHeader(
   session: ParsedSessionCookie,
-  secure: boolean
+  secure: boolean,
+  options?: CookieHeaderOptions
 ): string {
   const value = encodeURIComponent(
     `${session.roomCode}.${session.playerId}.${session.sessionToken}`
@@ -87,6 +101,10 @@ export function buildSetSessionCookieHeader(
     `Max-Age=${SESSION_COOKIE_MAX_AGE_SEC}`,
     'HttpOnly',
   ];
+  const domain = sanitizeCookieDomain(options?.domain);
+  if (domain) {
+    attrs.push(`Domain=${domain}`);
+  }
   if (secure) {
     attrs.push('Secure', 'SameSite=None', 'Partitioned');
   } else {
@@ -95,13 +113,20 @@ export function buildSetSessionCookieHeader(
   return attrs.join('; ');
 }
 
-export function buildClearSessionCookieHeader(secure: boolean): string {
+export function buildClearSessionCookieHeader(
+  secure: boolean,
+  options?: CookieHeaderOptions
+): string {
   const attrs = [
     `${SESSION_COOKIE_NAME}=`,
     'Path=/',
     'Max-Age=0',
     'HttpOnly',
   ];
+  const domain = sanitizeCookieDomain(options?.domain);
+  if (domain) {
+    attrs.push(`Domain=${domain}`);
+  }
   if (secure) {
     attrs.push('Secure', 'SameSite=None', 'Partitioned');
   } else {

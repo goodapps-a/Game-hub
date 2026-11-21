@@ -122,15 +122,10 @@ export interface RoomEventNotice {
 
 // ---------------------------------------------------------------------------
 // Client -> Server WebSocket Messages (Versioned + Action-Idempotent)
+// NOTE: WebSocket authentication is performed at HTTP Upgrade via HttpOnly cookie.
+// No sessionToken ever exists in client messages.
 // ---------------------------------------------------------------------------
 export type ClientMessage =
-  | {
-      readonly protocolVersion: typeof PROTOCOL_VERSION;
-      readonly type: 'auth';
-      readonly roomCode: string;
-      readonly playerId: string;
-      readonly sessionToken: string;
-    }
   | {
       readonly protocolVersion: typeof PROTOCOL_VERSION;
       readonly type: 'ping';
@@ -216,25 +211,19 @@ export type ServerMessage =
     };
 
 // ---------------------------------------------------------------------------
-// HTTP REST DTOs
+// HTTP REST DTOs (Strictly Non-Secret: sessionToken stays server-side in HttpOnly cookie)
 // ---------------------------------------------------------------------------
-export interface CreateRoomResponse {
+export interface PublicRoomSessionInfo {
   readonly roomId: string;
   readonly roomCode: string;
   readonly playerId: string;
   readonly canonicalSeat: Seat;
-  readonly sessionToken: string;
   readonly wsPath: string;
 }
 
-export interface JoinRoomResponse {
-  readonly roomId: string;
-  readonly roomCode: string;
-  readonly playerId: string;
-  readonly canonicalSeat: Seat;
-  readonly sessionToken: string;
-  readonly wsPath: string;
-}
+export type CreateRoomResponse = PublicRoomSessionInfo;
+export type JoinRoomResponse = PublicRoomSessionInfo;
+export type ResumeSessionResponse = PublicRoomSessionInfo;
 
 export interface PublicRoomSummary {
   readonly roomId: string;
@@ -373,35 +362,6 @@ export function parseClientMessage(raw: string):
   }
 
   switch (obj.type) {
-    case 'auth': {
-      const roomCode = sanitizeRoomCode(obj.roomCode);
-      if (
-        !roomCode ||
-        typeof obj.playerId !== 'string' ||
-        obj.playerId.length < 4 ||
-        obj.playerId.length > 80 ||
-        typeof obj.sessionToken !== 'string' ||
-        obj.sessionToken.length < 16 ||
-        obj.sessionToken.length > 160
-      ) {
-        return {
-          ok: false,
-          code: 'UNAUTHORIZED',
-          reason: 'Invalid auth credentials format.',
-        };
-      }
-      return {
-        ok: true,
-        message: {
-          protocolVersion: PROTOCOL_VERSION,
-          type: 'auth',
-          roomCode,
-          playerId: obj.playerId,
-          sessionToken: obj.sessionToken,
-        },
-      };
-    }
-
     case 'ping': {
       const clientTime =
         typeof obj.clientTime === 'number' && Number.isFinite(obj.clientTime)

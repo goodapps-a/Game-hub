@@ -10,7 +10,18 @@ import {
 } from './perspective';
 import { HokmRoomController } from './roomController';
 import { parseClientMessage, PROTOCOL_VERSION } from './protocol';
+import {
+  buildOnlineHttpUrl,
+  buildOnlineWsUrl,
+  resolveOnlineApiBase,
+} from './client';
 import { EyvanDatabase } from '../../../../server/database';
+import { HokmRoomManager } from '../../../../server/roomManager';
+import {
+  buildClearSessionCookieHeader,
+  buildSetSessionCookieHeader,
+} from '../../../../cloudflare/src/lib/sessionCookie';
+
 
 function makeSeededRng(seed: number): () => number {
   let s = seed >>> 0;
@@ -535,6 +546,141 @@ describe('Online Hokm Room Rules & Security Boundaries', () => {
     assert.equal(stats.losses, 1);
     db.close();
   });
+
+  it('rejects legacy WebSocket auth payloads containing sessionToken', () => {
+    const legacyAuth = parseClientMessage(
+      JSON.stringify({
+        protocolVersion: PROTOCOL_VERSION,
+        type: 'auth',
+        roomCode: 'ABC123',
+        playerId: 'p1',
+        sessionToken: 'deadbeefdeadbeefdeadbeefdeadbeef',
+      })
+    );
+    assert.equal(legacyAuth.ok, false);
+    if (!legacyAuth.ok) assert.equal(legacyAuth.code, 'INVALID_MESSAGE');
+  });
+
+  it('standardizes VITE_ONLINE_API_BASE across HTTP, WS, Dev fallback, and URL validation', () => {
+    // 1) Dev / unset fallback -> same-origin relative HTTP and window.location WS
+    assert.equal(resolveOnlineApiBase({}), '');
+    assert.equal(resolveOnlineApiBase({ VITE_ONLINE_API_BASE: '   ' }), '');
+    assert.equal(buildOnlineHttpUrl('/api/rooms', {}), '/api/rooms');
+    assert.equal(
+      buildOnlineWsUrl(
+        '/ws/rooms/ABC123',
+        {},
+        { protocol: 'http:', host: 'localhost:3000' }
+      ),
+      'ws://localhost:3000/ws/rooms/ABC123'
+    );
+
+    // 2) Production HTTPS Worker URL with trailing slash -> cleanly normalized HTTP & WSS
+    const prodEnv = {
+      VITE_ONLINE_API_BASE: ' https://api.eyvan-hokm.ir/ ',
+    };
+    assert.equal(resolveOnlineApiBase(prodEnv), 'https://api.eyvan-hokm.ir');
+    assert.equal(
+      buildOnlineHttpUrl('/api/rooms', prodEnv),
+      'https://api.eyvan-hokm.ir/api/rooms'
+    );
+    assert.equal(
+      buildOnlineWsUrl('/ws/rooms/ABC123', prodEnv),
+      'wss://api.eyvan-hokm.ir/ws/rooms/ABC123'
+    );
+
+    // 3) Subpath prefix support without double slashes
+    const subpathEnv = {
+      VITE_ONLINE_API_BASE: 'https://eyvan-hokm.ir/worker/',
+    };
+    assert.equal(
+      buildOnlineHttpUrl('api/session/resume', subpathEnv),
+      'https://eyvan-hokm.ir/worker/api/session/resume'
+    );
+    assert.equal(
+      buildOnlineWsUrl('/ws/rooms/K7M4P2', subpathEnv),
+      'wss://eyvan-hokm.ir/worker/ws/rooms/K7M4P2'
+    );
+
+    // 4) Invalid protocol/URL throws clear diagnostic error
+    assert.throws(() =>
+      resolveOnlineApiBase({ VITE_ONLINE_API_BASE: 'ftp://bad.example' })
+    );
+    assert.throws(() =>
+      resolveOnlineApiBase({ VITE_ONLINE_API_BASE: 'not-a-valid-url' })
+    );
+  });
+
+  it('keeps sessionToken strictly out of HokmRoomManager public responses and matches Set/Clear cookie Domain & Path attributes', () => {
+    const db = new EyvanDatabase(':memory:');
+    const manager = new HokmRoomManager({ db, disconnectGraceMs: 60_000 });
+
+    const created = manager.createRoom({
+      username: 'amir_local',
+      avatarCode: 'portrait',
+    });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+
+    // HTTP DTO response MUST NOT contain sessionToken
+    assert.equal(JSON.stringify(created.response).includes('sessionToken'), false);
+    assert.equal(typeof created.sessionToken, 'string');
+    assert.equal(created.sessionToken.length >= 24, true);
+
+    const joined = manager.joinRoom(created.response.roomCode, {
+      username: 'sara_local',
+      avatarCode: 'shamsa',
+    });
+    assert.equal(joined.ok, true);
+    if (!joined.ok) return;
+    assert.equal(JSON.stringify(joined.response).includes('sessionToken'), false);
+
+    const resumed = manager.resumeSession(
+      created.response.roomCode,
+      created.response.playerId,
+      created.sessionToken
+    );
+    assert.equal(resumed.ok, true);
+    if (resumed.ok) {
+      assert.equal(JSON.stringify(resumed.response).includes('sessionToken'), false);
+      assert.equal(resumed.response.playerId, created.response.playerId);
+    }
+
+    // Wrong token rejected on resume
+    const badResume = manager.resumeSession(
+      created.response.roomCode,
+      created.response.playerId,
+      '00000000000000000000000000000000'
+    );
+    assert.equal(badResume.ok, false);
+
+    // Set-Cookie and Clear-Cookie emit matching Path=/ and optional Domain
+    const setHdr = buildSetSessionCookieHeader(
+      {
+        roomCode: created.response.roomCode,
+        playerId: created.response.playerId,
+        sessionToken: created.sessionToken,
+      },
+      true,
+      { domain: '.eyvan-hokm.ir' }
+    );
+    const clearHdr = buildClearSessionCookieHeader(true, {
+      domain: '.eyvan-hokm.ir',
+    });
+    assert.ok(setHdr.includes('HttpOnly'));
+    assert.ok(setHdr.includes('Secure'));
+    assert.ok(setHdr.includes('Path=/'));
+    assert.ok(setHdr.includes('Domain=.eyvan-hokm.ir'));
+    assert.ok(clearHdr.includes('Max-Age=0'));
+    assert.ok(clearHdr.includes('HttpOnly'));
+    assert.ok(clearHdr.includes('Secure'));
+    assert.ok(clearHdr.includes('Path=/'));
+    assert.ok(clearHdr.includes('Domain=.eyvan-hokm.ir'));
+
+    manager.dispose();
+    db.close();
+  });
 });
+
 
 

@@ -7,20 +7,14 @@ import {
   OnlineErrorCode,
   PlayerOnlineStats,
   PROTOCOL_VERSION,
+  PublicRoomSessionInfo,
   PublicRoomSummary,
   RoomEventNotice,
   RoomSnapshot,
   ServerMessage,
 } from './protocol';
 
-export interface OnlineSessionCredentials {
-  readonly roomId: string;
-  readonly roomCode: string;
-  readonly playerId: string;
-  readonly canonicalSeat: Seat;
-  readonly sessionToken: string;
-  readonly wsPath: string;
-}
+export type OnlineSessionCredentials = PublicRoomSessionInfo;
 
 export type ConnectionState =
   | 'disconnected'
@@ -36,24 +30,90 @@ export interface OnlineClientCallbacks {
   onClosedByServer?: (reason: string) => void;
 }
 
-function getApiBase(): string {
-  const envBase = (import.meta as unknown as { env?: Record<string, string> })
-    .env?.VITE_ONLINE_API_BASE;
-  if (envBase && envBase.trim().length > 0) {
-    return envBase.replace(/\/+$/, '');
-  }
-  return '';
+type EnvRecord = Record<string, string | boolean | undefined>;
+
+function readViteEnv(): EnvRecord {
+  return (
+    ((import.meta as unknown as { env?: EnvRecord }).env) ?? {}
+  );
 }
 
-function buildWsUrl(wsPath: string): string {
-  const apiBase = getApiBase();
-  if (apiBase) {
-    const u = new URL(apiBase);
-    const proto = u.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${proto}//${u.host}${wsPath}`;
+/**
+ * Resolves and validates `VITE_ONLINE_API_BASE`.
+ * - Empty/unset -> '' (same-origin fallback for local Express dev & same-origin Worker routes).
+ * - Non-empty -> trimmed, validated http(s) URL with trailing slashes stripped.
+ */
+export function resolveOnlineApiBase(envOverride?: EnvRecord): string {
+  const env = envOverride ?? readViteEnv();
+  const raw = env.VITE_ONLINE_API_BASE;
+  if (typeof raw !== 'string') return '';
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(
+      `نشانی اتصال به سرور بازی (VITE_ONLINE_API_BASE) نامعتبر است: "${trimmed}"`
+    );
   }
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${window.location.host}${wsPath}`;
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(
+      `پروتکل VITE_ONLINE_API_BASE باید http یا https باشد (مقدار فعلی: ${parsed.protocol}).`
+    );
+  }
+  const cleanPath = parsed.pathname.replace(/\/+$/, '');
+  return `${parsed.origin}${cleanPath === '/' ? '' : cleanPath}`;
+}
+
+export function buildOnlineHttpUrl(
+  apiPath: string,
+  envOverride?: EnvRecord
+): string {
+  const normalizedPath = apiPath.startsWith('/') ? apiPath : `/${apiPath}`;
+  const base = resolveOnlineApiBase(envOverride);
+  if (!base) return normalizedPath;
+  return `${base}${normalizedPath}`;
+}
+
+export function buildOnlineWsUrl(
+  wsPath: string,
+  envOverride?: EnvRecord,
+  locationLike?: { protocol: string; host: string }
+): string {
+  const normalizedPath = wsPath.startsWith('/') ? wsPath : `/${wsPath}`;
+  const base = resolveOnlineApiBase(envOverride);
+  if (base) {
+    const u = new URL(base);
+    const proto = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    const basePath = u.pathname.replace(/\/+$/, '');
+    const prefix = basePath === '/' ? '' : basePath;
+    return `${proto}//${u.host}${prefix}${normalizedPath}`;
+  }
+  const loc = locationLike ?? window.location;
+  const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${loc.host}${normalizedPath}`;
+}
+
+async function parseApiJson<T>(
+  res: Response,
+  fallbackMessage: string,
+  envOverride?: EnvRecord
+): Promise<T> {
+  const contentType = res.headers.get('content-type') ?? '';
+  if (!contentType.toLowerCase().includes('application/json')) {
+    const env = envOverride ?? readViteEnv();
+    const isProd = env.PROD === true || env.NODE_ENV === 'production';
+    const hasConfiguredBase = Boolean(resolveOnlineApiBase(env));
+    if (isProd && !hasConfiguredBase) {
+      throw new Error(
+        'اتصال به سرور آنلاین برقرار نشد. در تنظیمات انتشار (Cloudflare Pages) متغیر VITE_ONLINE_API_BASE را به نشانی Worker تنظیم کنید یا مسیر /api/* را به Worker متصل نمایید.'
+      );
+    }
+    throw new Error(fallbackMessage);
+  }
+  return (await res.json()) as T;
 }
 
 export function createActionId(): string {
@@ -72,7 +132,7 @@ export async function createOnlineRoom(params: {
   avatarCode: string;
   targetMatchScore?: number;
 }): Promise<CreateRoomResponse> {
-  const res = await fetch(`${getApiBase()}/api/rooms`, {
+  const res = await fetch(buildOnlineHttpUrl('/api/rooms'), {
     method: 'POST',
     credentials: 'include',
     headers: {
@@ -81,10 +141,9 @@ export async function createOnlineRoom(params: {
     },
     body: JSON.stringify(params),
   });
-  const data = (await res.json()) as CreateRoomResponse & {
-    error?: string;
-    message?: string;
-  };
+  const data = await parseApiJson<
+    CreateRoomResponse & { error?: string; message?: string }
+  >(res, 'ساخت اتاق ناموفق بود.');
   if (!res.ok) {
     throw new Error(data.message ?? data.error ?? 'ساخت اتاق ناموفق بود.');
   }
@@ -98,7 +157,7 @@ export async function joinOnlineRoom(params: {
   preferredSeat?: Seat;
 }): Promise<JoinRoomResponse> {
   const code = encodeURIComponent(params.roomCode.trim().toUpperCase());
-  const res = await fetch(`${getApiBase()}/api/rooms/${code}/join`, {
+  const res = await fetch(buildOnlineHttpUrl(`/api/rooms/${code}/join`), {
     method: 'POST',
     credentials: 'include',
     headers: {
@@ -111,10 +170,9 @@ export async function joinOnlineRoom(params: {
       preferredSeat: params.preferredSeat,
     }),
   });
-  const data = (await res.json()) as JoinRoomResponse & {
-    error?: string;
-    message?: string;
-  };
+  const data = await parseApiJson<
+    JoinRoomResponse & { error?: string; message?: string }
+  >(res, 'ورود به اتاق ناموفق بود.');
   if (!res.ok) {
     throw new Error(data.message ?? data.error ?? 'ورود به اتاق ناموفق بود.');
   }
@@ -123,13 +181,13 @@ export async function joinOnlineRoom(params: {
 
 /**
  * Attempts server-verified session recovery via the HttpOnly cookie after page refresh.
- * Never reads or writes tokens in localStorage or sessionStorage.
+ * Never reads, stores, or receives `sessionToken` in JavaScript.
  */
 export async function resumeOnlineSession(
   expectedRoomCode?: string
 ): Promise<OnlineSessionCredentials | null> {
   try {
-    const res = await fetch(`${getApiBase()}/api/session/resume`, {
+    const res = await fetch(buildOnlineHttpUrl('/api/session/resume'), {
       method: 'POST',
       credentials: 'include',
       headers: {
@@ -141,26 +199,64 @@ export async function resumeOnlineSession(
       ),
     });
     if (!res.ok) return null;
-    const data = (await res.json()) as Partial<OnlineSessionCredentials>;
+    const contentType = res.headers.get('content-type') ?? '';
+    if (!contentType.toLowerCase().includes('application/json')) return null;
+    const data = (await res.json()) as Partial<OnlineSessionCredentials> & {
+      active?: boolean;
+    };
     if (
+      data.active === false ||
       !data.roomId ||
       !data.roomCode ||
       !data.playerId ||
       !data.canonicalSeat ||
-      !data.sessionToken ||
       !data.wsPath
     ) {
       return null;
     }
-    return data as OnlineSessionCredentials;
+    return {
+      roomId: data.roomId,
+      roomCode: data.roomCode,
+      playerId: data.playerId,
+      canonicalSeat: data.canonicalSeat,
+      wsPath: data.wsPath,
+    };
   } catch {
     return null;
   }
 }
 
+async function isSessionInvalidatedOnServer(roomCode: string): Promise<boolean> {
+  try {
+    const res = await fetch(buildOnlineHttpUrl('/api/session/resume'), {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'eyvan-client',
+      },
+      body: JSON.stringify({ roomCode }),
+    });
+    if (res.status === 401 || res.status === 403 || res.status === 404) {
+      return true;
+    }
+    if (res.ok) {
+      const contentType = res.headers.get('content-type') ?? '';
+      if (contentType.toLowerCase().includes('application/json')) {
+        const data = (await res.json()) as { active?: boolean };
+        if (data.active === false) return true;
+      }
+    }
+    return false;
+  } catch {
+    // Network offline / transient failure -> allow reconnect loop to keep retrying
+    return false;
+  }
+}
+
 export async function clearOnlineSession(): Promise<void> {
   try {
-    await fetch(`${getApiBase()}/api/session/clear`, {
+    await fetch(buildOnlineHttpUrl('/api/session/clear'), {
       method: 'POST',
       credentials: 'include',
       headers: {
@@ -176,7 +272,7 @@ export async function fetchRoomSummary(
   roomCode: string
 ): Promise<PublicRoomSummary | null> {
   const code = encodeURIComponent(roomCode.trim().toUpperCase());
-  const res = await fetch(`${getApiBase()}/api/rooms/${code}`);
+  const res = await fetch(buildOnlineHttpUrl(`/api/rooms/${code}`));
   if (res.status === 404) return null;
   if (!res.ok) return null;
   return (await res.json()) as PublicRoomSummary;
@@ -186,7 +282,7 @@ export async function fetchRecentOnlineMatches(): Promise<
   CompletedMatchRecord[]
 > {
   try {
-    const res = await fetch(`${getApiBase()}/api/matches?limit=8`);
+    const res = await fetch(buildOnlineHttpUrl('/api/matches?limit=8'));
     if (!res.ok) return [];
     const data = (await res.json()) as { matches?: CompletedMatchRecord[] };
     return data.matches ?? [];
@@ -200,7 +296,7 @@ export async function fetchPlayerOnlineStats(
 ): Promise<PlayerOnlineStats | null> {
   try {
     const res = await fetch(
-      `${getApiBase()}/api/stats/${encodeURIComponent(username)}`
+      buildOnlineHttpUrl(`/api/stats/${encodeURIComponent(username)}`)
     );
     if (!res.ok) return null;
     return (await res.json()) as PlayerOnlineStats;
@@ -280,21 +376,14 @@ export class HokmOnlineClient {
       isReconnect ? 'reconnecting' : 'connecting'
     );
 
-    const url = buildWsUrl(this.creds.wsPath);
+    const url = buildOnlineWsUrl(this.creds.wsPath);
     const socket = new WebSocket(url);
     this.ws = socket;
 
     socket.onopen = () => {
       if (this.ws !== socket) return;
-      // Send credentials in the first encrypted frame (never in URL query string!)
-      const authMsg: ClientMessage = {
-        protocolVersion: PROTOCOL_VERSION,
-        type: 'auth',
-        roomCode: this.creds.roomCode,
-        playerId: this.creds.playerId,
-        sessionToken: this.creds.sessionToken,
-      };
-      socket.send(JSON.stringify(authMsg));
+      // HttpOnly cookie authenticates the WebSocket upgrade on the server;
+      // server sends `auth_ok` immediately upon upgrade (no token ever in JS).
     };
 
     socket.onmessage = (ev) => {
@@ -350,6 +439,7 @@ export class HokmOnlineClient {
     socket.onclose = (ev) => {
       if (this.ws !== socket) return;
       this.ws = null;
+      const hadAuthed = this.isAuthenticated;
       this.isAuthenticated = false;
       this.clearTimers();
 
@@ -369,6 +459,24 @@ export class HokmOnlineClient {
 
       if (this.intentionallyClosed) {
         this.callbacks.onConnectionChange?.('disconnected');
+        return;
+      }
+
+      // If handshake was rejected before auth_ok (e.g. 401/404 -> 1006), verify whether
+      // session expired / room closed so we don't spin reconnect loops on a dead cookie.
+      if (!hadAuthed) {
+        void isSessionInvalidatedOnServer(this.creds.roomCode).then((dead) => {
+          if (this.intentionallyClosed) return;
+          if (dead) {
+            this.intentionallyClosed = true;
+            this.callbacks.onConnectionChange?.('disconnected');
+            this.callbacks.onClosedByServer?.(
+              'نشست بازی منقضی شده یا اتاق بسته شده است.'
+            );
+            return;
+          }
+          this.scheduleReconnect();
+        });
         return;
       }
 
@@ -444,7 +552,7 @@ export class HokmOnlineClient {
       return;
     }
     // Queue idempotent gameplay action so brief drops don't lose the player's click
-    if (msg.type !== 'ping' && msg.type !== 'auth') {
+    if (msg.type !== 'ping') {
       this.pendingMessages.push(msg);
       if (this.pendingMessages.length > 10) {
         this.pendingMessages.shift();

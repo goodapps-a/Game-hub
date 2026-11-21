@@ -248,7 +248,7 @@ export class HokmRoomManager {
     avatarCode?: unknown;
     targetMatchScore?: unknown;
   }):
-    | { ok: true; response: CreateRoomResponse }
+    | { ok: true; response: CreateRoomResponse; sessionToken: string }
     | { ok: false; status: number; code: OnlineErrorCode; message: string } {
     const username = sanitizeUsername(input.username);
     if (!username) {
@@ -319,12 +319,12 @@ export class HokmRoomManager {
 
     return {
       ok: true,
+      sessionToken: joinRes.member.sessionToken,
       response: {
         roomId,
         roomCode,
         playerId: joinRes.member.playerId,
         canonicalSeat: joinRes.member.canonicalSeat,
-        sessionToken: joinRes.member.sessionToken,
         wsPath: `/ws/rooms/${roomCode}`,
       },
     };
@@ -338,7 +338,7 @@ export class HokmRoomManager {
       preferredSeat?: Seat;
     }
   ):
-    | { ok: true; response: JoinRoomResponse }
+    | { ok: true; response: JoinRoomResponse; sessionToken: string }
     | { ok: false; status: number; code: OnlineErrorCode; message: string } {
     const roomCode = sanitizeRoomCode(rawRoomCode);
     if (!roomCode) {
@@ -408,12 +408,12 @@ export class HokmRoomManager {
 
     return {
       ok: true,
+      sessionToken: joinRes.member.sessionToken,
       response: {
         roomId: room.controller.roomId,
         roomCode: room.controller.roomCode,
         playerId: joinRes.member.playerId,
         canonicalSeat: joinRes.member.canonicalSeat,
-        sessionToken: joinRes.member.sessionToken,
         wsPath: `/ws/rooms/${room.controller.roomCode}`,
       },
     };
@@ -474,17 +474,21 @@ export class HokmRoomManager {
         roomCode: room.controller.roomCode,
         playerId: verified.member.playerId,
         canonicalSeat: verified.member.canonicalSeat,
-        sessionToken: verified.member.sessionToken,
         wsPath: `/ws/rooms/${room.controller.roomCode}`,
       },
     };
   }
 
   // -------------------------------------------------------------------------
-  // WebSocket Session Attachment & Message Dispatch
+  // WebSocket Session Attachment & Message Dispatch (Cookie-Authenticated)
   // -------------------------------------------------------------------------
 
-  public attachWebSocket(rawRoomCode: string, ws: WebSocket): void {
+  public attachAuthenticatedWebSocket(
+    rawRoomCode: string,
+    playerId: string,
+    sessionToken: string,
+    ws: WebSocket
+  ): void {
     const roomCode = sanitizeRoomCode(rawRoomCode);
     const room = roomCode ? this.rooms.get(roomCode) : undefined;
     if (!room) {
@@ -493,20 +497,59 @@ export class HokmRoomManager {
       return;
     }
 
-    let authedPlayerId: string | null = null;
     const connectionId = crypto.randomUUID();
+    const auth = room.controller.authenticateConnection(
+      playerId,
+      sessionToken,
+      connectionId
+    );
+    if (auth.ok === false) {
+      this.sendError(ws, auth.code, auth.message);
+      ws.close(4003, 'unauthorized');
+      return;
+    }
+
+    const authedPlayerId = auth.member.playerId;
     const rate: SocketRateState = { windowStart: Date.now(), count: 0 };
 
-    const authTimer = setTimeout(() => {
-      if (!authedPlayerId) {
-        this.sendError(ws, 'UNAUTHORIZED', 'مهلت احراز هویت به پایان رسید.');
-        try {
-          ws.close(4003, 'auth_timeout');
-        } catch {
-          // Ignore
-        }
+    // Enforce 1 active socket per player (supersede stale socket cleanly!)
+    const existingSocket = room.socketsByPlayer.get(authedPlayerId);
+    if (existingSocket && existingSocket !== ws) {
+      this.sendError(
+        existingSocket,
+        'SUPERSEDED_CONNECTION',
+        'اتصال جدیدی جایگزین این نشست شد.'
+      );
+      try {
+        existingSocket.close(4001, 'superseded');
+      } catch {
+        // Ignore
       }
-    }, AUTH_HANDSHAKE_TIMEOUT_MS);
+    }
+    room.socketsByPlayer.set(authedPlayerId, ws);
+
+    const viewerSnap = room.controller.getSnapshotForPlayer(authedPlayerId);
+    if (viewerSnap) {
+      this.sendJson(ws, {
+        protocolVersion: PROTOCOL_VERSION,
+        type: 'auth_ok',
+        snapshot: viewerSnap,
+      });
+    }
+
+    // Notify other players of join / reconnect
+    for (const [otherId, otherWs] of room.socketsByPlayer.entries()) {
+      if (otherId === authedPlayerId) continue;
+      const otherSnap = room.controller.getSnapshotForPlayer(otherId);
+      if (otherSnap) {
+        this.sendJson(otherWs, {
+          protocolVersion: PROTOCOL_VERSION,
+          type: 'state_sync',
+          snapshot: otherSnap,
+          event: auth.event,
+        });
+      }
+    }
 
     ws.on('message', (rawData: RawData) => {
       // Rate limit per socket
@@ -535,7 +578,7 @@ export class HokmRoomManager {
 
       const msg = parsed.message;
 
-      // Heartbeat allowed even before or after auth
+      // Heartbeat
       if (msg.type === 'ping') {
         this.sendJson(ws, {
           protocolVersion: PROTOCOL_VERSION,
@@ -543,69 +586,6 @@ export class HokmRoomManager {
           clientTime: msg.clientTime,
           serverTime: Date.now(),
         });
-        return;
-      }
-
-      // First non-ping message MUST be `auth`
-      if (!authedPlayerId) {
-        if (msg.type !== 'auth' || msg.roomCode !== room.controller.roomCode) {
-          this.sendError(ws, 'UNAUTHORIZED', 'ابتدا باید احراز هویت انجام شود.');
-          ws.close(4003, 'unauthorized');
-          return;
-        }
-
-        const auth = room.controller.authenticateConnection(
-          msg.playerId,
-          msg.sessionToken,
-          connectionId
-        );
-        if (auth.ok === false) {
-          this.sendError(ws, auth.code, auth.message);
-          ws.close(4003, 'unauthorized');
-          return;
-        }
-
-        clearTimeout(authTimer);
-        authedPlayerId = auth.member.playerId;
-
-        // Enforce 1 active socket per player (supersede stale socket cleanly!)
-        const existingSocket = room.socketsByPlayer.get(authedPlayerId);
-        if (existingSocket && existingSocket !== ws) {
-          this.sendError(
-            existingSocket,
-            'SUPERSEDED_CONNECTION',
-            'اتصال جدیدی جایگزین این نشست شد.'
-          );
-          try {
-            existingSocket.close(4001, 'superseded');
-          } catch {
-            // Ignore
-          }
-        }
-        room.socketsByPlayer.set(authedPlayerId, ws);
-
-        const viewerSnap = room.controller.getSnapshotForPlayer(authedPlayerId);
-        if (viewerSnap) {
-          this.sendJson(ws, {
-            protocolVersion: PROTOCOL_VERSION,
-            type: 'auth_ok',
-            snapshot: viewerSnap,
-          });
-        }
-
-        // Notify other players of join / reconnect
-        for (const [otherId, otherWs] of room.socketsByPlayer.entries()) {
-          if (otherId === authedPlayerId) continue;
-          const otherSnap = room.controller.getSnapshotForPlayer(otherId);
-          if (otherSnap) {
-            this.sendJson(otherWs, {
-              protocolVersion: PROTOCOL_VERSION,
-              type: 'state_sync',
-              snapshot: otherSnap,
-              event: auth.event,
-            });
-          }
-        }
         return;
       }
 
@@ -620,20 +600,6 @@ export class HokmRoomManager {
           ws.close(4001, 'superseded');
         } catch {
           // Ignore
-        }
-        return;
-      }
-
-      // Authenticated messages
-      if (msg.type === 'auth') {
-        // Already authenticated; resend fresh snapshot
-        const snap = room.controller.getSnapshotForPlayer(authedPlayerId);
-        if (snap) {
-          this.sendJson(ws, {
-            protocolVersion: PROTOCOL_VERSION,
-            type: 'auth_ok',
-            snapshot: snap,
-          });
         }
         return;
       }
@@ -723,8 +689,6 @@ export class HokmRoomManager {
     });
 
     ws.on('close', () => {
-      clearTimeout(authTimer);
-      if (!authedPlayerId) return;
       // Only mark disconnected if THIS socket is still the active socket for the player
       const current = room.socketsByPlayer.get(authedPlayerId);
       if (current === ws) {

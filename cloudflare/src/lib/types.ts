@@ -72,5 +72,6 @@ export interface CfWorkerEnv {
   EYVAN_ASSETS: R2BucketLike;
   DISCONNECT_GRACE_MS?: string;
   ALLOWED_ORIGINS?: string;
+  COOKIE_DOMAIN?: string;
   ROOM_CLEANUP_TTL_MS?: string;
 }

@@ -417,15 +417,20 @@ class CloudflareClusterHarness {
 
   public async connectWebSocket(
     roomCode: string,
-    origin = 'https://eyvan.example'
+    origin = 'https://eyvan.example',
+    cookie?: string
   ): Promise<{
     client: FakeHibernatableWebSocket;
     server: FakeHibernatableWebSocket;
     response: Response;
   }> {
+    const reqHeaders: Record<string, string> = { Upgrade: 'websocket' };
+    if (cookie) {
+      reqHeaders['Cookie'] = cookie;
+    }
     const response = await this.fetch(`/ws/rooms/${roomCode}`, {
       method: 'GET',
-      headers: { Upgrade: 'websocket' },
+      headers: reqHeaders,
       origin,
     });
     const client = (
@@ -518,9 +523,16 @@ interface JoinedPlayer {
   username: string;
   playerId: string;
   canonicalSeat: 'south' | 'east' | 'north' | 'west';
-  sessionToken: string;
+  cookiePair: string;
+  cookieTokenSecret: string;
   client: FakeHibernatableWebSocket;
   server: FakeHibernatableWebSocket;
+}
+
+function extractSessionSecretFromCookiePair(cookiePair: string): string {
+  const raw = decodeURIComponent(cookiePair.split('=').slice(1).join('='));
+  const segments = raw.split('.');
+  return segments[2] ?? '';
 }
 
 async function createFourPlayerAuthenticatedRoom(
@@ -529,7 +541,7 @@ async function createFourPlayerAuthenticatedRoom(
 ): Promise<{ roomCode: string; players: JoinedPlayer[] }> {
   const names = ['amir_pro', 'sara_hokm', 'reza_ace', 'neda_king'];
 
-  // 1) Host creates room via Worker POST /api/rooms
+  // 1) Host creates room via Worker POST /api/rooms (token stays strictly in HttpOnly Set-Cookie)
   const createRes = await cluster.fetch('/api/rooms', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -541,11 +553,19 @@ async function createFourPlayerAuthenticatedRoom(
     }),
   });
   assert.equal(createRes.status, 201);
-  const created = (await createRes.json()) as {
+  const createSetCookie = createRes.headers.get('Set-Cookie');
+  assert.ok(createSetCookie && createSetCookie.includes('eyvan_hokm_sess='));
+  const createCookiePair = createSetCookie.split(';')[0];
+  const createRawText = await createRes.text();
+  assert.equal(
+    createRawText.includes('sessionToken'),
+    false,
+    'POST /api/rooms JSON must NEVER contain sessionToken'
+  );
+  const created = JSON.parse(createRawText) as {
     roomCode: string;
     playerId: string;
     canonicalSeat: 'south' | 'east' | 'north' | 'west';
-    sessionToken: string;
   };
   const roomCode = created.roomCode;
 
@@ -553,13 +573,15 @@ async function createFourPlayerAuthenticatedRoom(
     username: string;
     playerId: string;
     canonicalSeat: 'south' | 'east' | 'north' | 'west';
-    sessionToken: string;
+    cookiePair: string;
+    cookieTokenSecret: string;
   }> = [
     {
       username: names[0],
       playerId: created.playerId,
       canonicalSeat: created.canonicalSeat,
-      sessionToken: created.sessionToken,
+      cookiePair: createCookiePair,
+      cookieTokenSecret: extractSessionSecretFromCookiePair(createCookiePair),
     },
   ];
 
@@ -575,32 +597,38 @@ async function createFourPlayerAuthenticatedRoom(
       }),
     });
     assert.equal(joinRes.status, 200);
-    const j = (await joinRes.json()) as {
+    const joinSetCookie = joinRes.headers.get('Set-Cookie');
+    assert.ok(joinSetCookie && joinSetCookie.includes('eyvan_hokm_sess='));
+    const joinCookiePair = joinSetCookie.split(';')[0];
+    const joinRawText = await joinRes.text();
+    assert.equal(
+      joinRawText.includes('sessionToken'),
+      false,
+      'POST /api/rooms/:code/join JSON must NEVER contain sessionToken'
+    );
+    const j = JSON.parse(joinRawText) as {
       playerId: string;
       canonicalSeat: 'south' | 'east' | 'north' | 'west';
-      sessionToken: string;
     };
     joinedList.push({
       username: names[i],
       playerId: j.playerId,
       canonicalSeat: j.canonicalSeat,
-      sessionToken: j.sessionToken,
+      cookiePair: joinCookiePair,
+      cookieTokenSecret: extractSessionSecretFromCookiePair(joinCookiePair),
     });
   }
 
-  // 3) All 4 open Hibernatable WebSockets and complete `auth` + `set_ready`
+  // 3) All 4 open Hibernatable WebSockets authenticated via HttpOnly Cookie -> immediate `auth_ok` -> `set_ready`
   const players: JoinedPlayer[] = [];
   for (let i = 0; i < joinedList.length; i++) {
     const p = joinedList[i];
-    const conn = await cluster.connectWebSocket(roomCode);
-    assert.equal(conn.response.status, 101);
-    await cluster.sendWs(roomCode, conn.server, {
-      protocolVersion: PROTOCOL_VERSION,
-      type: 'auth',
+    const conn = await cluster.connectWebSocket(
       roomCode,
-      playerId: p.playerId,
-      sessionToken: p.sessionToken,
-    });
+      'https://eyvan.example',
+      p.cookiePair
+    );
+    assert.equal(conn.response.status, 101);
     const msgs = conn.client.drainMessages();
     assert.equal(msgs[0]?.type, 'auth_ok');
 
@@ -883,7 +911,7 @@ describe('Cloudflare HokmRoomDO + Worker + D1 Reliability Suite', () => {
     }
   });
 
-  it('Scenario 4 & 5: disconnect/reconnect recovery, token rejection, AND concurrent reconnect immunity against stale socket close/messages', async () => {
+  it('Scenario 4 & 5: disconnect/reconnect recovery, cookie-upgrade token/seat rejection, AND concurrent reconnect immunity against stale socket close/messages', async () => {
     const cluster = new CloudflareClusterHarness({ seed: 303 });
     try {
       const { roomCode, players } = await createFourPlayerAuthenticatedRoom(
@@ -899,42 +927,70 @@ describe('Cloudflare HokmRoomDO + Worker + D1 Reliability Suite', () => {
       const oldServer = target.server;
       const oldClient = target.client;
 
-      // 1) Wrong session token rejected & socket closed with 4003
-      const intruder = await cluster.connectWebSocket(roomCode);
-      await cluster.sendWs(roomCode, intruder.server, {
+      // 1a) Missing cookie on WS upgrade rejected with 401 BEFORE opening WS
+      const missingCookieWs = await cluster.connectWebSocket(
+        roomCode,
+        'https://eyvan.example'
+      );
+      assert.equal(missingCookieWs.response.status, 401);
+      assert.equal(missingCookieWs.client, undefined);
+
+      // 1b) Wrong session token in cookie rejected at WS upgrade with 401 + cleared cookie
+      const badTokenCookie = `eyvan_hokm_sess=${encodeURIComponent(
+        `${roomCode}.${target.playerId}.deadbeefdeadbeefdeadbeefdeadbeef`
+      )}`;
+      const intruder = await cluster.connectWebSocket(
+        roomCode,
+        'https://eyvan.example',
+        badTokenCookie
+      );
+      assert.equal(intruder.response.status, 401);
+      assert.ok(intruder.response.headers.get('Set-Cookie')?.includes('Max-Age=0'));
+
+      // 2a) Wrong roomCode cookie rejected with 401
+      const wrongRoomCookie = `eyvan_hokm_sess=${encodeURIComponent(
+        `ZZZZZZ.${target.playerId}.${target.cookieTokenSecret}`
+      )}`;
+      const wrongRoomConn = await cluster.connectWebSocket(
+        roomCode,
+        'https://eyvan.example',
+        wrongRoomCookie
+      );
+      assert.equal(wrongRoomConn.response.status, 401);
+
+      // 2b) Cross-seat tampering: Player 0's token paired with target.playerId rejected with 401
+      const crossSeatCookie = `eyvan_hokm_sess=${encodeURIComponent(
+        `${roomCode}.${target.playerId}.${players[0].cookieTokenSecret}`
+      )}`;
+      const crossSeatConn = await cluster.connectWebSocket(
+        roomCode,
+        'https://eyvan.example',
+        crossSeatCookie
+      );
+      assert.equal(crossSeatConn.response.status, 401);
+
+      // 2c) Legacy WS `{ type: 'auth' }` message rejected as INVALID_MESSAGE
+      target.client.drainMessages();
+      await cluster.sendWs(roomCode, target.server, {
         protocolVersion: PROTOCOL_VERSION,
         type: 'auth',
         roomCode,
         playerId: target.playerId,
-        sessionToken: 'deadbeefdeadbeefdeadbeefdeadbeef',
+        sessionToken: target.cookieTokenSecret,
       });
-      assert.equal(intruder.server.closedCode, 4003);
-      const intruderErr = intruder.client.drainMessages()[0];
-      assert.equal(intruderErr?.type, 'error');
-      if (intruderErr?.type === 'error') {
-        assert.equal(intruderErr.code, 'UNAUTHORIZED');
+      const legacyAuthErr = target.client.drainMessages()[0];
+      assert.equal(legacyAuthErr?.type, 'error');
+      if (legacyAuthErr?.type === 'error') {
+        assert.equal(legacyAuthErr.code, 'INVALID_MESSAGE');
       }
 
-      // 2) Wrong roomCode on auth rejected with 4003
-      const wrongRoomConn = await cluster.connectWebSocket(roomCode);
-      await cluster.sendWs(roomCode, wrongRoomConn.server, {
-        protocolVersion: PROTOCOL_VERSION,
-        type: 'auth',
-        roomCode: 'ZZZZZZ',
-        playerId: target.playerId,
-        sessionToken: target.sessionToken,
-      });
-      assert.equal(wrongRoomConn.server.closedCode, 4003);
-
-      // 3) CONCURRENT RECONNECT: target opens ws2 BEFORE ws1 closes!
-      const newConn = await cluster.connectWebSocket(roomCode);
-      await cluster.sendWs(roomCode, newConn.server, {
-        protocolVersion: PROTOCOL_VERSION,
-        type: 'auth',
+      // 3) CONCURRENT RECONNECT via valid HttpOnly cookie: target opens ws2 BEFORE ws1 closes!
+      const newConn = await cluster.connectWebSocket(
         roomCode,
-        playerId: target.playerId,
-        sessionToken: target.sessionToken,
-      });
+        'https://eyvan.example',
+        target.cookiePair
+      );
+      assert.equal(newConn.response.status, 101);
 
       // Old socket MUST be notified SUPERSEDED_CONNECTION and closed with 4001
       assert.equal(oldServer.closedCode, 4001);
@@ -945,7 +1001,7 @@ describe('Cloudflare HokmRoomDO + Worker + D1 Reliability Suite', () => {
         )
       );
 
-      // New socket MUST receive auth_ok with player's exact 5-card hand
+      // New socket MUST receive auth_ok with player's exact 5-card hand immediately upon upgrade
       const newMsgs = newConn.client.drainMessages();
       assert.equal(newMsgs[0]?.type, 'auth_ok');
       if (newMsgs[0]?.type === 'auth_ok') {
@@ -980,7 +1036,7 @@ describe('Cloudflare HokmRoomDO + Worker + D1 Reliability Suite', () => {
         assert.equal(targetSeatView?.disconnectDeadline, null);
       }
 
-      // 5) Genuine disconnect of active newConn -> notifies others, then reconnects cleanly
+      // 5) Genuine disconnect of active newConn -> notifies others, then reconnects cleanly across DO cold restart
       await cluster.closeWs(roomCode, newConn.server, 1006, 'mobile_drop');
       const discNotice = players[0].client
         .drainMessages()
@@ -990,17 +1046,15 @@ describe('Cloudflare HokmRoomDO + Worker + D1 Reliability Suite', () => {
         );
       assert.ok(discNotice, 'Host should receive PLAYER_DISCONNECTED notice');
 
-      // Advance 20s (within 60s grace), cold restart DO, then reconnect
+      // Advance 20s (within 60s grace), cold restart DO, then reconnect via cookie
       cluster.clock += 20_000;
       cluster.simulateColdRestart(roomCode);
-      const recoveredConn = await cluster.connectWebSocket(roomCode);
-      await cluster.sendWs(roomCode, recoveredConn.server, {
-        protocolVersion: PROTOCOL_VERSION,
-        type: 'auth',
+      const recoveredConn = await cluster.connectWebSocket(
         roomCode,
-        playerId: target.playerId,
-        sessionToken: target.sessionToken,
-      });
+        'https://eyvan.example',
+        target.cookiePair
+      );
+      assert.equal(recoveredConn.response.status, 101);
       const recAuth = recoveredConn.client.drainMessages()[0];
       assert.equal(recAuth?.type, 'auth_ok');
       if (recAuth?.type === 'auth_ok') {
@@ -1082,11 +1136,16 @@ describe('Cloudflare HokmRoomDO + Worker + D1 Reliability Suite', () => {
       });
       for (let i = 0; i < players.length; i++) {
         const allRawTraffic = players[i].client.received.join('\n');
+        assert.equal(
+          allRawTraffic.includes('sessionToken'),
+          false,
+          'sessionToken key must NEVER appear in WS traffic'
+        );
         for (let j = 0; j < players.length; j++) {
           assert.equal(
-            allRawTraffic.includes(players[j].sessionToken),
+            allRawTraffic.includes(players[j].cookieTokenSecret),
             false,
-            'Session token must NEVER appear in WS traffic'
+            'Session token secret must NEVER appear in WS traffic'
           );
           if (i !== j) {
             for (const otherCardId of cardSets[j]) {
@@ -1409,55 +1468,72 @@ describe('Cloudflare HokmRoomDO + Worker + D1 Reliability Suite', () => {
     }
   });
 
-  it('Stage 2.1 (Independent auth_prune): newly opened unauthenticated socket CANNOT postpone pruning of an older unauthenticated socket, while authenticated sockets stay untouched', async () => {
+  it('Stage 2.1 (Cookie Pre-Upgrade Gate & Independent auth_prune): rejects unauthenticated HTTP WS upgrade with 401 AND preserves independent pruning deadlines on hibernationSockets', async () => {
     const cluster = new CloudflareClusterHarness({ seed: 515 });
     try {
-      const { roomCode, players } = await createFourPlayerAuthenticatedRoom(
-        cluster
-      );
+      const { roomCode } = await createFourPlayerAuthenticatedRoom(cluster);
 
-      // T=0: Unauthenticated socket A connects
-      const unauthA = await cluster.connectWebSocket(roomCode);
-      assert.equal(unauthA.response.status, 101);
+      // 1) Unauthenticated WS upgrade MUST be rejected at HTTP level (401) without opening a socket
+      const slot = cluster.getOrCreateSlot(roomCode);
+      const openCountBefore = slot.state.getWebSockets().length;
+      const unauthUpgrade = await cluster.connectWebSocket(roomCode);
+      assert.equal(unauthUpgrade.response.status, 401);
+      assert.equal(unauthUpgrade.client, undefined);
+      assert.equal(slot.state.getWebSockets().length, openCountBefore);
 
-      // T=6s: Unauthenticated socket B connects (MUST NOT delay A's 10s deadline!)
-      cluster.clock += 6_000;
-      const unauthB = await cluster.connectWebSocket(roomCode);
-      assert.equal(unauthB.response.status, 101);
+      // 2) Independent unauthenticated-socket deadline pruning unit verification
+      const {
+        pruneUnauthenticatedSockets,
+        getEarliestUnauthenticatedExpiry,
+        writeSocketAttachment,
+      } = await import('./lib/hibernationSockets');
 
-      // Survive DO cold restart before A expires
-      cluster.simulateColdRestart(roomCode);
+      const fakeState = new FakeDurableObjectState();
+      const sockA = new FakeWebSocketPair()[1];
+      const sockB = new FakeWebSocketPair()[1];
+      const sockAuth = new FakeWebSocketPair()[1];
+      fakeState.acceptWebSocket(sockA, [`room:${roomCode}`]);
+      fakeState.acceptWebSocket(sockB, [`room:${roomCode}`]);
+      fakeState.acceptWebSocket(sockAuth, [`room:${roomCode}`]);
 
-      // T=10.2s: A has expired (>=10s), B still has ~5.8s left!
-      cluster.clock += 4_200;
-      await cluster.triggerAlarm(roomCode);
+      writeSocketAttachment(sockA, {
+        connectionId: 'unauth_a',
+        roomCode,
+        playerId: null,
+        acceptedAt: 10_000,
+        authenticatedAt: null,
+      });
+      writeSocketAttachment(sockB, {
+        connectionId: 'unauth_b',
+        roomCode,
+        playerId: null,
+        acceptedAt: 16_000,
+        authenticatedAt: null,
+      });
+      writeSocketAttachment(sockAuth, {
+        connectionId: 'auth_c',
+        roomCode,
+        playerId: 'player_1',
+        acceptedAt: 10_000,
+        authenticatedAt: 10_000,
+      });
 
-      assert.equal(
-        unauthA.server.closedCode,
-        4003,
-        'Socket A MUST be pruned independently at its 10s deadline'
-      );
-      assert.equal(
-        unauthB.server.readyState,
-        1,
-        'Socket B MUST remain open until its own 10s deadline'
-      );
-      assert.equal(
-        players[0].server.readyState,
-        1,
-        'Authenticated player socket MUST never be closed by auth_prune'
-      );
+      assert.equal(getEarliestUnauthenticatedExpiry(fakeState, 10_000), 20_000);
 
-      // T=16.5s: Next rescheduled auth_prune alarm closes Socket B cleanly!
-      cluster.simulateColdRestart(roomCode);
-      cluster.clock += 6_300;
-      await cluster.triggerAlarm(roomCode);
-      assert.equal(
-        unauthB.server.closedCode,
-        4003,
-        'Socket B MUST be pruned at its own rescheduled deadline'
-      );
-      assert.equal(players[0].server.readyState, 1);
+      // At T=20_200, A (accepted at 10s) expires while B (accepted at 16s) has 5.8s left
+      const pass1 = pruneUnauthenticatedSockets(fakeState, 20_200, 10_000);
+      assert.equal(pass1.pruned, 1);
+      assert.equal(pass1.nextExpiryAt, 26_000);
+      assert.equal(sockA.closedCode, 4003);
+      assert.equal(sockB.readyState, 1);
+      assert.equal(sockAuth.readyState, 1);
+
+      // At T=26_500, B expires while authenticated socket remains open
+      const pass2 = pruneUnauthenticatedSockets(fakeState, 26_500, 10_000);
+      assert.equal(pass2.pruned, 1);
+      assert.equal(pass2.nextExpiryAt, null);
+      assert.equal(sockB.closedCode, 4003);
+      assert.equal(sockAuth.readyState, 1);
     } finally {
       cluster.close();
     }
@@ -1655,13 +1731,20 @@ describe('Cloudflare HokmRoomDO + Worker + D1 Reliability Suite', () => {
         body: JSON.stringify({ username: 'amir_pro', note: 'سلام ایوان' }),
       });
       assert.equal(validCreate.status, 201);
+      const validCookie = validCreate.headers.get('Set-Cookie')!.split(';')[0];
       const created = (await validCreate.json()) as {
         roomCode: string;
         playerId: string;
-        sessionToken: string;
       };
 
-      const conn = await cluster.connectWebSocket(created.roomCode);
+      const conn = await cluster.connectWebSocket(
+        created.roomCode,
+        'https://eyvan.example',
+        validCookie
+      );
+      assert.equal(conn.response.status, 101);
+      conn.client.drainMessages(); // clear initial auth_ok
+
       // 5,000 Persian chars = string.length 5,000 (< 8,192) BUT ~10,000 UTF-8 bytes (> 8KB)!
       await cluster.sendWs(
         created.roomCode,
@@ -1740,10 +1823,11 @@ describe('Cloudflare HokmRoomDO + Worker + D1 Reliability Suite', () => {
     }
   });
 
-  it('Stage 6 (Secure HttpOnly Session Recovery): issues HttpOnly cookie, restores exact seat across refresh, enforces CSRF header, rejects tampered/closed sessions and clears dead cookie', async () => {
+  it('Stage 6 (Zero-Token HttpOnly Cookie Security Suite): covers all 11 regression checks (JSON zero-token, HttpOnly cookie attributes, refresh recovery, WS cookie auth, tampered/expired/cross-seat rejection, logout clear + Domain consistency, disallowed Origin block)', async () => {
     const cluster = new CloudflareClusterHarness({ seed: 636 });
+    cluster.env.COOKIE_DOMAIN = '.eyvan.example';
     try {
-      // 1) Create room -> Worker sets HttpOnly session cookie
+      // [Check 1] Create room JSON NEVER returns sessionToken; sets HttpOnly/Secure/SameSite/Path/Domain cookie
       const createRes = await cluster.fetch('/api/rooms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1751,31 +1835,69 @@ describe('Cloudflare HokmRoomDO + Worker + D1 Reliability Suite', () => {
         body: JSON.stringify({ username: 'amir_cookie', avatarCode: 'portrait' }),
       });
       assert.equal(createRes.status, 201);
-      const setCookie = createRes.headers.get('Set-Cookie');
-      assert.ok(setCookie && setCookie.includes('eyvan_hokm_sess='));
-      assert.ok(setCookie.includes('HttpOnly'));
-      assert.ok(setCookie.includes('Secure'));
-      const cookiePair = setCookie.split(';')[0];
-      const created = (await createRes.json()) as {
+      const createSetCookie = createRes.headers.get('Set-Cookie')!;
+      assert.ok(createSetCookie.includes('eyvan_hokm_sess='));
+      assert.ok(createSetCookie.includes('HttpOnly'));
+      assert.ok(createSetCookie.includes('Secure'));
+      assert.ok(createSetCookie.includes('Path=/'));
+      assert.ok(createSetCookie.includes('Domain=.eyvan.example'));
+      assert.ok(createSetCookie.includes('SameSite=None'));
+      const cookiePair1 = createSetCookie.split(';')[0];
+      const createText = await createRes.text();
+      assert.equal(createText.includes('sessionToken'), false);
+      const created = JSON.parse(createText) as {
+        roomId: string;
         roomCode: string;
         playerId: string;
-        sessionToken: string;
+        canonicalSeat: string;
+        wsPath: string;
       };
 
-      // 2) Missing X-Requested-With header blocked (CSRF protection)
+      // [Check 2] Join room JSON NEVER returns sessionToken either
+      const joinRes = await cluster.fetch(`/api/rooms/${created.roomCode}/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        origin: 'https://eyvan.example',
+        body: JSON.stringify({ username: 'sara_cookie', avatarCode: 'shamsa' }),
+      });
+      assert.equal(joinRes.status, 200);
+      const joinSetCookie = joinRes.headers.get('Set-Cookie')!;
+      assert.ok(joinSetCookie.includes('HttpOnly'));
+      assert.ok(joinSetCookie.includes('Domain=.eyvan.example'));
+      const cookiePair2 = joinSetCookie.split(';')[0];
+      const joinText = await joinRes.text();
+      assert.equal(joinText.includes('sessionToken'), false);
+      const joined = JSON.parse(joinText) as {
+        roomCode: string;
+        playerId: string;
+      };
+
+      // [Check 3 & 4] Refresh recovery (/api/session/resume) succeeds via cookie across DO cold restart & JSON has ZERO sessionToken
       const noHeaderRes = await cluster.fetch('/api/session/resume', {
         method: 'POST',
-        headers: { Cookie: cookiePair },
+        headers: { Cookie: cookiePair1 },
         origin: 'https://eyvan.example',
       });
       assert.equal(noHeaderRes.status, 403);
 
-      // 3) Valid page-refresh resume AFTER DO cold restart restores exact credentials!
+      // Absent cookie returns 200 { active: false } quietly without console errors
+      const absentRes = await cluster.fetch('/api/session/resume', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'eyvan-client',
+        },
+        origin: 'https://eyvan.example',
+        body: JSON.stringify({}),
+      });
+      assert.equal(absentRes.status, 200);
+      assert.deepEqual(await absentRes.json(), { active: false });
+
       cluster.simulateColdRestart(created.roomCode);
       const resumeRes = await cluster.fetch('/api/session/resume', {
         method: 'POST',
         headers: {
-          Cookie: cookiePair,
+          Cookie: cookiePair1,
           'Content-Type': 'application/json',
           'X-Requested-With': 'eyvan-client',
         },
@@ -1783,20 +1905,48 @@ describe('Cloudflare HokmRoomDO + Worker + D1 Reliability Suite', () => {
         body: JSON.stringify({ roomCode: created.roomCode }),
       });
       assert.equal(resumeRes.status, 200);
-      const resumed = (await resumeRes.json()) as {
+      const resumeText = await resumeRes.text();
+      assert.equal(resumeText.includes('sessionToken'), false);
+      const resumed = JSON.parse(resumeText) as {
+        roomId: string;
         roomCode: string;
         playerId: string;
-        sessionToken: string;
+        canonicalSeat: string;
+        wsPath: string;
       };
+      assert.equal(resumed.roomId, created.roomId);
       assert.equal(resumed.roomCode, created.roomCode);
       assert.equal(resumed.playerId, created.playerId);
-      assert.equal(resumed.sessionToken, created.sessionToken);
+      assert.equal(resumed.canonicalSeat, 'south');
+      assert.equal(resumed.wsPath, `/ws/rooms/${created.roomCode}`);
 
-      // 4) Tampered token rejected with 401 AND server clears cookie (Max-Age=0)
+      // [Check 5 & 11] Cookie WS upgrade succeeds immediately with `auth_ok` & zero secret token in WS frames
+      const conn1 = await cluster.connectWebSocket(
+        created.roomCode,
+        'https://eyvan.example',
+        cookiePair1
+      );
+      assert.equal(conn1.response.status, 101);
+      const rawWsLog = conn1.client.received.join('\n');
+      assert.equal(rawWsLog.includes('sessionToken'), false);
+      assert.equal(
+        rawWsLog.includes(extractSessionSecretFromCookiePair(cookiePair1)),
+        false
+      );
+      const authMsgs = conn1.client.drainMessages();
+      assert.equal(authMsgs[0]?.type, 'auth_ok');
+
+      // [Check 6] Missing or invalid/tampered cookie on WS upgrade fails 401
+      const noCookieWs = await cluster.connectWebSocket(
+        created.roomCode,
+        'https://eyvan.example'
+      );
+      assert.equal(noCookieWs.response.status, 401);
+
       const badCookie = `eyvan_hokm_sess=${encodeURIComponent(
         `${created.roomCode}.${created.playerId}.ffffffffffffffffffffffffffffffff`
       )}`;
-      const tamperedRes = await cluster.fetch('/api/session/resume', {
+      const tamperedResume = await cluster.fetch('/api/session/resume', {
         method: 'POST',
         headers: {
           Cookie: badCookie,
@@ -1804,37 +1954,106 @@ describe('Cloudflare HokmRoomDO + Worker + D1 Reliability Suite', () => {
         },
         origin: 'https://eyvan.example',
       });
-      assert.equal(tamperedRes.status, 401);
-      assert.ok(tamperedRes.headers.get('Set-Cookie')?.includes('Max-Age=0'));
+      assert.equal(tamperedResume.status, 401);
+      assert.ok(tamperedResume.headers.get('Set-Cookie')?.includes('Max-Age=0'));
+      assert.ok(
+        tamperedResume.headers.get('Set-Cookie')?.includes('Domain=.eyvan.example')
+      );
 
-      // 5) After player leaves & room closes, old cookie CANNOT be reused (returns 404 + Max-Age=0)
-      const conn = await cluster.connectWebSocket(created.roomCode);
-      await cluster.sendWs(created.roomCode, conn.server, {
-        protocolVersion: PROTOCOL_VERSION,
-        type: 'auth',
-        roomCode: created.roomCode,
-        playerId: created.playerId,
-        sessionToken: created.sessionToken,
+      const tamperedWs = await cluster.connectWebSocket(
+        created.roomCode,
+        'https://eyvan.example',
+        badCookie
+      );
+      assert.equal(tamperedWs.response.status, 401);
+
+      // [Check 8] Cross-seat & cross-room isolation
+      const crossSeatCookie = `eyvan_hokm_sess=${encodeURIComponent(
+        `${created.roomCode}.${created.playerId}.${extractSessionSecretFromCookiePair(
+          cookiePair2
+        )}`
+      )}`;
+      const crossSeatWs = await cluster.connectWebSocket(
+        created.roomCode,
+        'https://eyvan.example',
+        crossSeatCookie
+      );
+      assert.equal(crossSeatWs.response.status, 401);
+      assert.notEqual(joined.playerId, created.playerId);
+
+      // [Check 10] Disallowed Origin blocked on HTTP + WS Upgrade (403)
+      const evilResume = await cluster.fetch('/api/session/resume', {
+        method: 'POST',
+        headers: {
+          Cookie: cookiePair1,
+          'X-Requested-With': 'eyvan-client',
+        },
+        origin: 'https://evil-site.invalid',
       });
-      await cluster.sendWs(created.roomCode, conn.server, {
+      assert.equal(evilResume.status, 403);
+
+      const evilWs = await cluster.connectWebSocket(
+        created.roomCode,
+        'https://evil-site.invalid',
+        cookiePair1
+      );
+      assert.equal(evilWs.response.status, 403);
+
+      // [Check 9] Explicit session clear returns matching Domain + Path=/ + Max-Age=0
+      const clearRes = await cluster.fetch('/api/session/clear', {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'eyvan-client' },
+        origin: 'https://eyvan.example',
+      });
+      assert.equal(clearRes.status, 200);
+      const clearHeader = clearRes.headers.get('Set-Cookie')!;
+      assert.ok(clearHeader.includes('Max-Age=0'));
+      assert.ok(clearHeader.includes('Path=/'));
+      assert.ok(clearHeader.includes('Domain=.eyvan.example'));
+      assert.ok(clearHeader.includes('HttpOnly'));
+
+      // [Check 7] After players leave & room closes, old cookie fails on BOTH /resume AND /ws/rooms/:code
+      await cluster.sendWs(created.roomCode, conn1.server, {
         protocolVersion: PROTOCOL_VERSION,
         type: 'leave_room',
         actionId: 'leave_cookie_1234',
       });
+      const conn2 = await cluster.connectWebSocket(
+        created.roomCode,
+        'https://eyvan.example',
+        cookiePair2
+      );
+      assert.equal(conn2.response.status, 101);
+      await cluster.sendWs(created.roomCode, conn2.server, {
+        protocolVersion: PROTOCOL_VERSION,
+        type: 'leave_room',
+        actionId: 'leave_cookie_5678',
+      });
 
-      const afterCloseRes = await cluster.fetch('/api/session/resume', {
+      const afterCloseResume = await cluster.fetch('/api/session/resume', {
         method: 'POST',
         headers: {
-          Cookie: cookiePair,
+          Cookie: cookiePair1,
           'X-Requested-With': 'eyvan-client',
         },
         origin: 'https://eyvan.example',
       });
-      assert.equal(afterCloseRes.status, 404);
-      assert.ok(afterCloseRes.headers.get('Set-Cookie')?.includes('Max-Age=0'));
+      assert.equal(afterCloseResume.status, 404);
+      assert.ok(afterCloseResume.headers.get('Set-Cookie')?.includes('Max-Age=0'));
+
+      const afterCloseWs = await cluster.connectWebSocket(
+        created.roomCode,
+        'https://eyvan.example',
+        cookiePair1
+      );
+      assert.equal(afterCloseWs.response.status, 404);
+      assert.ok(
+        afterCloseWs.response.headers.get('Set-Cookie')?.includes('Max-Age=0')
+      );
     } finally {
       cluster.close();
     }
   });
 });
+
 

@@ -61,8 +61,10 @@ import {
 } from './lib/hibernationSockets';
 import { persistCompletedMatchToD1 } from './lib/d1Persistence';
 import { getPayloadUtf8Bytes, readBoundedUtf8Body } from './lib/httpBounds';
+import { parseSessionCookieFromHeader } from './lib/sessionCookie';
 
 export type { CfWorkerEnv };
+export const INTERNAL_SESSION_TOKEN_HEADER = 'X-Eyvan-Internal-Session-Token';
 
 const ROOM_STATE_STORAGE_KEY = 'room:state';
 const MAX_HTTP_BODY_BYTES = 16 * 1024;
@@ -218,7 +220,7 @@ export class HokmRoomDO {
     const url = new URL(request.url);
     const roomCode = sanitizeRoomCode(url.searchParams.get('code') ?? '');
 
-    // 1) WebSocket Upgrade (Official Hibernation API: ctx.acceptWebSocket)
+    // 1) WebSocket Upgrade (Cookie-Authenticated BEFORE 101 + Official Hibernation API)
     if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
       if (
         !this.controller ||
@@ -229,6 +231,29 @@ export class HokmRoomDO {
         return Response.json(
           { code: 'ROOM_NOT_FOUND', message: 'اتاق یافت نشد یا بسته شده است.' },
           { status: 404 }
+        );
+      }
+
+      const parsedCookie = parseSessionCookieFromHeader(
+        request.headers.get('Cookie')
+      );
+      if (!parsedCookie || parsedCookie.roomCode !== roomCode) {
+        return Response.json(
+          { code: 'UNAUTHORIZED', message: 'نشست معتبری برای اتصال یافت نشد.' },
+          { status: 401 }
+        );
+      }
+
+      const connectionId = createConnectionId();
+      const auth = this.controller.authenticateConnection(
+        parsedCookie.playerId,
+        parsedCookie.sessionToken,
+        connectionId
+      );
+      if (auth.ok === false) {
+        return Response.json(
+          { code: auth.code, message: auth.message },
+          { status: auth.code === 'ROOM_CLOSED' ? 404 : 401 }
         );
       }
 
@@ -244,21 +269,45 @@ export class HokmRoomDO {
       const client = pair[0];
       const server = pair[1];
 
-      const connectionId = createConnectionId();
       const acceptedAt = this.nowFn();
 
       this.ctx.acceptWebSocket(server, [`room:${roomCode}`]);
       writeSocketAttachment(server, {
         connectionId,
         roomCode,
-        playerId: null,
+        playerId: auth.member.playerId,
         acceptedAt,
-        authenticatedAt: null,
+        authenticatedAt: acceptedAt,
       });
 
-      // Sync auth_prune alarm strictly to the EARLIEST unauthenticated socket deadline
-      // (a newly accepted socket can NEVER push back an earlier socket's expiration!)
+      supersedeOlderPlayerSockets(
+        this.ctx,
+        auth.member.playerId,
+        connectionId,
+        (oldWs) => {
+          this.sendError(
+            oldWs,
+            'SUPERSEDED_CONNECTION',
+            'اتصال جدیدی جایگزین این نشست شد.'
+          );
+        }
+      );
+
+      await this.persistControllerState();
+      await this.syncDisconnectSweepAlarm();
       await this.syncAuthPruneAlarm();
+
+      const snapshot = this.controller.getSnapshotForPlayer(
+        auth.member.playerId
+      );
+      if (snapshot) {
+        this.send(server, {
+          protocolVersion: PROTOCOL_VERSION,
+          type: 'auth_ok',
+          snapshot,
+        });
+      }
+      this.broadcastAll(auth.event, auth.member.playerId);
 
       return new Response(null, {
         status: 101,
@@ -322,7 +371,6 @@ export class HokmRoomDO {
         roomCode: this.controller.roomCode,
         playerId: verified.member.playerId,
         canonicalSeat: verified.member.canonicalSeat,
-        sessionToken: verified.member.sessionToken,
         wsPath: `/ws/rooms/${this.controller.roomCode}`,
       });
     }
@@ -421,10 +469,14 @@ export class HokmRoomDO {
           roomCode: ctrl.roomCode,
           playerId: joined.member.playerId,
           canonicalSeat: joined.member.canonicalSeat,
-          sessionToken: joined.member.sessionToken,
           wsPath: `/ws/rooms/${ctrl.roomCode}`,
         },
-        { status: 201 }
+        {
+          status: 201,
+          headers: {
+            [INTERNAL_SESSION_TOKEN_HEADER]: joined.member.sessionToken,
+          },
+        }
       );
     }
 
@@ -489,14 +541,21 @@ export class HokmRoomDO {
         detail: joined.member.username,
       });
 
-      return Response.json({
-        roomId: this.controller.roomId,
-        roomCode: this.controller.roomCode,
-        playerId: joined.member.playerId,
-        canonicalSeat: joined.member.canonicalSeat,
-        sessionToken: joined.member.sessionToken,
-        wsPath: `/ws/rooms/${this.controller.roomCode}`,
-      });
+      return Response.json(
+        {
+          roomId: this.controller.roomId,
+          roomCode: this.controller.roomCode,
+          playerId: joined.member.playerId,
+          canonicalSeat: joined.member.canonicalSeat,
+          wsPath: `/ws/rooms/${this.controller.roomCode}`,
+        },
+        {
+          status: 200,
+          headers: {
+            [INTERNAL_SESSION_TOKEN_HEADER]: joined.member.sessionToken,
+          },
+        }
+      );
     }
 
     return new Response('Not Found', { status: 404 });
@@ -569,63 +628,10 @@ export class HokmRoomDO {
       return;
     }
 
-    // Handle `auth` handshake
-    if (msg.type === 'auth') {
-      if (msg.roomCode !== ctrl.roomCode || msg.roomCode !== att.roomCode) {
-        this.sendError(ws, 'UNAUTHORIZED', 'کد اتاق با این اتصال مطابقت ندارد.');
-        this.safeClose(ws, 4003, 'room_mismatch');
-        return;
-      }
-
-      const auth = ctrl.authenticateConnection(
-        msg.playerId,
-        msg.sessionToken,
-        att.connectionId
-      );
-      if (auth.ok === false) {
-        this.sendError(ws, auth.code, auth.message);
-        this.safeClose(ws, 4003, 'unauthorized');
-        return;
-      }
-
-      writeSocketAttachment(ws, {
-        ...att,
-        playerId: auth.member.playerId,
-        authenticatedAt: this.nowFn(),
-      });
-
-      supersedeOlderPlayerSockets(
-        this.ctx,
-        auth.member.playerId,
-        att.connectionId,
-        (oldWs) => {
-          this.sendError(
-            oldWs,
-            'SUPERSEDED_CONNECTION',
-            'اتصال جدیدی جایگزین این نشست شد.'
-          );
-        }
-      );
-
-      await this.persistControllerState();
-      await this.syncDisconnectSweepAlarm();
-      await this.syncAuthPruneAlarm();
-
-      const snapshot = ctrl.getSnapshotForPlayer(auth.member.playerId);
-      if (snapshot) {
-        this.send(ws, {
-          protocolVersion: PROTOCOL_VERSION,
-          type: 'auth_ok',
-          snapshot,
-        });
-      }
-      this.broadcastAll(auth.event, auth.member.playerId);
-      return;
-    }
-
-    // All other messages require an authenticated, currently-active connectionId
+    // All messages after upgrade require a cookie-authenticated, currently-active connectionId
     if (!att.playerId) {
-      this.sendError(ws, 'UNAUTHORIZED', 'ابتدا باید احراز هویت انجام شود.');
+      this.sendError(ws, 'UNAUTHORIZED', 'اتصال احراز هویت نشده است.');
+      this.safeClose(ws, 4003, 'unauthorized');
       return;
     }
 

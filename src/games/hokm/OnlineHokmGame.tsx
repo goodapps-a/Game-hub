@@ -50,7 +50,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
   onLaunchOffline,
   onBackToGames,
 }) => {
-  // SECURITY: sessionCreds (containing sessionToken) live strictly in React memory — NEVER localStorage!
+  // SECURITY: sessionCreds contains ONLY public room/seat metadata — auth secret stays strictly in HttpOnly cookie!
   const [sessionCreds, setSessionCreds] =
     useState<OnlineSessionCredentials | null>(null);
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
@@ -108,7 +108,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
   }, [refreshMatches]);
 
   // Secure page-refresh session recovery via server-verified HttpOnly cookie
-  // (ZERO sessionToken in localStorage or sessionStorage!)
+  // (ZERO sessionToken in React state, localStorage, sessionStorage, or URL!)
   const resumeAttemptedRef = useRef(false);
   useEffect(() => {
     if (resumeAttemptedRef.current || sessionCreds) return;

@@ -10,6 +10,9 @@ ROOM_CLEANUP_TTL_MS = "300000"
 # REQUIRED FOR PRODUCTION: Comma-separated frontend origins (e.g. "https://eyvan.example.com,https://www.eyvan.example.com")
 # Never use "*" — leave empty ONLY for localhost development.
 ALLOWED_ORIGINS = ""
+# OPTIONAL FOR CROSS-SUBDOMAIN PRODUCTION (e.g. play.example.com + api.example.com):
+# Set COOKIE_DOMAIN = ".example.com" so both set and clear cookies share the exact parent domain.
+# COOKIE_DOMAIN = ""
 
 [[durable_objects.bindings]]
 name = "HOKM_ROOM"

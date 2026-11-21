@@ -12,6 +12,7 @@ import {
   sanitizeUsername,
 } from './src/games/hokm/online/protocol';
 import {
+  CookieHeaderOptions,
   buildClearSessionCookieHeader,
   buildSetSessionCookieHeader,
   parseSessionCookieFromHeader,
@@ -106,6 +107,9 @@ async function startServer() {
     }
     return req.secure;
   };
+  const cookieOpts: CookieHeaderOptions | undefined = process.env.COOKIE_DOMAIN
+    ? { domain: process.env.COOKIE_DOMAIN }
+    : undefined;
 
   // -------------------------------------------------------------------------
   // REST API Routes
@@ -141,9 +145,10 @@ async function startServer() {
         {
           roomCode: result.response.roomCode,
           playerId: result.response.playerId,
-          sessionToken: result.response.sessionToken,
+          sessionToken: result.sessionToken,
         },
-        isSecureExpressReq(req)
+        isSecureExpressReq(req),
+        cookieOpts
       )
     );
     res.status(201).json(result.response);
@@ -185,9 +190,10 @@ async function startServer() {
         {
           roomCode: result.response.roomCode,
           playerId: result.response.playerId,
-          sessionToken: result.response.sessionToken,
+          sessionToken: result.sessionToken,
         },
-        isSecureExpressReq(req)
+        isSecureExpressReq(req),
+        cookieOpts
       )
     );
     res.status(200).json(result.response);
@@ -215,7 +221,7 @@ async function startServer() {
     if (!parsedCookie) {
       res.setHeader(
         'Set-Cookie',
-        buildClearSessionCookieHeader(isSecureExpressReq(req))
+        buildClearSessionCookieHeader(isSecureExpressReq(req), cookieOpts)
       );
       res.status(401).json({
         error: 'UNAUTHORIZED',
@@ -242,7 +248,7 @@ async function startServer() {
     if (result.ok === false) {
       res.setHeader(
         'Set-Cookie',
-        buildClearSessionCookieHeader(isSecureExpressReq(req))
+        buildClearSessionCookieHeader(isSecureExpressReq(req), cookieOpts)
       );
       res.status(result.status).json({
         error: result.code,
@@ -263,7 +269,7 @@ async function startServer() {
     }
     res.setHeader(
       'Set-Cookie',
-      buildClearSessionCookieHeader(isSecureExpressReq(req))
+      buildClearSessionCookieHeader(isSecureExpressReq(req), cookieOpts)
     );
     res.status(200).json({ ok: true });
   });
@@ -340,8 +346,32 @@ async function startServer() {
     }
 
     const roomCode = match[1].toUpperCase();
+    const parsedCookie = parseSessionCookieFromHeader(request.headers.cookie);
+    if (!parsedCookie || parsedCookie.roomCode !== roomCode) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    const verified = roomManager.resumeSession(
+      roomCode,
+      parsedCookie.playerId,
+      parsedCookie.sessionToken
+    );
+    if (verified.ok === false) {
+      const code = verified.status === 404 ? '404 Not Found' : '401 Unauthorized';
+      socket.write(`HTTP/1.1 ${code}\r\n\r\n`);
+      socket.destroy();
+      return;
+    }
+
     wss.handleUpgrade(request, socket, head, (ws) => {
-      roomManager.attachWebSocket(roomCode, ws);
+      roomManager.attachAuthenticatedWebSocket(
+        roomCode,
+        parsedCookie.playerId,
+        parsedCookie.sessionToken,
+        ws
+      );
     });
   });
 

@@ -17,7 +17,7 @@ import {
   sanitizeUsername,
 } from '../../src/games/hokm/online/protocol';
 import { CfWorkerEnv } from './lib/types';
-import { HokmRoomDO } from './HokmRoomDO';
+import { HokmRoomDO, INTERNAL_SESSION_TOKEN_HEADER } from './HokmRoomDO';
 import {
   fetchPlayerStatsFromD1,
   fetchRecentMatchesFromD1,
@@ -25,6 +25,7 @@ import {
 } from './lib/d1Persistence';
 import { readBoundedUtf8Body } from './lib/httpBounds';
 import {
+  CookieHeaderOptions,
   buildClearSessionCookieHeader,
   buildSetSessionCookieHeader,
   isHttpsRequest,
@@ -144,6 +145,9 @@ export default {
     const url = new URL(request.url);
     const cors = buildCorsHeaders(request, env);
     const secureCookie = isHttpsRequest(request);
+    const cookieOpts: CookieHeaderOptions | undefined = env.COOKIE_DOMAIN
+      ? { domain: env.COOKIE_DOMAIN }
+      : undefined;
 
     if (request.method === 'OPTIONS') {
       if (!isOriginAllowed(request, env)) {
@@ -191,7 +195,7 @@ export default {
       return new Response(object.body, { headers });
     }
 
-    // 3) WebSocket upgrade -> forward to room Durable Object
+    // 3) Cookie-Authenticated WebSocket upgrade -> verify session, then forward to room DO
     const wsMatch = url.pathname.match(/^\/ws\/rooms\/([A-Za-z0-9]{4,8})$/);
     if (wsMatch) {
       if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
@@ -199,11 +203,67 @@ export default {
       }
       const code = sanitizeRoomCode(wsMatch[1]);
       if (!code) return new Response('Invalid room code', { status: 400 });
+
+      const rawCookie = request.headers.get('Cookie');
+      const parsedCookie = parseSessionCookieFromHeader(rawCookie);
+      if (!parsedCookie || parsedCookie.roomCode !== code) {
+        const hasMalformedCookie = Boolean(
+          rawCookie && rawCookie.includes('eyvan_hokm_sess=') && !parsedCookie
+        );
+        return buildJsonResponse(
+          JSON.stringify({
+            code: 'UNAUTHORIZED',
+            message: 'نشست معتبری برای اتصال به این اتاق یافت نشد.',
+          }),
+          401,
+          cors,
+          hasMalformedCookie
+            ? buildClearSessionCookieHeader(secureCookie, cookieOpts)
+            : undefined
+        );
+      }
+
       const id = env.HOKM_ROOM.idFromName(code);
       const stub = env.HOKM_ROOM.get(id);
+
+      // Verify session directly against authoritative DO BEFORE accepting WebSocket
+      const verifyRes = await stub.fetch(
+        new Request(`https://room.internal/resume?code=${code}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            playerId: parsedCookie.playerId,
+            sessionToken: parsedCookie.sessionToken,
+          }),
+        })
+      );
+      if (!verifyRes.ok) {
+        const errText = await verifyRes.text();
+        return buildJsonResponse(
+          errText,
+          verifyRes.status,
+          cors,
+          buildClearSessionCookieHeader(secureCookie, cookieOpts)
+        );
+      }
+
+      // Forward sanitized upgrade request cleanly to DO (strip untrusted internal headers)
+      const forwardHeaders = new Headers();
+      request.headers.forEach((value, key) => {
+        if (!key.toLowerCase().startsWith('x-eyvan-')) {
+          forwardHeaders.set(key, value);
+        }
+      });
+      forwardHeaders.set('X-Eyvan-Verified-Player', parsedCookie.playerId);
+
       const doUrl = new URL(request.url);
       doUrl.searchParams.set('code', code);
-      return stub.fetch(new Request(doUrl.toString(), request));
+      return stub.fetch(
+        new Request(doUrl.toString(), {
+          method: request.method,
+          headers: forwardHeaders,
+        })
+      );
     }
 
     // 4) Server-verified HttpOnly session resume (CSRF-protected via Origin + X-Requested-With)
@@ -228,7 +288,7 @@ export default {
         const headers = new Headers(cors);
         headers.set(
           'Set-Cookie',
-          buildClearSessionCookieHeader(secureCookie)
+          buildClearSessionCookieHeader(secureCookie, cookieOpts)
         );
         return Response.json(
           { code: 'UNAUTHORIZED', message: 'نشست فعالی یافت نشد.' },
@@ -279,7 +339,7 @@ export default {
           text,
           res.status,
           cors,
-          buildClearSessionCookieHeader(secureCookie)
+          buildClearSessionCookieHeader(secureCookie, cookieOpts)
         );
       }
 
@@ -298,7 +358,7 @@ export default {
         JSON.stringify({ ok: true }),
         200,
         cors,
-        buildClearSessionCookieHeader(secureCookie)
+        buildClearSessionCookieHeader(secureCookie, cookieOpts)
       );
     }
 
@@ -333,6 +393,7 @@ export default {
         lastRes = res;
         if (res.status !== 409) {
           const text = await res.text();
+          const internalToken = res.headers.get(INTERNAL_SESSION_TOKEN_HEADER);
           let setCookie: string | undefined;
           if (res.ok) {
             const user = tryExtractUserForUpsert(bodyRead.text);
@@ -345,14 +406,15 @@ export default {
             }
             try {
               const created = JSON.parse(text) as CreateRoomResponse;
-              if (created.roomCode && created.playerId && created.sessionToken) {
+              if (created.roomCode && created.playerId && internalToken) {
                 setCookie = buildSetSessionCookieHeader(
                   {
                     roomCode: created.roomCode,
                     playerId: created.playerId,
-                    sessionToken: created.sessionToken,
+                    sessionToken: internalToken,
                   },
-                  secureCookie
+                  secureCookie,
+                  cookieOpts
                 );
               }
             } catch {
@@ -409,6 +471,7 @@ export default {
         );
 
         const text = await res.text();
+        const internalToken = res.headers.get(INTERNAL_SESSION_TOKEN_HEADER);
         let setCookie: string | undefined;
         if (res.ok) {
           const user = tryExtractUserForUpsert(bodyRead.text);
@@ -421,14 +484,15 @@ export default {
           }
           try {
             const joined = JSON.parse(text) as JoinRoomResponse;
-            if (joined.roomCode && joined.playerId && joined.sessionToken) {
+            if (joined.roomCode && joined.playerId && internalToken) {
               setCookie = buildSetSessionCookieHeader(
                 {
                   roomCode: joined.roomCode,
                   playerId: joined.playerId,
-                  sessionToken: joined.sessionToken,
+                  sessionToken: internalToken,
                 },
-                secureCookie
+                secureCookie,
+                cookieOpts
               );
             }
           } catch {
