@@ -217,8 +217,16 @@ class SqliteBackedD1 implements D1DatabaseLike {
       path.resolve(process.cwd(), 'cloudflare/migrations/0002_indexes.sql'),
       'utf8'
     );
+    const canonSql = fs.readFileSync(
+      path.resolve(
+        process.cwd(),
+        'cloudflare/migrations/0003_username_canonical_key.sql'
+      ),
+      'utf8'
+    );
     this.sqlite.exec(initSql);
     this.sqlite.exec(idxSql);
+    this.sqlite.exec(canonSql);
   }
 
   prepare(query: string): D1PreparedStatementLike {
@@ -1400,4 +1408,433 @@ describe('Cloudflare HokmRoomDO + Worker + D1 Reliability Suite', () => {
       cluster.close();
     }
   });
+
+  it('Stage 2.1 (Independent auth_prune): newly opened unauthenticated socket CANNOT postpone pruning of an older unauthenticated socket, while authenticated sockets stay untouched', async () => {
+    const cluster = new CloudflareClusterHarness({ seed: 515 });
+    try {
+      const { roomCode, players } = await createFourPlayerAuthenticatedRoom(
+        cluster
+      );
+
+      // T=0: Unauthenticated socket A connects
+      const unauthA = await cluster.connectWebSocket(roomCode);
+      assert.equal(unauthA.response.status, 101);
+
+      // T=6s: Unauthenticated socket B connects (MUST NOT delay A's 10s deadline!)
+      cluster.clock += 6_000;
+      const unauthB = await cluster.connectWebSocket(roomCode);
+      assert.equal(unauthB.response.status, 101);
+
+      // Survive DO cold restart before A expires
+      cluster.simulateColdRestart(roomCode);
+
+      // T=10.2s: A has expired (>=10s), B still has ~5.8s left!
+      cluster.clock += 4_200;
+      await cluster.triggerAlarm(roomCode);
+
+      assert.equal(
+        unauthA.server.closedCode,
+        4003,
+        'Socket A MUST be pruned independently at its 10s deadline'
+      );
+      assert.equal(
+        unauthB.server.readyState,
+        1,
+        'Socket B MUST remain open until its own 10s deadline'
+      );
+      assert.equal(
+        players[0].server.readyState,
+        1,
+        'Authenticated player socket MUST never be closed by auth_prune'
+      );
+
+      // T=16.5s: Next rescheduled auth_prune alarm closes Socket B cleanly!
+      cluster.simulateColdRestart(roomCode);
+      cluster.clock += 6_300;
+      await cluster.triggerAlarm(roomCode);
+      assert.equal(
+        unauthB.server.closedCode,
+        4003,
+        'Socket B MUST be pruned at its own rescheduled deadline'
+      );
+      assert.equal(players[0].server.readyState, 1);
+    } finally {
+      cluster.close();
+    }
+  });
+
+  it('Stage 2.2 (Safe Peek-Ack Alarm Scheduler): preserves failed task on exception, retries with backoff across restart, and removes only completed taskId', async () => {
+    const { DurableAlarmScheduler } = await import('./lib/alarmScheduler');
+    const storage = new FakeDurableObjectStorage();
+    const sched = new DurableAlarmScheduler<'job'>(storage);
+
+    const t1 = await sched.schedule({
+      type: 'job',
+      dedupeKey: 'k:1',
+      dueAt: 1000,
+    });
+
+    // Peek does NOT delete before handler succeeds!
+    const due = await sched.peekDueTasks(1000);
+    assert.equal(due.length, 1);
+    assert.equal(due[0].id, t1.id);
+    assert.equal(sched.getPendingTasks().length, 1);
+
+    // Simulate handler failure -> rescheduleFailedTask backs off & persists across cold restart
+    const rescheduled = await sched.rescheduleFailedTask(t1.id, 1000, {
+      baseDelayMs: 2_000,
+      maxDelayMs: 60_000,
+      maxAttempts: 3,
+    });
+    assert.equal(rescheduled, true);
+
+    // Hydrate brand-new scheduler instance from storage (simulating DO cold restart)
+    const schedAfterRestart = new DurableAlarmScheduler<'job'>(storage);
+    await schedAfterRestart.hydrate();
+    assert.equal(schedAfterRestart.getPendingTasks().length, 1);
+    assert.equal(schedAfterRestart.getPendingTasks()[0].attempts, 1);
+    assert.equal(schedAfterRestart.getPendingTasks()[0].dueAt, 3000);
+
+    // If handler schedules a replacement with same dedupeKey, completing old taskId does NOT erase new task!
+    const t2 = await schedAfterRestart.schedule({
+      type: 'job',
+      dedupeKey: 'k:1',
+      dueAt: 9000,
+    });
+    await schedAfterRestart.completeTask(t1.id);
+    assert.equal(schedAfterRestart.getPendingTasks().length, 1);
+    assert.equal(schedAfterRestart.getPendingTasks()[0].id, t2.id);
+
+    // Completing t2 clears queue & alarm cleanly
+    await schedAfterRestart.completeTask(t2.id);
+    assert.equal(schedAfterRestart.getPendingTasks().length, 0);
+    assert.equal(storage.alarmAt, null);
+  });
+
+  it('Stage 3 (Lossless Match Queue): preserves unpersisted Match #1 across Rematch AND prolonged D1 outage (>5 failures) + DO restart, committing BOTH matches strictly once', async () => {
+    const cluster = new CloudflareClusterHarness({ seed: 616 });
+    try {
+      const { roomCode, players } = await createFourPlayerAuthenticatedRoom(
+        cluster,
+        1
+      );
+
+      const getSnap = (p: JoinedPlayer) => {
+        const msgs = p.client.parsedMessages();
+        const sync = [...msgs]
+          .reverse()
+          .find((m) => m.type === 'state_sync' || m.type === 'auth_ok');
+        assert.ok(sync && 'snapshot' in sync);
+        return sync.snapshot;
+      };
+
+      const playUntilFinished = async (prefix: string) => {
+        let seq = 0;
+        let guard = 0;
+        while (getSnap(players[0]).status === 'PLAYING' && guard < 250) {
+          guard += 1;
+          const cur = getSnap(players[0]);
+          const phase = cur.game?.phase;
+          if (phase === 'CHOOSING_TRUMP') {
+            const hakem = players.find(
+              (p) => p.canonicalSeat === cur.game!.hakem
+            )!;
+            await cluster.sendWs(roomCode, hakem.server, {
+              protocolVersion: PROTOCOL_VERSION,
+              type: 'choose_trump',
+              actionId: `${prefix}_t_${++seq}_1234`,
+              suit: 'spades' as Suit,
+            });
+          } else if (phase === 'PLAYING_TRICK') {
+            const actor = players.find(
+              (p) => p.canonicalSeat === cur.game!.currentTurn
+            )!;
+            const actorSnap = getSnap(actor);
+            const legal = getLegalCards(
+              actorSnap.game!.myHand,
+              actorSnap.game!.currentTrick
+            );
+            await cluster.sendWs(roomCode, actor.server, {
+              protocolVersion: PROTOCOL_VERSION,
+              type: 'play_card',
+              actionId: `${prefix}_p_${++seq}_1234`,
+              cardId: legal[0].id,
+            });
+          } else if (phase === 'TRICK_COMPLETE') {
+            cluster.clock += 1_000;
+            await cluster.triggerAlarm(roomCode);
+          } else if (phase === 'HAND_COMPLETE') {
+            cluster.clock += 1_500;
+            await cluster.triggerAlarm(roomCode);
+          }
+        }
+        assert.equal(getSnap(players[0]).status, 'FINISHED');
+      };
+
+      // Inject 7 consecutive D1 batch failures (proves retry NEVER drops after 5 attempts!)
+      cluster.d1.failNextBatchCount = 7;
+
+      // Play Match #1 -> finishes while D1 is down
+      await cluster.sendWs(roomCode, players[0].server, {
+        protocolVersion: PROTOCOL_VERSION,
+        type: 'start_match',
+        actionId: 'start_m1_lossless',
+      });
+      await playUntilFinished('m1');
+
+      // Immediately start REMATCH while Match #1 is STILL unpersisted!
+      await cluster.sendWs(roomCode, players[0].server, {
+        protocolVersion: PROTOCOL_VERSION,
+        type: 'rematch',
+        actionId: 'rematch_m2_lossless',
+      });
+      assert.equal(getSnap(players[0]).status, 'PLAYING');
+
+      // Play Match #2 -> finishes while D1 is STILL failing
+      await playUntilFinished('m2');
+
+      // Simulate 5 failed retry alarms across DO cold restarts (> 5 total attempts!)
+      for (let retry = 0; retry < 5; retry++) {
+        cluster.simulateColdRestart(roomCode);
+        cluster.clock += 16 * 60_000; // jump past capped backoff
+        await cluster.triggerAlarm(roomCode);
+      }
+
+      // Now D1 recovers -> next retry alarm commits BOTH Match #1 AND Match #2!
+      cluster.simulateColdRestart(roomCode);
+      cluster.clock += 16 * 60_000;
+      await cluster.triggerAlarm(roomCode);
+
+      const matchesRes = await cluster.fetch('/api/matches?limit=10', {
+        method: 'GET',
+        origin: 'https://eyvan.example',
+      });
+      const { matches } = (await matchesRes.json()) as {
+        matches: CompletedMatchRecord[];
+      };
+      assert.equal(
+        matches.length,
+        2,
+        'BOTH Match #1 and Match #2 MUST survive rematch and >5 D1 retries!'
+      );
+      assert.notEqual(matches[0].matchId, matches[1].matchId);
+
+      const statsRes = await cluster.fetch('/api/stats/amir_pro', {
+        method: 'GET',
+        origin: 'https://eyvan.example',
+      });
+      const stats = (await statsRes.json()) as { matchesPlayed: number };
+      assert.equal(stats.matchesPlayed, 2);
+    } finally {
+      cluster.close();
+    }
+  });
+
+  it('Stage 4 (True UTF-8 Byte Limits): rejects multi-byte Persian payloads exceeding 16KB HTTP / 8KB WS bytes even when string.length is smaller, while accepting valid Unicode payloads', async () => {
+    const cluster = new CloudflareClusterHarness({ seed: 414 });
+    try {
+      // 9,000 Persian characters = string.length 9,000 (< 16,384) BUT ~18,000 UTF-8 bytes (> 16KB)!
+      const persianOversize = 'آ'.repeat(9_000);
+      const httpOver = await cluster.fetch('/api/rooms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        origin: 'https://eyvan.example',
+        body: JSON.stringify({ username: 'amir_pro', note: persianOversize }),
+      });
+      assert.equal(
+        httpOver.status,
+        413,
+        'Multi-byte UTF-8 HTTP body > 16KB MUST return 413'
+      );
+
+      // Valid small Unicode payload (< 16KB) passes cleanly
+      const validCreate = await cluster.fetch('/api/rooms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        origin: 'https://eyvan.example',
+        body: JSON.stringify({ username: 'amir_pro', note: 'سلام ایوان' }),
+      });
+      assert.equal(validCreate.status, 201);
+      const created = (await validCreate.json()) as {
+        roomCode: string;
+        playerId: string;
+        sessionToken: string;
+      };
+
+      const conn = await cluster.connectWebSocket(created.roomCode);
+      // 5,000 Persian chars = string.length 5,000 (< 8,192) BUT ~10,000 UTF-8 bytes (> 8KB)!
+      await cluster.sendWs(
+        created.roomCode,
+        conn.server,
+        JSON.stringify({
+          protocolVersion: PROTOCOL_VERSION,
+          type: 'ping',
+          note: 'ح'.repeat(5_000),
+        })
+      );
+      const wsErr = conn.client.drainMessages()[0];
+      assert.equal(wsErr?.type, 'error');
+      if (wsErr?.type === 'error') {
+        assert.equal(wsErr.code, 'INVALID_MESSAGE');
+      }
+    } finally {
+      cluster.close();
+    }
+  });
+
+  it('Stage 5 (Canonical Username Consolidation): merges mixed-case usernames (Amir_Case vs amir_case) into single stats row without losing data', async () => {
+    const cluster = new CloudflareClusterHarness({ seed: 525 });
+    try {
+      const m1: CompletedMatchRecord = {
+        matchId: 'match_case_1',
+        roomCode: 'AAA111',
+        startedAt: 1000,
+        finishedAt: 2000,
+        winningTeam: 'myTeam',
+        teamAScore: 3,
+        teamBScore: 1,
+        targetScore: 3,
+        lastWinType: 'normal',
+        handsPlayed: 4,
+        players: [
+          { playerId: 'p1', username: 'Amir_Case', canonicalSeat: 'south', team: 'myTeam', won: true },
+          { playerId: 'p2', username: 'Sara_B', canonicalSeat: 'east', team: 'opponentTeam', won: false },
+          { playerId: 'p3', username: 'Reza_C', canonicalSeat: 'north', team: 'myTeam', won: true },
+          { playerId: 'p4', username: 'Neda_D', canonicalSeat: 'west', team: 'opponentTeam', won: false },
+        ],
+      };
+      const m2: CompletedMatchRecord = {
+        ...m1,
+        matchId: 'match_case_2',
+        finishedAt: 3000,
+        players: [
+          { playerId: 'p1b', username: 'amir_case', canonicalSeat: 'south', team: 'myTeam', won: true },
+          { playerId: 'p2b', username: 'sara_b', canonicalSeat: 'east', team: 'opponentTeam', won: false },
+          { playerId: 'p3b', username: 'reza_c', canonicalSeat: 'north', team: 'myTeam', won: true },
+          { playerId: 'p4b', username: 'neda_d', canonicalSeat: 'west', team: 'opponentTeam', won: false },
+        ],
+      };
+
+      await persistCompletedMatchToD1(cluster.d1, m1);
+      await persistCompletedMatchToD1(cluster.d1, m2);
+
+      // Must have ONLY ONE row for `amir_case` in player_stats with matches_played === 2!
+      const countRow = cluster.d1.sqlite
+        .prepare(`SELECT COUNT(*) AS cnt FROM player_stats WHERE lower(username) = 'amir_case'`)
+        .get() as { cnt: number };
+      assert.equal(countRow.cnt, 1);
+
+      const statsRes = await cluster.fetch('/api/stats/AMIR_CASE', {
+        method: 'GET',
+        origin: 'https://eyvan.example',
+      });
+      const stats = (await statsRes.json()) as {
+        username: string;
+        matchesPlayed: number;
+        wins: number;
+      };
+      assert.equal(stats.matchesPlayed, 2);
+      assert.equal(stats.wins, 2);
+    } finally {
+      cluster.close();
+    }
+  });
+
+  it('Stage 6 (Secure HttpOnly Session Recovery): issues HttpOnly cookie, restores exact seat across refresh, enforces CSRF header, rejects tampered/closed sessions and clears dead cookie', async () => {
+    const cluster = new CloudflareClusterHarness({ seed: 636 });
+    try {
+      // 1) Create room -> Worker sets HttpOnly session cookie
+      const createRes = await cluster.fetch('/api/rooms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        origin: 'https://eyvan.example',
+        body: JSON.stringify({ username: 'amir_cookie', avatarCode: 'portrait' }),
+      });
+      assert.equal(createRes.status, 201);
+      const setCookie = createRes.headers.get('Set-Cookie');
+      assert.ok(setCookie && setCookie.includes('eyvan_hokm_sess='));
+      assert.ok(setCookie.includes('HttpOnly'));
+      assert.ok(setCookie.includes('Secure'));
+      const cookiePair = setCookie.split(';')[0];
+      const created = (await createRes.json()) as {
+        roomCode: string;
+        playerId: string;
+        sessionToken: string;
+      };
+
+      // 2) Missing X-Requested-With header blocked (CSRF protection)
+      const noHeaderRes = await cluster.fetch('/api/session/resume', {
+        method: 'POST',
+        headers: { Cookie: cookiePair },
+        origin: 'https://eyvan.example',
+      });
+      assert.equal(noHeaderRes.status, 403);
+
+      // 3) Valid page-refresh resume AFTER DO cold restart restores exact credentials!
+      cluster.simulateColdRestart(created.roomCode);
+      const resumeRes = await cluster.fetch('/api/session/resume', {
+        method: 'POST',
+        headers: {
+          Cookie: cookiePair,
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'eyvan-client',
+        },
+        origin: 'https://eyvan.example',
+        body: JSON.stringify({ roomCode: created.roomCode }),
+      });
+      assert.equal(resumeRes.status, 200);
+      const resumed = (await resumeRes.json()) as {
+        roomCode: string;
+        playerId: string;
+        sessionToken: string;
+      };
+      assert.equal(resumed.roomCode, created.roomCode);
+      assert.equal(resumed.playerId, created.playerId);
+      assert.equal(resumed.sessionToken, created.sessionToken);
+
+      // 4) Tampered token rejected with 401 AND server clears cookie (Max-Age=0)
+      const badCookie = `eyvan_hokm_sess=${encodeURIComponent(
+        `${created.roomCode}.${created.playerId}.ffffffffffffffffffffffffffffffff`
+      )}`;
+      const tamperedRes = await cluster.fetch('/api/session/resume', {
+        method: 'POST',
+        headers: {
+          Cookie: badCookie,
+          'X-Requested-With': 'eyvan-client',
+        },
+        origin: 'https://eyvan.example',
+      });
+      assert.equal(tamperedRes.status, 401);
+      assert.ok(tamperedRes.headers.get('Set-Cookie')?.includes('Max-Age=0'));
+
+      // 5) After player leaves & room closes, old cookie CANNOT be reused (returns 404 + Max-Age=0)
+      const conn = await cluster.connectWebSocket(created.roomCode);
+      await cluster.sendWs(created.roomCode, conn.server, {
+        protocolVersion: PROTOCOL_VERSION,
+        type: 'auth',
+        roomCode: created.roomCode,
+        playerId: created.playerId,
+        sessionToken: created.sessionToken,
+      });
+      await cluster.sendWs(created.roomCode, conn.server, {
+        protocolVersion: PROTOCOL_VERSION,
+        type: 'leave_room',
+        actionId: 'leave_cookie_1234',
+      });
+
+      const afterCloseRes = await cluster.fetch('/api/session/resume', {
+        method: 'POST',
+        headers: {
+          Cookie: cookiePair,
+          'X-Requested-With': 'eyvan-client',
+        },
+        origin: 'https://eyvan.example',
+      });
+      assert.equal(afterCloseRes.status, 404);
+      assert.ok(afterCloseRes.headers.get('Set-Cookie')?.includes('Max-Age=0'));
+    } finally {
+      cluster.close();
+    }
+  });
 });
+

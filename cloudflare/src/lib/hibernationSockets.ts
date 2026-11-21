@@ -94,20 +94,47 @@ export function supersedeOlderPlayerSockets(
 }
 
 /**
- * Closes unauthenticated WebSockets that never completed the `auth` handshake
- * within `timeoutMs` (prevents idle/abusive unauthenticated socket buildup).
+ * Computes the earliest independent handshake expiration timestamp across ALL
+ * currently-open unauthenticated sockets. Ensures a newly opened socket can NEVER
+ * delay or push back the expiration deadline of an earlier unauthenticated socket.
+ */
+export function getEarliestUnauthenticatedExpiry(
+  ctx: DurableObjectStateLike,
+  timeoutMs: number
+): number | null {
+  let earliest: number | null = null;
+  for (const ws of ctx.getWebSockets()) {
+    const att = readSocketAttachment(ws);
+    if (!att || att.playerId !== null) continue;
+    const expiry = att.acceptedAt + timeoutMs;
+    if (earliest === null || expiry < earliest) {
+      earliest = expiry;
+    }
+  }
+  return earliest;
+}
+
+/**
+ * Closes ALL unauthenticated WebSockets whose independent handshake deadline
+ * (`acceptedAt + timeoutMs`) has expired, and returns the earliest remaining
+ * unauthenticated socket deadline so the caller can immediately reschedule `auth_prune`.
+ * Authenticated sockets (`att.playerId !== null`) are NEVER touched.
  */
 export function pruneUnauthenticatedSockets(
   ctx: DurableObjectStateLike,
   now: number,
   timeoutMs: number,
   notifyBeforeClose?: (ws: HibernatableWebSocket) => void
-): number {
+): { pruned: number; nextExpiryAt: number | null } {
   let pruned = 0;
+  let nextExpiryAt: number | null = null;
+
   for (const ws of ctx.getWebSockets()) {
     const att = readSocketAttachment(ws);
     if (!att || att.playerId !== null) continue;
-    if (now - att.acceptedAt >= timeoutMs) {
+
+    const expiry = att.acceptedAt + timeoutMs;
+    if (now >= expiry) {
       notifyBeforeClose?.(ws);
       try {
         ws.close(4003, 'auth_timeout');
@@ -115,9 +142,12 @@ export function pruneUnauthenticatedSockets(
         // Ignore
       }
       pruned += 1;
+    } else if (nextExpiryAt === null || expiry < nextExpiryAt) {
+      nextExpiryAt = expiry;
     }
   }
-  return pruned;
+
+  return { pruned, nextExpiryAt };
 }
 
 /**

@@ -9,7 +9,11 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx --test src/games/hokm/engine/hokm.test.ts src/games/hokm/online/online.test.ts cloudflare/src/HokmRoomDO.test.ts",
+    "test:engine": "tsx --test src/games/hokm/engine/hokm.test.ts",
+    "test:online": "tsx --test src/games/hokm/online/online.test.ts",
+    "test:worker": "tsx --test cloudflare/src/HokmRoomDO.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

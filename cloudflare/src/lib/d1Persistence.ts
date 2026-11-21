@@ -1,6 +1,7 @@
 import {
   CompletedMatchRecord,
   PlayerOnlineStats,
+  normalizeUsernameKey,
 } from '../../../src/games/hokm/online/protocol';
 import { Seat, TeamId } from '../../../src/games/hokm/engine/types';
 import { D1DatabaseLike } from './types';
@@ -29,6 +30,7 @@ interface D1MatchPlayerRow {
 
 interface D1PlayerStatsRow {
   username: string;
+  display_username?: string | null;
   matches_played: number;
   wins: number;
   losses: number;
@@ -39,6 +41,8 @@ interface D1PlayerStatsRow {
 
 /**
  * Non-fatal parameterized user upsert in Cloudflare D1.
+ * Primary key `username` is always canonical lowercase (`normalizeUsernameKey`),
+ * while original display casing is preserved in `display_username`.
  */
 export async function upsertUserInD1(
   db: D1DatabaseLike | undefined,
@@ -47,15 +51,18 @@ export async function upsertUserInD1(
   now = Date.now()
 ): Promise<void> {
   if (!db) return;
+  const canonicalKey = normalizeUsernameKey(username);
+  const displayName = username.trim();
   await db
     .prepare(
-      `INSERT INTO users (username, avatar_code, created_at, last_seen_at)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO users (username, display_username, avatar_code, created_at, last_seen_at)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(username) DO UPDATE SET
+         display_username = excluded.display_username,
          avatar_code = excluded.avatar_code,
          last_seen_at = excluded.last_seen_at`
     )
-    .bind(username, avatarCode, now, now)
+    .bind(canonicalKey, displayName, avatarCode, now, now)
     .run();
 }
 
@@ -66,6 +73,8 @@ export async function upsertUserInD1(
  * - Only persists genuinely completed matches (caller enforces MATCH_COMPLETE + 4 players).
  * - Checks whether `match_id` already exists BEFORE updating `player_stats`, so retries
  *   after network glitches or DO restarts NEVER double-count wins/losses/kot stats!
+ * - Uses canonical lowercase `username` keys in `player_stats` (with `display_username`
+ *   preserved) so `Amir` and `amir` NEVER split or duplicate statistics.
  * - Executes `matches`, `match_players`, and `player_stats` in one atomic `db.batch(...)`
  *   transaction (all succeed or all roll back cleanly).
  */
@@ -109,17 +118,21 @@ export async function persistCompletedMatchToD1(
   ];
 
   for (const p of record.players) {
+    const canonicalKey = normalizeUsernameKey(p.username);
+    const displayName = p.username.trim();
+
     stmts.push(
       db
         .prepare(
           `INSERT INTO match_players
-           (match_id, player_id, username, canonical_seat, team, won)
-           VALUES (?, ?, ?, ?, ?, ?)`
+           (match_id, player_id, username, username_key, canonical_seat, team, won)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           record.matchId,
           p.playerId,
-          p.username,
+          displayName,
+          canonicalKey,
           p.canonicalSeat,
           p.team,
           p.won ? 1 : 0
@@ -132,9 +145,10 @@ export async function persistCompletedMatchToD1(
       db
         .prepare(
           `INSERT INTO player_stats
-           (username, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at)
-           VALUES (?, 1, ?, ?, ?, ?, ?)
+           (username, display_username, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at)
+           VALUES (?, ?, 1, ?, ?, ?, ?, ?)
            ON CONFLICT(username) DO UPDATE SET
+             display_username = excluded.display_username,
              matches_played = matches_played + 1,
              wins = wins + excluded.wins,
              losses = losses + excluded.losses,
@@ -143,7 +157,8 @@ export async function persistCompletedMatchToD1(
              last_played_at = excluded.last_played_at`
         )
         .bind(
-          p.username,
+          canonicalKey,
+          displayName,
           p.won ? 1 : 0,
           p.won ? 0 : 1,
           isKotWin,
@@ -182,7 +197,6 @@ export async function fetchRecentMatchesFromD1(
   const rows = matchesRes.results ?? [];
   if (rows.length === 0) return [];
 
-  // Batch-fetch players for all returned matches cleanly using parameterized IN (?, ?, ...)
   const placeholders = rows.map(() => '?').join(', ');
   const matchIds = rows.map((r) => r.match_id);
   const playersRes = await db
@@ -224,26 +238,27 @@ export async function fetchRecentMatchesFromD1(
 }
 
 /**
- * Fetches case-insensitive player stats in the exact `PlayerOnlineStats` camelCase shape.
+ * Fetches player stats by canonical lowercase username key, returning preserved `display_username`.
  */
 export async function fetchPlayerStatsFromD1(
   db: D1DatabaseLike,
   username: string
 ): Promise<PlayerOnlineStats> {
+  const canonicalKey = normalizeUsernameKey(username);
   const row = await db
     .prepare(
       `SELECT
-         username, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at
+         username, display_username, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at
        FROM player_stats
-       WHERE lower(username) = lower(?)
+       WHERE username = ?
        LIMIT 1`
     )
-    .bind(username)
+    .bind(canonicalKey)
     .first<D1PlayerStatsRow>();
 
   if (!row) {
     return {
-      username,
+      username: username.trim(),
       matchesPlayed: 0,
       wins: 0,
       losses: 0,
@@ -254,7 +269,7 @@ export async function fetchPlayerStatsFromD1(
   }
 
   return {
-    username: row.username,
+    username: row.display_username ?? row.username,
     matchesPlayed: row.matches_played,
     wins: row.wins,
     losses: row.losses,

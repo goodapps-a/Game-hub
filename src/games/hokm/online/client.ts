@@ -74,6 +74,7 @@ export async function createOnlineRoom(params: {
 }): Promise<CreateRoomResponse> {
   const res = await fetch(`${getApiBase()}/api/rooms`, {
     method: 'POST',
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       'X-Requested-With': 'eyvan-client',
@@ -99,6 +100,7 @@ export async function joinOnlineRoom(params: {
   const code = encodeURIComponent(params.roomCode.trim().toUpperCase());
   const res = await fetch(`${getApiBase()}/api/rooms/${code}/join`, {
     method: 'POST',
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       'X-Requested-With': 'eyvan-client',
@@ -117,6 +119,57 @@ export async function joinOnlineRoom(params: {
     throw new Error(data.message ?? data.error ?? 'ورود به اتاق ناموفق بود.');
   }
   return data;
+}
+
+/**
+ * Attempts server-verified session recovery via the HttpOnly cookie after page refresh.
+ * Never reads or writes tokens in localStorage or sessionStorage.
+ */
+export async function resumeOnlineSession(
+  expectedRoomCode?: string
+): Promise<OnlineSessionCredentials | null> {
+  try {
+    const res = await fetch(`${getApiBase()}/api/session/resume`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'eyvan-client',
+      },
+      body: JSON.stringify(
+        expectedRoomCode ? { roomCode: expectedRoomCode } : {}
+      ),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as Partial<OnlineSessionCredentials>;
+    if (
+      !data.roomId ||
+      !data.roomCode ||
+      !data.playerId ||
+      !data.canonicalSeat ||
+      !data.sessionToken ||
+      !data.wsPath
+    ) {
+      return null;
+    }
+    return data as OnlineSessionCredentials;
+  } catch {
+    return null;
+  }
+}
+
+export async function clearOnlineSession(): Promise<void> {
+  try {
+    await fetch(`${getApiBase()}/api/session/clear`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'X-Requested-With': 'eyvan-client',
+      },
+    });
+  } catch {
+    // Best-effort clear
+  }
 }
 
 export async function fetchRoomSummary(

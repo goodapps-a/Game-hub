@@ -4,21 +4,23 @@
  * Reliability Guarantees:
  * 1. Durable Storage Persistence (`room:state` + `sys:alarms`):
  *    Full room & Hokm match state is persisted to Durable Object Storage on every
- *    authoritative mutation and rehydrated via `blockConcurrencyWhile` after any
- *    hibernation wake-up or cold restart.
+ *    authoritative mutation and rehydrated atomically via `blockConcurrencyWhile`.
  * 2. Official WebSocket Hibernation API:
  *    Uses `ctx.acceptWebSocket`, `ws.serializeAttachment` / `ws.deserializeAttachment`,
  *    `ctx.getWebSockets()`, and class handlers `webSocketMessage`, `webSocketClose`,
  *    and `webSocketError` — zero reliance on volatile Maps for session identity.
- * 3. Durable Typed Alarm Scheduler (`DurableAlarmScheduler`):
- *    Persists trick-collection, auto-next-hand, disconnect-grace sweep, unauthenticated
- *    socket pruning, D1 retry backoff, and closed-room storage cleanup alarms across restarts.
+ * 3. Safe Peek-Execute-Ack Durable Alarm Scheduler (`DurableAlarmScheduler`):
+ *    Tasks are never deleted before successful execution; failures retry with bounded
+ *    backoff. Unauthenticated socket pruning tracks each socket's independent deadline
+ *    so new connections can never postpone pruning older unauthenticated sockets.
  * 4. Strict Reconnect & Concurrency Safety:
  *    Correlates every active session with a unique `connectionId` so stale/superseded
  *    socket close events can NEVER corrupt a newer active connection.
- * 5. Idempotent D1 Persistence:
- *    Writes completed matches atomically and strictly once (zero double-counted stats),
- *    with durable retry alarms on transient D1 failures.
+ * 5. Lossless, Strictly Idempotent D1 Persistence Queue:
+ *    Maintains a durable FIFO queue of completed matches (`pendingMatchPersistences`)
+ *    that survives rematches, DO restarts, closed rooms, and prolonged D1 outages with
+ *    capped exponential retry — zero lost matches and zero double-counted stats.
+ * 6. Streaming True UTF-8 Byte Limits & Server-Verified Session Resume (`/resume`).
  */
 
 import {
@@ -51,12 +53,14 @@ import {
 import {
   createConnectionId,
   getAuthenticatedSockets,
+  getEarliestUnauthenticatedExpiry,
   pruneUnauthenticatedSockets,
   readSocketAttachment,
   supersedeOlderPlayerSockets,
   writeSocketAttachment,
 } from './lib/hibernationSockets';
 import { persistCompletedMatchToD1 } from './lib/d1Persistence';
+import { getPayloadUtf8Bytes, readBoundedUtf8Body } from './lib/httpBounds';
 
 export type { CfWorkerEnv };
 
@@ -66,7 +70,8 @@ const AUTH_HANDSHAKE_TIMEOUT_MS = 10_000;
 const DEFAULT_ROOM_CLEANUP_TTL_MS = 5 * 60_000;
 const RATE_WINDOW_MS = 2_000;
 const RATE_MAX_MESSAGES = 45;
-const MAX_D1_RETRY_ATTEMPTS = 5;
+const D1_RETRY_BASE_MS = 5_000;
+const D1_RETRY_MAX_MS = 15 * 60_000;
 
 type HokmAlarmType =
   | 'trick_collect'
@@ -115,8 +120,6 @@ export class HokmRoomDO {
     this.trickCollectDelayMsOverride = hooks?.trickCollectDelayMs;
     this.nextHandDelayMsOverride = hooks?.nextHandDelayMs;
 
-    // Official Cloudflare pattern: hydrate persisted state atomically before any
-    // fetch / webSocketMessage / alarm event is processed after cold start or eviction.
     void this.ctx.blockConcurrencyWhile(async () => {
       await this.hydrateFromStorage();
     });
@@ -173,17 +176,20 @@ export class HokmRoomDO {
     | { ok: true; data: Record<string, unknown> }
     | { ok: false; status: number; code: OnlineErrorCode; message: string }
   > {
-    const text = await request.text();
-    if (text.length > MAX_HTTP_BODY_BYTES) {
+    const bodyRead = await readBoundedUtf8Body(request, MAX_HTTP_BODY_BYTES);
+    if (bodyRead.ok === false) {
       return {
         ok: false,
-        status: 413,
+        status: bodyRead.status,
         code: 'INVALID_MESSAGE',
-        message: 'حجم درخواست بیش از حد مجاز است.',
+        message:
+          bodyRead.status === 413
+            ? 'حجم درخواست بیش از حد مجاز است.'
+            : 'خطا در خواندن بدنه درخواست.',
       };
     }
     try {
-      const parsed = JSON.parse(text) as unknown;
+      const parsed = JSON.parse(bodyRead.text) as unknown;
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
         return {
           ok: false,
@@ -250,12 +256,9 @@ export class HokmRoomDO {
         authenticatedAt: null,
       });
 
-      // Schedule unauthenticated socket prune alarm so idle non-authed sockets never linger
-      await this.alarms.schedule({
-        type: 'auth_prune',
-        dedupeKey: 'sys:auth_prune',
-        dueAt: acceptedAt + AUTH_HANDSHAKE_TIMEOUT_MS + 500,
-      });
+      // Sync auth_prune alarm strictly to the EARLIEST unauthenticated socket deadline
+      // (a newly accepted socket can NEVER push back an earlier socket's expiration!)
+      await this.syncAuthPruneAlarm();
 
       return new Response(null, {
         status: 101,
@@ -274,7 +277,57 @@ export class HokmRoomDO {
       return Response.json(this.controller.getPublicSummary());
     }
 
-    // 3) Create Room (with collision guard against active non-closed rooms!)
+    // 3) Server-Verified Session Resume (called by Worker with HttpOnly cookie credentials)
+    if (request.method === 'POST' && url.pathname.endsWith('/resume')) {
+      if (
+        !this.controller ||
+        !roomCode ||
+        this.controller.roomCode !== roomCode ||
+        this.controller.getStatus() === 'CLOSED'
+      ) {
+        return Response.json(
+          { code: 'ROOM_CLOSED', message: 'اتاق بسته شده یا یافت نشد.' },
+          { status: 404 }
+        );
+      }
+
+      const bodyRes = await this.parseJsonBody(request);
+      if (bodyRes.ok === false) {
+        return Response.json(
+          { code: bodyRes.code, message: bodyRes.message },
+          { status: bodyRes.status }
+        );
+      }
+
+      const playerId =
+        typeof bodyRes.data.playerId === 'string' ? bodyRes.data.playerId : '';
+      const sessionToken =
+        typeof bodyRes.data.sessionToken === 'string'
+          ? bodyRes.data.sessionToken
+          : '';
+
+      const verified = this.controller.verifySessionForResume(
+        playerId,
+        sessionToken
+      );
+      if (verified.ok === false) {
+        return Response.json(
+          { code: verified.code, message: verified.message },
+          { status: verified.code === 'ROOM_CLOSED' ? 404 : 401 }
+        );
+      }
+
+      return Response.json({
+        roomId: this.controller.roomId,
+        roomCode: this.controller.roomCode,
+        playerId: verified.member.playerId,
+        canonicalSeat: verified.member.canonicalSeat,
+        sessionToken: verified.member.sessionToken,
+        wsPath: `/ws/rooms/${this.controller.roomCode}`,
+      });
+    }
+
+    // 4) Create Room (with collision guard against active non-closed rooms!)
     if (request.method === 'POST' && url.pathname.endsWith('/create')) {
       if (!roomCode) {
         return Response.json(
@@ -288,6 +341,17 @@ export class HokmRoomDO {
           {
             code: 'ROOM_EXISTS',
             message: 'این کد اتاق هم‌اکنون در حال استفاده است.',
+          },
+          { status: 409 }
+        );
+      }
+
+      // Also guard against overwriting a CLOSED room that still has unpersisted D1 matches!
+      if (this.controller && this.controller.hasPendingMatchPersistences()) {
+        return Response.json(
+          {
+            code: 'ROOM_EXISTS',
+            message: 'این کد اتاق در حال نهایی‌سازی ذخیره نتایج است.',
           },
           { status: 409 }
         );
@@ -322,7 +386,6 @@ export class HokmRoomDO {
           ? rawTarget
           : 3;
 
-      // Cancel any leftover cleanup alarm if recreating a previously closed room code
       await this.alarms.cancelByDedupeKey('room:cleanup');
 
       const ctrl = new HokmRoomController({
@@ -365,7 +428,7 @@ export class HokmRoomDO {
       );
     }
 
-    // 4) Join Existing Room
+    // 5) Join Existing Room
     if (request.method === 'POST' && url.pathname.endsWith('/join')) {
       if (!this.controller || this.controller.getStatus() === 'CLOSED') {
         return Response.json(
@@ -462,12 +525,14 @@ export class HokmRoomDO {
       return;
     }
 
-    if (typeof message !== 'string') {
-      this.sendError(ws, 'INVALID_MESSAGE', 'فقط پیام‌های متنی JSON مجاز هستند.');
+    // True UTF-8 byte-size bound checked BEFORE parsing JSON!
+    if (getPayloadUtf8Bytes(message) > MAX_WS_PAYLOAD_BYTES) {
+      this.sendError(ws, 'INVALID_MESSAGE', 'حجم پیام بیش از حد مجاز است.');
       return;
     }
-    if (message.length > MAX_WS_PAYLOAD_BYTES) {
-      this.sendError(ws, 'INVALID_MESSAGE', 'حجم پیام بیش از حد مجاز است.');
+
+    if (typeof message !== 'string') {
+      this.sendError(ws, 'INVALID_MESSAGE', 'فقط پیام‌های متنی JSON مجاز هستند.');
       return;
     }
 
@@ -523,7 +588,6 @@ export class HokmRoomDO {
         return;
       }
 
-      // Persist attachment FIRST, then supersede any older socket for this player
       writeSocketAttachment(ws, {
         ...att,
         playerId: auth.member.playerId,
@@ -545,6 +609,7 @@ export class HokmRoomDO {
 
       await this.persistControllerState();
       await this.syncDisconnectSweepAlarm();
+      await this.syncAuthPruneAlarm();
 
       const snapshot = ctrl.getSnapshotForPlayer(auth.member.playerId);
       if (snapshot) {
@@ -613,7 +678,6 @@ export class HokmRoomDO {
     }
 
     if (!outcome.ok) {
-      // Persist rejected actionId cache if state mutated (no state version bump, harmless)
       this.sendError(
         ws,
         outcome.errorCode ?? 'ACTION_REJECTED',
@@ -623,8 +687,6 @@ export class HokmRoomDO {
       return;
     }
 
-    // If player intentionally left, detach their socket attachment BEFORE closing so
-    // webSocketClose never treats it as an accidental disconnect.
     if (msg.type === 'leave_room' && !outcome.duplicate) {
       writeSocketAttachment(ws, { ...att, playerId: null });
     }
@@ -664,16 +726,18 @@ export class HokmRoomDO {
   private async handleSocketClosed(ws: HibernatableWebSocket): Promise<void> {
     await this.ensureHydrated();
     const att = readSocketAttachment(ws);
-    if (!att || !att.playerId || !this.controller) return;
 
-    // Detach playerId immediately so close+error double-fire is a guaranteed no-op
+    if (!att || !att.playerId || !this.controller) {
+      await this.syncAuthPruneAlarm();
+      return;
+    }
+
     try {
       writeSocketAttachment(ws, { ...att, playerId: null });
     } catch {
       // Ignore if socket already disposed
     }
 
-    // Race-safe: controller ignores this disconnect if a newer `connectionId` already owns the seat!
     const outcome = this.controller.markPlayerDisconnected(
       att.playerId,
       att.connectionId
@@ -686,16 +750,29 @@ export class HokmRoomDO {
   }
 
   // -------------------------------------------------------------------------
-  // Durable Alarm Handler (Survives Hibernation & Cold Restarts!)
+  // Durable Alarm Handler (Peek -> Execute -> Acknowledge/Retry)
   // -------------------------------------------------------------------------
 
   public async alarm(): Promise<void> {
     await this.ensureHydrated();
     const now = this.nowFn();
-    const dueTasks = await this.alarms.popDueTasks(now);
+    const dueTasks = await this.alarms.peekDueTasks(now);
 
     for (const task of dueTasks) {
-      await this.executeAlarmTask(task);
+      try {
+        await this.executeAlarmTask(task);
+        await this.alarms.completeTask(task.id);
+      } catch (err) {
+        console.error(
+          `[HokmRoomDO] Alarm task "${task.type}" (${task.id}) failed; rescheduling with backoff:`,
+          err
+        );
+        await this.alarms.rescheduleFailedTask(task.id, this.nowFn(), {
+          baseDelayMs: 2_000,
+          maxDelayMs: D1_RETRY_MAX_MS,
+          maxAttempts: task.type === 'd1_persist_retry' ? undefined : 8,
+        });
+      }
     }
   }
 
@@ -703,7 +780,7 @@ export class HokmRoomDO {
     task: ScheduledAlarmTask<HokmAlarmType>
   ): Promise<void> {
     if (task.type === 'auth_prune') {
-      pruneUnauthenticatedSockets(
+      const { nextExpiryAt } = pruneUnauthenticatedSockets(
         this.ctx,
         this.nowFn(),
         AUTH_HANDSHAKE_TIMEOUT_MS,
@@ -715,6 +792,13 @@ export class HokmRoomDO {
           );
         }
       );
+      if (nextExpiryAt !== null) {
+        await this.alarms.schedule({
+          type: 'auth_prune',
+          dedupeKey: 'sys:auth_prune',
+          dueAt: Math.max(this.nowFn() + 50, nextExpiryAt + 50),
+        });
+      }
       return;
     }
 
@@ -724,7 +808,6 @@ export class HokmRoomDO {
 
     switch (task.type) {
       case 'trick_collect': {
-        // Guard against stale/duplicate alarm delivery using phase + handNumber + trickCount
         const gs = this.controller.getAuthoritativeGameState();
         if (
           this.controller.getStatus() !== 'PLAYING' ||
@@ -789,33 +872,37 @@ export class HokmRoomDO {
       }
 
       case 'd1_persist_retry': {
-        const pending = this.controller.getPendingMatchPersistence();
-        if (!pending) return;
+        if (!this.controller.hasPendingMatchPersistences()) return;
         const attempt = Number(task.metadata?.attempt ?? 1);
-        await this.tryPersistMatchToD1(pending, attempt);
+        await this.flushPendingMatchesToD1(attempt);
         break;
       }
 
       case 'room_cleanup': {
-        // Only purge storage when room is CLOSED and no pending D1 write remains
-        if (
-          this.controller.getStatus() === 'CLOSED' &&
-          !this.controller.getPendingMatchPersistence()
-        ) {
-          for (const ws of this.ctx.getWebSockets()) {
-            this.safeClose(ws, 1000, 'room_expired');
+        if (this.controller.getStatus() !== 'CLOSED') return;
+
+        // If any completed match is still awaiting D1 commit, attempt flush NOW
+        // and NEVER delete `room:state` until all pending matches are committed!
+        if (this.controller.hasPendingMatchPersistences()) {
+          await this.flushPendingMatchesToD1(1);
+          if (this.controller.hasPendingMatchPersistences()) {
+            return;
           }
-          this.controller = null;
-          await this.alarms.cancelAll();
-          await this.ctx.storage.delete(ROOM_STATE_STORAGE_KEY);
         }
+
+        for (const ws of this.ctx.getWebSockets()) {
+          this.safeClose(ws, 1000, 'room_expired');
+        }
+        this.controller = null;
+        await this.alarms.cancelAll();
+        await this.ctx.storage.delete(ROOM_STATE_STORAGE_KEY);
         break;
       }
     }
   }
 
   // -------------------------------------------------------------------------
-  // Outcome Side Effects, Alarm Sync, & Idempotent D1 Persistence
+  // Outcome Side Effects, Alarm Sync, & Lossless D1 Persistence Queue
   // -------------------------------------------------------------------------
 
   private async applyOutcomeSideEffects(
@@ -855,8 +942,8 @@ export class HokmRoomDO {
       });
     }
 
-    if (outcome.completedMatch) {
-      await this.tryPersistMatchToD1(outcome.completedMatch, 1);
+    if (outcome.completedMatch || this.controller.hasPendingMatchPersistences()) {
+      await this.flushPendingMatchesToD1(1);
     }
 
     if (this.controller.getStatus() === 'CLOSED') {
@@ -870,6 +957,31 @@ export class HokmRoomDO {
       });
     } else {
       await this.syncDisconnectSweepAlarm();
+    }
+  }
+
+  private async syncAuthPruneAlarm(): Promise<void> {
+    const earliestExpiry = getEarliestUnauthenticatedExpiry(
+      this.ctx,
+      AUTH_HANDSHAKE_TIMEOUT_MS
+    );
+    if (earliestExpiry === null) {
+      await this.alarms.cancelByDedupeKey('sys:auth_prune');
+      return;
+    }
+
+    const targetDueAt = Math.max(this.nowFn() + 50, earliestExpiry + 50);
+    const existing = this.alarms
+      .getPendingTasks()
+      .find((t) => t.dedupeKey === 'sys:auth_prune');
+
+    // Only update if no alarm exists OR the newly computed earliest deadline is strictly earlier
+    if (!existing || targetDueAt < existing.dueAt) {
+      await this.alarms.schedule({
+        type: 'auth_prune',
+        dedupeKey: 'sys:auth_prune',
+        dueAt: targetDueAt,
+      });
     }
   }
 
@@ -892,35 +1004,56 @@ export class HokmRoomDO {
     });
   }
 
-  private async tryPersistMatchToD1(
-    record: NonNullable<RoomActionOutcome['completedMatch']>,
-    attempt: number
-  ): Promise<void> {
+  /**
+   * Drains the durable FIFO `pendingMatchPersistences` queue to Cloudflare D1.
+   *
+   * - Strictly idempotent: `persistCompletedMatchToD1` checks `match_id` before updating stats.
+   * - Survives rematches, DO cold restarts, room closures, and prolonged D1 outages:
+   *   never drops a completed match after 5 retries — uses capped exponential backoff
+   *   (5s -> 15s -> 45s -> 2m -> 5m -> 15m cap) until D1 confirms commit.
+   * - If the room is already CLOSED once the queue drains, automatically schedules `room_cleanup`.
+   */
+  private async flushPendingMatchesToD1(attempt: number): Promise<void> {
     if (!this.controller) return;
-    if (!this.env.EYVAN_DB) {
-      // No D1 binding configured in test/minimal env -> keep cleanly handled
-      return;
-    }
+    if (!this.env.EYVAN_DB) return;
 
-    try {
-      await persistCompletedMatchToD1(this.env.EYVAN_DB, record);
-      this.controller.markMatchPersisted(record.matchId);
-      await this.persistControllerState();
-      await this.alarms.cancelByDedupeKey('d1:persist_retry');
-    } catch (err) {
-      console.error(
-        `[HokmRoomDO] D1 match persistence failed (attempt ${attempt}/${MAX_D1_RETRY_ATTEMPTS}):`,
-        err
-      );
-      if (attempt < MAX_D1_RETRY_ATTEMPTS) {
-        const backoffMs = 5_000 * Math.pow(3, attempt - 1);
+    const queue = [...this.controller.getPendingMatchPersistences()];
+    if (queue.length === 0) return;
+
+    for (const record of queue) {
+      try {
+        await persistCompletedMatchToD1(this.env.EYVAN_DB, record);
+        this.controller.markMatchPersisted(record.matchId);
+        await this.persistControllerState();
+      } catch (err) {
+        const cappedExp = Math.min(6, Math.max(0, attempt - 1));
+        const backoffMs = Math.min(
+          D1_RETRY_MAX_MS,
+          D1_RETRY_BASE_MS * Math.pow(3, cappedExp)
+        );
+        console.error(
+          `[HokmRoomDO] D1 match persistence failed for ${record.matchId} (attempt ${attempt}; next retry in ${backoffMs}ms):`,
+          err
+        );
         await this.alarms.schedule({
           type: 'd1_persist_retry',
           dedupeKey: 'd1:persist_retry',
           dueAt: this.nowFn() + backoffMs,
           metadata: { attempt: attempt + 1, matchId: record.matchId },
         });
+        return;
       }
+    }
+
+    // All queued matches committed cleanly!
+    await this.alarms.cancelByDedupeKey('d1:persist_retry');
+
+    if (this.controller.getStatus() === 'CLOSED') {
+      await this.alarms.schedule({
+        type: 'room_cleanup',
+        dedupeKey: 'room:cleanup',
+        dueAt: this.nowFn() + 1_000,
+      });
     }
   }
 
@@ -969,7 +1102,6 @@ export class HokmRoomDO {
     for (const { ws, playerId, connectionId } of sockets) {
       if (skipPlayerId && playerId === skipPlayerId) continue;
       if (!this.controller.isActiveConnection(playerId, connectionId)) continue;
-      // SECURITY: Every player receives ONLY their own projected snapshot!
       const snapshot = this.controller.getSnapshotForPlayer(playerId);
       if (snapshot) {
         this.send(ws, {

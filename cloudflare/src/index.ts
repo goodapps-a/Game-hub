@@ -1,12 +1,17 @@
 /**
  * Cloudflare Worker Entrypoint:
- * - HTTP REST API: /api/health, /api/rooms, /api/rooms/:code, /api/rooms/:code/join, /api/matches, /api/stats/:username
+ * - HTTP REST API:
+ *   /api/health, /api/rooms, /api/rooms/:code, /api/rooms/:code/join,
+ *   /api/session/resume, /api/session/clear, /api/matches, /api/stats/:username
  * - WebSocket Upgrade Forwarding: /ws/rooms/:code -> Durable Object HOKM_ROOM (Hibernation-enabled)
  * - R2 Asset Delivery: /r2/* -> EYVAN_ASSETS bucket with immutable caching
- * - Strict Origin / CORS enforcement (never wildcard `*` on mutating or WebSocket routes)
+ * - Strict Origin / CORS enforcement (never wildcard `*`) + Streaming UTF-8 byte limits
+ * - HttpOnly session cookie issuance & server-verified resume for page refresh recovery
  */
 
 import {
+  CreateRoomResponse,
+  JoinRoomResponse,
   sanitizeAvatarCode,
   sanitizeRoomCode,
   sanitizeUsername,
@@ -18,6 +23,13 @@ import {
   fetchRecentMatchesFromD1,
   upsertUserInD1,
 } from './lib/d1Persistence';
+import { readBoundedUtf8Body } from './lib/httpBounds';
+import {
+  buildClearSessionCookieHeader,
+  buildSetSessionCookieHeader,
+  isHttpsRequest,
+  parseSessionCookieFromHeader,
+} from './lib/sessionCookie';
 
 export { HokmRoomDO };
 
@@ -76,7 +88,7 @@ export function isOriginAllowed(request: Request, env: CfWorkerEnv): boolean {
   );
 }
 
-function buildCorsHeaders(request: Request, env: CfWorkerEnv): HeadersInit {
+function buildCorsHeaders(request: Request, env: CfWorkerEnv): Record<string, string> {
   const origin = request.headers.get('Origin');
   const base: Record<string, string> = {
     'X-Content-Type-Options': 'nosniff',
@@ -86,22 +98,13 @@ function buildCorsHeaders(request: Request, env: CfWorkerEnv): HeadersInit {
     return {
       ...base,
       'Access-Control-Allow-Origin': origin,
+      'Access-Control-Allow-Credentials': 'true',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, X-Requested-With',
       Vary: 'Origin',
     };
   }
   return base;
-}
-
-async function readBoundedBody(
-  request: Request
-): Promise<{ ok: true; text: string } | { ok: false }> {
-  const text = await request.text();
-  if (text.length > MAX_HTTP_BODY_BYTES) {
-    return { ok: false };
-  }
-  return { ok: true, text };
 }
 
 function tryExtractUserForUpsert(
@@ -120,10 +123,27 @@ function tryExtractUserForUpsert(
   }
 }
 
+function buildJsonResponse(
+  body: string,
+  status: number,
+  cors: Record<string, string>,
+  setCookie?: string
+): Response {
+  const headers = new Headers({
+    'Content-Type': 'application/json',
+    ...cors,
+  });
+  if (setCookie) {
+    headers.set('Set-Cookie', setCookie);
+  }
+  return new Response(body, { status, headers });
+}
+
 export default {
   async fetch(request: Request, env: CfWorkerEnv): Promise<Response> {
     const url = new URL(request.url);
     const cors = buildCorsHeaders(request, env);
+    const secureCookie = isHttpsRequest(request);
 
     if (request.method === 'OPTIONS') {
       if (!isOriginAllowed(request, env)) {
@@ -186,13 +206,115 @@ export default {
       return stub.fetch(new Request(doUrl.toString(), request));
     }
 
-    // 4) Create room (retries on unlikely room-code collision with active room)
+    // 4) Server-verified HttpOnly session resume (CSRF-protected via Origin + X-Requested-With)
+    if (url.pathname === '/api/session/resume' && request.method === 'POST') {
+      if (request.headers.get('X-Requested-With') !== 'eyvan-client') {
+        return Response.json(
+          { code: 'UNAUTHORIZED', message: 'درخواست نامعتبر است.' },
+          { status: 403, headers: cors }
+        );
+      }
+
+      const rawCookieHeader = request.headers.get('Cookie');
+      const hasSessionCookie = Boolean(
+        rawCookieHeader && rawCookieHeader.includes('eyvan_hokm_sess=')
+      );
+      if (!hasSessionCookie) {
+        return Response.json({ active: false }, { status: 200, headers: cors });
+      }
+
+      const parsedCookie = parseSessionCookieFromHeader(rawCookieHeader);
+      if (!parsedCookie) {
+        const headers = new Headers(cors);
+        headers.set(
+          'Set-Cookie',
+          buildClearSessionCookieHeader(secureCookie)
+        );
+        return Response.json(
+          { code: 'UNAUTHORIZED', message: 'نشست فعالی یافت نشد.' },
+          { status: 401, headers }
+        );
+      }
+
+      // Optional roomCode hint check: if caller provided a specific roomCode, must match cookie
+      const bodyRead = await readBoundedUtf8Body(request, 2048);
+      if (bodyRead.ok && bodyRead.text.trim().length > 0) {
+        try {
+          const bodyObj = JSON.parse(bodyRead.text) as Record<string, unknown>;
+          const requestedCode = sanitizeRoomCode(bodyObj?.roomCode);
+          if (requestedCode && requestedCode !== parsedCookie.roomCode) {
+            return Response.json(
+              { code: 'UNAUTHORIZED', message: 'نشست متعلق به این اتاق نیست.' },
+              { status: 401, headers: cors }
+            );
+          }
+        } catch {
+          return Response.json(
+            { code: 'INVALID_MESSAGE', message: 'فرمت JSON نامعتبر است.' },
+            { status: 400, headers: cors }
+          );
+        }
+      }
+
+      const id = env.HOKM_ROOM.idFromName(parsedCookie.roomCode);
+      const stub = env.HOKM_ROOM.get(id);
+      const res = await stub.fetch(
+        new Request(
+          `https://room.internal/resume?code=${parsedCookie.roomCode}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              playerId: parsedCookie.playerId,
+              sessionToken: parsedCookie.sessionToken,
+            }),
+          }
+        )
+      );
+
+      const text = await res.text();
+      if (!res.ok) {
+        // Clear dead/expired session cookie immediately so it cannot be replayed
+        return buildJsonResponse(
+          text,
+          res.status,
+          cors,
+          buildClearSessionCookieHeader(secureCookie)
+        );
+      }
+
+      return buildJsonResponse(text, 200, cors);
+    }
+
+    // 5) Clear HttpOnly session cookie on intentional leave
+    if (url.pathname === '/api/session/clear' && request.method === 'POST') {
+      if (request.headers.get('X-Requested-With') !== 'eyvan-client') {
+        return Response.json(
+          { code: 'UNAUTHORIZED', message: 'درخواست نامعتبر است.' },
+          { status: 403, headers: cors }
+        );
+      }
+      return buildJsonResponse(
+        JSON.stringify({ ok: true }),
+        200,
+        cors,
+        buildClearSessionCookieHeader(secureCookie)
+      );
+    }
+
+    // 6) Create room (streaming UTF-8 byte bound + room-code collision retries + HttpOnly session cookie)
     if (url.pathname === '/api/rooms' && request.method === 'POST') {
-      const bodyRead = await readBoundedBody(request);
+      const bodyRead = await readBoundedUtf8Body(request, MAX_HTTP_BODY_BYTES);
       if (bodyRead.ok === false) {
         return Response.json(
-          { code: 'INVALID_MESSAGE', message: 'حجم درخواست بیش از حد مجاز است.' },
-          { status: 413, headers: cors }
+          {
+            code: 'INVALID_MESSAGE',
+            message:
+              bodyRead.status === 413
+                ? 'حجم درخواست بیش از حد مجاز است.'
+                : 'خطا در خواندن بدنه درخواست.',
+          },
+          { status: bodyRead.status, headers: cors }
         );
       }
 
@@ -210,6 +332,8 @@ export default {
         );
         lastRes = res;
         if (res.status !== 409) {
+          const text = await res.text();
+          let setCookie: string | undefined;
           if (res.ok) {
             const user = tryExtractUserForUpsert(bodyRead.text);
             if (user) {
@@ -219,11 +343,23 @@ export default {
                 console.error('[Worker] Non-fatal D1 user upsert error:', err);
               }
             }
+            try {
+              const created = JSON.parse(text) as CreateRoomResponse;
+              if (created.roomCode && created.playerId && created.sessionToken) {
+                setCookie = buildSetSessionCookieHeader(
+                  {
+                    roomCode: created.roomCode,
+                    playerId: created.playerId,
+                    sessionToken: created.sessionToken,
+                  },
+                  secureCookie
+                );
+              }
+            } catch {
+              // Ignore
+            }
           }
-          return new Response(res.body, {
-            status: res.status,
-            headers: { 'Content-Type': 'application/json', ...cors },
-          });
+          return buildJsonResponse(text, res.status, cors, setCookie);
         }
       }
 
@@ -233,7 +369,7 @@ export default {
       });
     }
 
-    // 5) Room summary & join
+    // 7) Room summary & join
     const roomMatch = url.pathname.match(
       /^\/api\/rooms\/([A-Za-z0-9]{4,8})(\/join)?$/
     );
@@ -250,11 +386,17 @@ export default {
       const stub = env.HOKM_ROOM.get(id);
 
       if (isJoin && request.method === 'POST') {
-        const bodyRead = await readBoundedBody(request);
+        const bodyRead = await readBoundedUtf8Body(request, MAX_HTTP_BODY_BYTES);
         if (bodyRead.ok === false) {
           return Response.json(
-            { code: 'INVALID_MESSAGE', message: 'حجم درخواست بیش از حد مجاز است.' },
-            { status: 413, headers: cors }
+            {
+              code: 'INVALID_MESSAGE',
+              message:
+                bodyRead.status === 413
+                  ? 'حجم درخواست بیش از حد مجاز است.'
+                  : 'خطا در خواندن بدنه درخواست.',
+            },
+            { status: bodyRead.status, headers: cors }
           );
         }
 
@@ -266,6 +408,8 @@ export default {
           })
         );
 
+        const text = await res.text();
+        let setCookie: string | undefined;
         if (res.ok) {
           const user = tryExtractUserForUpsert(bodyRead.text);
           if (user) {
@@ -275,12 +419,24 @@ export default {
               console.error('[Worker] Non-fatal D1 user upsert error:', err);
             }
           }
+          try {
+            const joined = JSON.parse(text) as JoinRoomResponse;
+            if (joined.roomCode && joined.playerId && joined.sessionToken) {
+              setCookie = buildSetSessionCookieHeader(
+                {
+                  roomCode: joined.roomCode,
+                  playerId: joined.playerId,
+                  sessionToken: joined.sessionToken,
+                },
+                secureCookie
+              );
+            }
+          } catch {
+            // Ignore
+          }
         }
 
-        return new Response(res.body, {
-          status: res.status,
-          headers: { 'Content-Type': 'application/json', ...cors },
-        });
+        return buildJsonResponse(text, res.status, cors, setCookie);
       }
 
       if (!isJoin && request.method === 'GET') {
@@ -294,7 +450,7 @@ export default {
       }
     }
 
-    // 6) D1 Recent Matches (camelCase + 4-player roster, error-resilient)
+    // 8) D1 Recent Matches (camelCase + 4-player roster, error-resilient)
     if (url.pathname === '/api/matches' && request.method === 'GET') {
       const limit = Number(url.searchParams.get('limit')) || 10;
       try {
@@ -313,7 +469,7 @@ export default {
       }
     }
 
-    // 7) D1 Player Stats (case-insensitive camelCase, error-resilient)
+    // 9) D1 Player Stats (canonical case-insensitive camelCase, error-resilient)
     const statsMatch = url.pathname.match(/^\/api\/stats\/([A-Za-z0-9_]{3,20})$/);
     if (statsMatch && request.method === 'GET') {
       const username = sanitizeUsername(statsMatch[1]);

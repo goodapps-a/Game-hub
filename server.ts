@@ -8,8 +8,14 @@ import {
   DEFAULT_DISCONNECT_GRACE_MS,
   MAX_WS_PAYLOAD_BYTES,
   isValidSeat,
+  sanitizeRoomCode,
   sanitizeUsername,
 } from './src/games/hokm/online/protocol';
+import {
+  buildClearSessionCookieHeader,
+  buildSetSessionCookieHeader,
+  parseSessionCookieFromHeader,
+} from './cloudflare/src/lib/sessionCookie';
 import { EyvanDatabase } from './server/database';
 import { HokmRoomManager } from './server/roomManager';
 
@@ -80,6 +86,7 @@ async function startServer() {
         return;
       }
       res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Vary', 'Origin');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
@@ -91,6 +98,14 @@ async function startServer() {
     }
     next();
   });
+
+  const isSecureExpressReq = (req: Request): boolean => {
+    const xfProto = req.headers['x-forwarded-proto'];
+    if (typeof xfProto === 'string') {
+      return xfProto.split(',')[0].trim().toLowerCase() === 'https';
+    }
+    return req.secure;
+  };
 
   // -------------------------------------------------------------------------
   // REST API Routes
@@ -120,6 +135,17 @@ async function startServer() {
       });
       return;
     }
+    res.setHeader(
+      'Set-Cookie',
+      buildSetSessionCookieHeader(
+        {
+          roomCode: result.response.roomCode,
+          playerId: result.response.playerId,
+          sessionToken: result.response.sessionToken,
+        },
+        isSecureExpressReq(req)
+      )
+    );
     res.status(201).json(result.response);
   });
 
@@ -153,7 +179,93 @@ async function startServer() {
       });
       return;
     }
+    res.setHeader(
+      'Set-Cookie',
+      buildSetSessionCookieHeader(
+        {
+          roomCode: result.response.roomCode,
+          playerId: result.response.playerId,
+          sessionToken: result.response.sessionToken,
+        },
+        isSecureExpressReq(req)
+      )
+    );
     res.status(200).json(result.response);
+  });
+
+  app.post('/api/session/resume', (req: Request, res: Response) => {
+    if (req.headers['x-requested-with'] !== 'eyvan-client') {
+      res.status(403).json({
+        error: 'UNAUTHORIZED',
+        message: 'درخواست نامعتبر است.',
+      });
+      return;
+    }
+
+    const rawCookieHeader = req.headers.cookie;
+    const hasSessionCookie = Boolean(
+      rawCookieHeader && rawCookieHeader.includes('eyvan_hokm_sess=')
+    );
+    if (!hasSessionCookie) {
+      res.status(200).json({ active: false });
+      return;
+    }
+
+    const parsedCookie = parseSessionCookieFromHeader(rawCookieHeader);
+    if (!parsedCookie) {
+      res.setHeader(
+        'Set-Cookie',
+        buildClearSessionCookieHeader(isSecureExpressReq(req))
+      );
+      res.status(401).json({
+        error: 'UNAUTHORIZED',
+        message: 'نشست فعالی یافت نشد.',
+      });
+      return;
+    }
+
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const requestedCode = sanitizeRoomCode(body.roomCode);
+    if (requestedCode && requestedCode !== parsedCookie.roomCode) {
+      res.status(401).json({
+        error: 'UNAUTHORIZED',
+        message: 'نشست متعلق به این اتاق نیست.',
+      });
+      return;
+    }
+
+    const result = roomManager.resumeSession(
+      parsedCookie.roomCode,
+      parsedCookie.playerId,
+      parsedCookie.sessionToken
+    );
+    if (result.ok === false) {
+      res.setHeader(
+        'Set-Cookie',
+        buildClearSessionCookieHeader(isSecureExpressReq(req))
+      );
+      res.status(result.status).json({
+        error: result.code,
+        message: result.message,
+      });
+      return;
+    }
+    res.status(200).json(result.response);
+  });
+
+  app.post('/api/session/clear', (req: Request, res: Response) => {
+    if (req.headers['x-requested-with'] !== 'eyvan-client') {
+      res.status(403).json({
+        error: 'UNAUTHORIZED',
+        message: 'درخواست نامعتبر است.',
+      });
+      return;
+    }
+    res.setHeader(
+      'Set-Cookie',
+      buildClearSessionCookieHeader(isSecureExpressReq(req))
+    );
+    res.status(200).json({ ok: true });
   });
 
   app.get('/api/matches', (req: Request, res: Response) => {

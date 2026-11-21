@@ -292,10 +292,24 @@ const VALID_SEATS = new Set<Seat>(['south', 'east', 'north', 'west']);
 const VALID_SUITS = new Set<Suit>(['hearts', 'diamonds', 'clubs', 'spades']);
 const VALID_AVATARS = new Set(['portrait', 'shamsa', 'turquoise', 'jade']);
 
+const UTF8_ENCODER = new TextEncoder();
+
+export function getUtf8ByteLength(input: string): number {
+  return UTF8_ENCODER.encode(input).byteLength;
+}
+
 export function sanitizeUsername(input: unknown): string | null {
   if (typeof input !== 'string') return null;
   const trimmed = input.trim();
   return USERNAME_RE.test(trimmed) ? trimmed : null;
+}
+
+/**
+ * Canonical case-insensitive username key for D1/SQLite primary keys & lookups
+ * (prevents duplicate stats/accounts for `Amir` vs `amir`).
+ */
+export function normalizeUsernameKey(username: string): string {
+  return username.trim().toLowerCase();
 }
 
 export function sanitizeRoomCode(input: unknown): string | null {
@@ -330,7 +344,7 @@ export function isValidCardId(input: unknown): input is string {
 export function parseClientMessage(raw: string):
   | { ok: true; message: ClientMessage }
   | { ok: false; code: OnlineErrorCode; reason: string } {
-  if (raw.length > MAX_WS_PAYLOAD_BYTES) {
+  if (getUtf8ByteLength(raw) > MAX_WS_PAYLOAD_BYTES) {
     return {
       ok: false,
       code: 'INVALID_MESSAGE',

@@ -427,6 +427,59 @@ export class HokmRoomManager {
     return room.controller.getPublicSummary();
   }
 
+  public resumeSession(
+    rawRoomCode: string,
+    playerId: string,
+    sessionToken: string
+  ):
+    | { ok: true; response: JoinRoomResponse }
+    | { ok: false; status: number; code: OnlineErrorCode; message: string } {
+    const roomCode = sanitizeRoomCode(rawRoomCode);
+    if (!roomCode) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'INVALID_MESSAGE',
+        message: 'کد اتاق نامعتبر است.',
+      };
+    }
+
+    const room = this.rooms.get(roomCode);
+    if (!room) {
+      return {
+        ok: false,
+        status: 404,
+        code: 'ROOM_NOT_FOUND',
+        message: 'اتاقی با این کد یافت نشد.',
+      };
+    }
+
+    const verified = room.controller.verifySessionForResume(
+      playerId,
+      sessionToken
+    );
+    if (verified.ok === false) {
+      return {
+        ok: false,
+        status: verified.code === 'ROOM_CLOSED' ? 404 : 401,
+        code: verified.code,
+        message: verified.message,
+      };
+    }
+
+    return {
+      ok: true,
+      response: {
+        roomId: room.controller.roomId,
+        roomCode: room.controller.roomCode,
+        playerId: verified.member.playerId,
+        canonicalSeat: verified.member.canonicalSeat,
+        sessionToken: verified.member.sessionToken,
+        wsPath: `/ws/rooms/${room.controller.roomCode}`,
+      },
+    };
+  }
+
   // -------------------------------------------------------------------------
   // WebSocket Session Attachment & Message Dispatch
   // -------------------------------------------------------------------------

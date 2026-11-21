@@ -4,12 +4,14 @@ import Database from 'better-sqlite3';
 import {
   CompletedMatchRecord,
   PlayerOnlineStats,
+  normalizeUsernameKey,
 } from '../src/games/hokm/online/protocol';
 import { Seat, TeamId } from '../src/games/hokm/engine/types';
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS users (
   username TEXT PRIMARY KEY,
+  display_username TEXT,
   avatar_code TEXT NOT NULL DEFAULT 'portrait',
   created_at INTEGER NOT NULL,
   last_seen_at INTEGER NOT NULL
@@ -32,6 +34,7 @@ CREATE TABLE IF NOT EXISTS match_players (
   match_id TEXT NOT NULL,
   player_id TEXT NOT NULL,
   username TEXT NOT NULL,
+  username_key TEXT,
   canonical_seat TEXT NOT NULL CHECK (canonical_seat IN ('south', 'east', 'north', 'west')),
   team TEXT NOT NULL CHECK (team IN ('myTeam', 'opponentTeam')),
   won INTEGER NOT NULL CHECK (won IN (0, 1)),
@@ -41,6 +44,7 @@ CREATE TABLE IF NOT EXISTS match_players (
 
 CREATE TABLE IF NOT EXISTS player_stats (
   username TEXT PRIMARY KEY,
+  display_username TEXT,
   matches_played INTEGER NOT NULL DEFAULT 0,
   wins INTEGER NOT NULL DEFAULT 0,
   losses INTEGER NOT NULL DEFAULT 0,
@@ -50,6 +54,7 @@ CREATE TABLE IF NOT EXISTS player_stats (
 );
 
 CREATE INDEX IF NOT EXISTS idx_matches_finished_at ON matches(finished_at DESC);
+CREATE INDEX IF NOT EXISTS idx_matches_room_code ON matches(room_code);
 CREATE INDEX IF NOT EXISTS idx_match_players_username ON match_players(username);
 `;
 
@@ -77,6 +82,7 @@ interface MatchPlayerRow {
 
 interface PlayerStatsRow {
   username: string;
+  display_username: string | null;
   matches_played: number;
   wins: number;
   losses: number;
@@ -86,9 +92,9 @@ interface PlayerStatsRow {
 }
 
 /**
- * SQLite persistence layer sharing the exact D1 schema (`cloudflare/migrations/0001_init.sql`).
- * Strictly parameterized statements — writes occur ONLY on user registration/join
- * and full match completion (zero per-trick write chatter).
+ * SQLite persistence layer aligned 1:1 with Cloudflare D1 migrations 0001–0003.
+ * Uses canonical lowercase `username` keys with preserved `display_username` so
+ * case variants (`Amir` vs `amir`) never create split/duplicate stats.
  */
 export class EyvanDatabase {
   private readonly db: Database.Database;
@@ -113,11 +119,13 @@ export class EyvanDatabase {
     }
     this.db.pragma('foreign_keys = ON');
     this.db.exec(SCHEMA_SQL);
+    this.ensureCanonicalUsernameColumns();
 
     this.stmtUpsertUser = this.db.prepare(`
-      INSERT INTO users (username, avatar_code, created_at, last_seen_at)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO users (username, display_username, avatar_code, created_at, last_seen_at)
+      VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(username) DO UPDATE SET
+        display_username = excluded.display_username,
         avatar_code = excluded.avatar_code,
         last_seen_at = excluded.last_seen_at
     `);
@@ -132,15 +140,16 @@ export class EyvanDatabase {
 
     this.stmtInsertMatchPlayer = this.db.prepare(`
       INSERT OR IGNORE INTO match_players (
-        match_id, player_id, username, canonical_seat, team, won
-      ) VALUES (?, ?, ?, ?, ?, ?)
+        match_id, player_id, username, username_key, canonical_seat, team, won
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
 
     this.stmtUpsertStats = this.db.prepare(`
       INSERT INTO player_stats (
-        username, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at
-      ) VALUES (?, 1, ?, ?, ?, ?, ?)
+        username, display_username, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at
+      ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
       ON CONFLICT(username) DO UPDATE SET
+        display_username = excluded.display_username,
         matches_played = matches_played + 1,
         wins = wins + excluded.wins,
         losses = losses + excluded.losses,
@@ -168,15 +177,89 @@ export class EyvanDatabase {
 
     this.stmtGetStats = this.db.prepare(`
       SELECT
-        username, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at
+        username, display_username, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at
       FROM player_stats
-      WHERE lower(username) = lower(?)
+      WHERE username = ?
       LIMIT 1
     `);
   }
 
+  /**
+   * Non-destructive upgrade for pre-existing local SQLite databases created before
+   * migration 0003 (adds missing columns and merges any mixed-case rows safely).
+   */
+  private ensureCanonicalUsernameColumns(): void {
+    const hasColumn = (table: string, col: string): boolean => {
+      const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+        name: string;
+      }>;
+      return cols.some((c) => c.name === col);
+    };
+
+    if (!hasColumn('users', 'display_username')) {
+      this.db.exec(`ALTER TABLE users ADD COLUMN display_username TEXT;`);
+    }
+    if (!hasColumn('player_stats', 'display_username')) {
+      this.db.exec(`ALTER TABLE player_stats ADD COLUMN display_username TEXT;`);
+    }
+    if (!hasColumn('match_players', 'username_key')) {
+      this.db.exec(`ALTER TABLE match_players ADD COLUMN username_key TEXT;`);
+    }
+
+    this.db.exec(`
+      UPDATE users SET display_username = username WHERE display_username IS NULL;
+      UPDATE player_stats SET display_username = username WHERE display_username IS NULL;
+      UPDATE match_players SET username_key = lower(username) WHERE username_key IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_match_players_username_key ON match_players(username_key);
+    `);
+
+    const hasMixedUsers = this.db
+      .prepare(`SELECT 1 FROM users WHERE username != lower(username) LIMIT 1`)
+      .get();
+    if (hasMixedUsers) {
+      this.db.exec(`
+        CREATE TEMP TABLE users_canon_tmp AS
+        SELECT
+          lower(username) AS username,
+          (SELECT u2.display_username FROM users u2 WHERE lower(u2.username) = lower(users.username) ORDER BY u2.last_seen_at DESC LIMIT 1) AS display_username,
+          (SELECT u2.avatar_code FROM users u2 WHERE lower(u2.username) = lower(users.username) ORDER BY u2.last_seen_at DESC LIMIT 1) AS avatar_code,
+          MIN(created_at) AS created_at,
+          MAX(last_seen_at) AS last_seen_at
+        FROM users GROUP BY lower(username);
+        DELETE FROM users;
+        INSERT INTO users (username, display_username, avatar_code, created_at, last_seen_at)
+        SELECT username, display_username, avatar_code, created_at, last_seen_at FROM users_canon_tmp;
+        DROP TABLE users_canon_tmp;
+      `);
+    }
+
+    const hasMixedStats = this.db
+      .prepare(`SELECT 1 FROM player_stats WHERE username != lower(username) LIMIT 1`)
+      .get();
+    if (hasMixedStats) {
+      this.db.exec(`
+        CREATE TEMP TABLE stats_canon_tmp AS
+        SELECT
+          lower(username) AS username,
+          (SELECT s2.display_username FROM player_stats s2 WHERE lower(s2.username) = lower(player_stats.username) ORDER BY COALESCE(s2.last_played_at, 0) DESC LIMIT 1) AS display_username,
+          SUM(matches_played) AS matches_played,
+          SUM(wins) AS wins,
+          SUM(losses) AS losses,
+          SUM(kot_wins) AS kot_wins,
+          SUM(hakem_kot_wins) AS hakem_kot_wins,
+          MAX(last_played_at) AS last_played_at
+        FROM player_stats GROUP BY lower(username);
+        DELETE FROM player_stats;
+        INSERT INTO player_stats (username, display_username, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at)
+        SELECT username, display_username, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at FROM stats_canon_tmp;
+        DROP TABLE stats_canon_tmp;
+      `);
+    }
+  }
+
   public upsertUser(username: string, avatarCode: string, now = Date.now()): void {
-    this.stmtUpsertUser.run(username, avatarCode, now, now);
+    const key = normalizeUsernameKey(username);
+    this.stmtUpsertUser.run(key, username.trim(), avatarCode, now, now);
   }
 
   public recordCompletedMatch(record: CompletedMatchRecord): void {
@@ -194,16 +277,18 @@ export class EyvanDatabase {
         rec.handsPlayed
       );
 
-      // Idempotency guard: if match_id already existed, do not double-count player_stats
       if (insertRes.changes === 0) {
         return;
       }
 
       for (const p of rec.players) {
+        const key = normalizeUsernameKey(p.username);
+        const displayName = p.username.trim();
         this.stmtInsertMatchPlayer.run(
           rec.matchId,
           p.playerId,
-          p.username,
+          displayName,
+          key,
           p.canonicalSeat,
           p.team,
           p.won ? 1 : 0
@@ -215,7 +300,8 @@ export class EyvanDatabase {
         const hakemKotInt = p.won && rec.lastWinType === 'hakem_kot' ? 1 : 0;
 
         this.stmtUpsertStats.run(
-          p.username,
+          key,
+          displayName,
           wonInt,
           lossInt,
           kotInt,
@@ -259,10 +345,11 @@ export class EyvanDatabase {
   }
 
   public getPlayerStats(username: string): PlayerOnlineStats {
-    const row = this.stmtGetStats.get(username) as PlayerStatsRow | undefined;
+    const key = normalizeUsernameKey(username);
+    const row = this.stmtGetStats.get(key) as PlayerStatsRow | undefined;
     if (!row) {
       return {
-        username,
+        username: username.trim(),
         matchesPlayed: 0,
         wins: 0,
         losses: 0,
@@ -272,7 +359,7 @@ export class EyvanDatabase {
       };
     }
     return {
-      username: row.username,
+      username: row.display_username ?? row.username,
       matchesPlayed: row.matches_played,
       wins: row.wins,
       losses: row.losses,

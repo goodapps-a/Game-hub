@@ -68,7 +68,10 @@ export interface PersistedHokmRoomState {
   readonly currentMatchId: string | null;
   readonly matchStartedAt: number | null;
   readonly matchPersisted: boolean;
-  readonly pendingMatchPersistence: CompletedMatchRecord | null;
+  /** Legacy single-slot field preserved for backward-compatible deserialization */
+  readonly pendingMatchPersistence?: CompletedMatchRecord | null;
+  /** Durable FIFO queue of completed matches awaiting confirmed D1/SQLite persistence (never cleared on rematch!) */
+  readonly pendingMatchPersistences?: CompletedMatchRecord[];
   readonly processedActions: Array<
     [string, { ok: boolean; errorCode?: OnlineErrorCode }]
   >;
@@ -165,7 +168,7 @@ export class HokmRoomController {
   private currentMatchId: string | null = null;
   private matchStartedAt: number | null = null;
   private matchPersisted = false;
-  private pendingMatchPersistence: CompletedMatchRecord | null = null;
+  private pendingMatchPersistences: CompletedMatchRecord[] = [];
   private createdAt: number;
   private closedAt: number | null = null;
 
@@ -214,7 +217,8 @@ export class HokmRoomController {
       currentMatchId: this.currentMatchId,
       matchStartedAt: this.matchStartedAt,
       matchPersisted: this.matchPersisted,
-      pendingMatchPersistence: this.pendingMatchPersistence,
+      pendingMatchPersistence: this.pendingMatchPersistences[0] ?? null,
+      pendingMatchPersistences: [...this.pendingMatchPersistences],
       processedActions: Array.from(this.processedActions.entries()),
       createdAt: this.createdAt,
       closedAt: this.closedAt,
@@ -253,7 +257,13 @@ export class HokmRoomController {
     ctrl.currentMatchId = data.currentMatchId;
     ctrl.matchStartedAt = data.matchStartedAt;
     ctrl.matchPersisted = Boolean(data.matchPersisted);
-    ctrl.pendingMatchPersistence = data.pendingMatchPersistence ?? null;
+    if (Array.isArray(data.pendingMatchPersistences)) {
+      ctrl.pendingMatchPersistences = [...data.pendingMatchPersistences];
+    } else if (data.pendingMatchPersistence) {
+      ctrl.pendingMatchPersistences = [data.pendingMatchPersistence];
+    } else {
+      ctrl.pendingMatchPersistences = [];
+    }
     ctrl.processedActions = new Map(data.processedActions ?? []);
     ctrl.createdAt = data.createdAt ?? ctrl.now();
     ctrl.closedAt = data.closedAt ?? null;
@@ -269,17 +279,26 @@ export class HokmRoomController {
   }
 
   public getPendingMatchPersistence(): CompletedMatchRecord | null {
-    return this.pendingMatchPersistence;
+    return this.pendingMatchPersistences[0] ?? null;
+  }
+
+  public getPendingMatchPersistences(): readonly CompletedMatchRecord[] {
+    return this.pendingMatchPersistences;
+  }
+
+  public hasPendingMatchPersistences(): boolean {
+    return this.pendingMatchPersistences.length > 0;
   }
 
   public markMatchPersisted(matchId: string): void {
+    const before = this.pendingMatchPersistences.length;
+    this.pendingMatchPersistences = this.pendingMatchPersistences.filter(
+      (rec) => rec.matchId !== matchId
+    );
     if (
-      this.pendingMatchPersistence &&
-      this.pendingMatchPersistence.matchId === matchId
+      this.currentMatchId === matchId ||
+      (before > 0 && this.pendingMatchPersistences.length === 0)
     ) {
-      this.pendingMatchPersistence = null;
-      this.matchPersisted = true;
-    } else if (this.currentMatchId === matchId) {
       this.matchPersisted = true;
     }
   }
@@ -531,6 +550,34 @@ export class HokmRoomController {
         detail: member.username,
       },
     };
+  }
+
+  /**
+   * Server-side read-only verification for HttpOnly cookie session resume after
+   * page refresh. Rejects CLOSED rooms, removed/expired seats, or mismatched tokens.
+   */
+  public verifySessionForResume(
+    playerId: string,
+    sessionToken: string
+  ):
+    | { ok: true; member: SeatMember }
+    | { ok: false; code: OnlineErrorCode; message: string } {
+    if (this.status === 'CLOSED') {
+      return {
+        ok: false,
+        code: 'ROOM_CLOSED',
+        message: 'اتاق بسته شده است.',
+      };
+    }
+    const member = this.getPlayerById(playerId);
+    if (!member || !constantTimeEqual(member.sessionToken, sessionToken)) {
+      return {
+        ok: false,
+        code: 'UNAUTHORIZED',
+        message: 'نشست بازی منقضی یا نامعتبر است.',
+      };
+    }
+    return { ok: true, member };
   }
 
   public markPlayerDisconnected(
@@ -1022,7 +1069,13 @@ export class HokmRoomController {
     if (collected.phase === 'MATCH_COMPLETE' && collected.handOutcome && collected.matchWinner) {
       this.status = 'FINISHED';
       const completedMatch = this.buildCompletedMatchRecord(collected);
-      this.pendingMatchPersistence = completedMatch;
+      if (
+        !this.pendingMatchPersistences.some(
+          (m) => m.matchId === completedMatch.matchId
+        )
+      ) {
+        this.pendingMatchPersistences.push(completedMatch);
+      }
       this.matchPersisted = false;
       return {
         ok: true,
@@ -1138,7 +1191,8 @@ export class HokmRoomController {
     this.currentMatchId = `m_${this.generateId()}`;
     this.matchStartedAt = this.now();
     this.matchPersisted = false;
-    this.pendingMatchPersistence = null;
+    // CRITICAL: NEVER clear `pendingMatchPersistences` on rematch — any unpersisted
+    // previous match stays safely queued until D1/SQLite confirms commit!
     this.bumpVersion();
     this.recordAction(actionId, { ok: true });
 

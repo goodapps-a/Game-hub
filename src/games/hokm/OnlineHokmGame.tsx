@@ -11,9 +11,11 @@ import {
   ConnectionState,
   HokmOnlineClient,
   OnlineSessionCredentials,
+  clearOnlineSession,
   createOnlineRoom,
   fetchRecentOnlineMatches,
   joinOnlineRoom,
+  resumeOnlineSession,
 } from './online/client';
 import {
   FlyingDealCard,
@@ -104,6 +106,37 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
   useEffect(() => {
     refreshMatches();
   }, [refreshMatches]);
+
+  // Secure page-refresh session recovery via server-verified HttpOnly cookie
+  // (ZERO sessionToken in localStorage or sessionStorage!)
+  const resumeAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (resumeAttemptedRef.current || sessionCreds) return;
+    resumeAttemptedRef.current = true;
+    let active = true;
+    void resumeOnlineSession(initialRoomCode || undefined).then((recovered) => {
+      if (active && recovered) {
+        setSessionCreds(recovered);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [initialRoomCode, sessionCreds]);
+
+  // Reflect public roomCode in URL query so refreshing returns directly to OnlineHokmGame
+  useEffect(() => {
+    if (typeof window === 'undefined' || !sessionCreds?.roomCode) return;
+    try {
+      const nextUrl = new URL(window.location.href);
+      if (nextUrl.searchParams.get('room') !== sessionCreds.roomCode) {
+        nextUrl.searchParams.set('room', sessionCreds.roomCode);
+        window.history.replaceState(null, '', nextUrl.toString());
+      }
+    } catch {
+      // Ignore iframe history restriction
+    }
+  }, [sessionCreds?.roomCode]);
 
   // 1-second ticker only when someone is disconnected so countdown updates live
   const hasDisconnectedPlayer = Boolean(
@@ -374,6 +407,16 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
       clientRef.current.leaveRoom();
       clientRef.current.disconnect();
       clientRef.current = null;
+    }
+    void clearOnlineSession();
+    try {
+      const nextUrl = new URL(window.location.href);
+      if (nextUrl.searchParams.has('room')) {
+        nextUrl.searchParams.delete('room');
+        window.history.replaceState(null, '', nextUrl.toString());
+      }
+    } catch {
+      // Ignore iframe history restriction
     }
     setExitConfirmOpen(false);
     setSessionCreds(null);

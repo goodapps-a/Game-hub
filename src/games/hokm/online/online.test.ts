@@ -486,5 +486,55 @@ describe('Online Hokm Room Rules & Security Boundaries', () => {
     assert.equal(sweep.shouldBroadcast, true);
     assert.equal(ctrl.getPublicSummary().playerCount, 1);
   });
+
+  it('consolidates mixed-case usernames (Amir vs amir) in EyvanDatabase without duplicate stats', () => {
+    const db = new EyvanDatabase(':memory:');
+    db.upsertUser('Amir_Dev', 'portrait', 1000);
+    db.upsertUser('amir_dev', 'shamsa', 2000);
+
+    db.recordCompletedMatch({
+      matchId: 'local_case_1',
+      roomCode: 'LOC111',
+      startedAt: 1000,
+      finishedAt: 2000,
+      winningTeam: 'myTeam',
+      teamAScore: 3,
+      teamBScore: 0,
+      targetScore: 3,
+      lastWinType: 'normal',
+      handsPlayed: 3,
+      players: [
+        { playerId: 'a1', username: 'Amir_Dev', canonicalSeat: 'south', team: 'myTeam', won: true },
+        { playerId: 'a2', username: 'P2_User', canonicalSeat: 'east', team: 'opponentTeam', won: false },
+        { playerId: 'a3', username: 'P3_User', canonicalSeat: 'north', team: 'myTeam', won: true },
+        { playerId: 'a4', username: 'P4_User', canonicalSeat: 'west', team: 'opponentTeam', won: false },
+      ],
+    });
+    db.recordCompletedMatch({
+      matchId: 'local_case_2',
+      roomCode: 'LOC222',
+      startedAt: 3000,
+      finishedAt: 4000,
+      winningTeam: 'opponentTeam',
+      teamAScore: 1,
+      teamBScore: 3,
+      targetScore: 3,
+      lastWinType: 'normal',
+      handsPlayed: 4,
+      players: [
+        { playerId: 'b1', username: 'amir_dev', canonicalSeat: 'south', team: 'myTeam', won: false },
+        { playerId: 'b2', username: 'p2_user', canonicalSeat: 'east', team: 'opponentTeam', won: true },
+        { playerId: 'b3', username: 'p3_user', canonicalSeat: 'north', team: 'myTeam', won: false },
+        { playerId: 'b4', username: 'p4_user', canonicalSeat: 'west', team: 'opponentTeam', won: true },
+      ],
+    });
+
+    const stats = db.getPlayerStats('AMIR_DEV');
+    assert.equal(stats.matchesPlayed, 2);
+    assert.equal(stats.wins, 1);
+    assert.equal(stats.losses, 1);
+    db.close();
+  });
 });
+
 
