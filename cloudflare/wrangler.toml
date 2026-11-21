@@ -1,0 +1,25 @@
+name = "eyvan-hokm-online"
+main = "src/index.ts"
+compatibility_date = "2026-01-15"
+
+[vars]
+DISCONNECT_GRACE_MS = "90000"
+ALLOWED_ORIGINS = ""
+
+[[durable_objects.bindings]]
+name = "HOKM_ROOM"
+class_name = "HokmRoomDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["HokmRoomDO"]
+
+[[d1_databases]]
+binding = "EYVAN_DB"
+database_name = "eyvan-hokm-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "EYVAN_ASSETS"
+bucket_name = "eyvan-assets"

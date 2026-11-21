@@ -13,13 +13,25 @@ import { ShopPage } from './platform/pages/ShopPage';
 import { GamesPage } from './platform/pages/GamesPage';
 import { FriendsPage } from './platform/pages/FriendsPage';
 import { HokmGame } from './games/hokm/HokmGame';
+import { OnlineHokmGame } from './games/hokm/OnlineHokmGame';
 import { hokmSound } from './games/hokm/audio/soundEffects';
 import { preloadCardArtwork } from './games/hokm/components/PlayingCard';
 
-function getInitialGameFromQuery(): GameId | null {
+type ActiveGameView = 'hokm-online' | 'hokm-offline' | null;
+
+function getInitialRoomCodeFromQuery(): string {
+  if (typeof window === 'undefined') return '';
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get('room');
+  return code ? code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) : '';
+}
+
+function getInitialGameFromQuery(): ActiveGameView {
   if (typeof window === 'undefined') return null;
   const params = new URLSearchParams(window.location.search);
-  return params.get('autostart') === '1' ? 'hokm' : null;
+  if (params.get('autostart') === '1') return 'hokm-offline';
+  if (params.get('room')) return 'hokm-online';
+  return null;
 }
 
 function getInitialThemeMode(): ThemeMode {
@@ -55,8 +67,11 @@ function isEditableElement(el: EventTarget | null): boolean {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<PlatformTabId>('games');
-  const [activeGame, setActiveGame] = useState<GameId | null>(
+  const [activeGame, setActiveGame] = useState<ActiveGameView>(
     getInitialGameFromQuery
+  );
+  const [initialRoomCode, setInitialRoomCode] = useState<string>(
+    getInitialRoomCodeFromQuery
   );
   const [profile, setProfile] = useState<UserProfile>(() => ({
     ...INITIAL_DEMO_PROFILE,
@@ -166,11 +181,49 @@ export default function App() {
     if (gameId === 'hokm') {
       setIsProfileOpen(false);
       setIsInChatRoom(false);
-      setActiveGame('hokm');
+      setActiveGame('hokm-online');
     }
   };
 
-  if (activeGame === 'hokm') {
+  if (activeGame === 'hokm-online') {
+    return (
+      <OnlineHokmGame
+        username={profile.username}
+        avatarCode={profile.avatarCode}
+        initialRoomCode={initialRoomCode}
+        soundEnabled={profile.appSettings.soundEnabled}
+        reducedMotionPreference={profile.appSettings.reducedMotion}
+        onChangeUsername={(nextUsername) =>
+          setProfile((prev) => ({
+            ...prev,
+            username: nextUsername,
+          }))
+        }
+        onChangeAvatar={(nextAvatar) => {
+          const validAvatar: UserProfile['avatarCode'] =
+            nextAvatar === 'portrait' ||
+            nextAvatar === 'shamsa' ||
+            nextAvatar === 'turquoise' ||
+            nextAvatar === 'jade' ||
+            nextAvatar === 'lapis'
+              ? nextAvatar
+              : 'portrait';
+          setProfile((prev) => ({
+            ...prev,
+            avatarCode: validAvatar,
+          }));
+        }}
+        onLaunchOffline={() => setActiveGame('hokm-offline')}
+        onBackToGames={() => {
+          setInitialRoomCode('');
+          setActiveGame(null);
+          setActiveTab('games');
+        }}
+      />
+    );
+  }
+
+  if (activeGame === 'hokm-offline') {
     return (
       <HokmGame
         playerName={profile.username}

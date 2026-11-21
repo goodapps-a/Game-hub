@@ -14,6 +14,7 @@ interface HandResultModalProps {
   onNewMatch: () => void;
   onBackToMenu: () => void;
   reducedMotion?: boolean;
+  canStartRematch?: boolean;
 }
 
 const CONFETTI_PIECES = [
@@ -56,6 +57,7 @@ export const HandResultModal: React.FC<HandResultModalProps> = ({
   onNewMatch,
   onBackToMenu,
   reducedMotion = false,
+  canStartRematch = true,
 }) => {
   const isVictory = matchWinner === 'myTeam';
   const winLabel = getHandWinTypeLabel(outcome.winType);
@@ -332,15 +334,21 @@ export const HandResultModal: React.FC<HandResultModalProps> = ({
           transition={{ delay: 0.34, duration: 0.3 }}
           className="mt-6 flex flex-col sm:flex-row gap-2.5"
         >
-          <button
-            type="button"
-            onClick={onNewMatch}
-            data-testid="match-new-game-btn"
-            className="flex-1 min-h-[48px] px-5 py-2.5 rounded-2xl bg-gradient-to-b from-[#FCE08B] via-[#E5B84B] to-[#C28F2B] hover:from-[#FFF0B3] hover:to-[#D4A039] text-[#0B1628] text-sm font-black flex items-center justify-center gap-2 shadow-[0_8px_24px_rgba(243,209,121,0.35)] transition-all active:scale-[0.97] cursor-pointer"
-          >
-            <RotateCcw className="w-4 h-4 stroke-[2.5]" />
-            <span>{isVictory ? 'بازی جدید' : 'شروع مجدد'}</span>
-          </button>
+          {canStartRematch ? (
+            <button
+              type="button"
+              onClick={onNewMatch}
+              data-testid="match-new-game-btn"
+              className="flex-1 min-h-[48px] px-5 py-2.5 rounded-2xl bg-gradient-to-b from-[#FCE08B] via-[#E5B84B] to-[#C28F2B] hover:from-[#FFF0B3] hover:to-[#D4A039] text-[#0B1628] text-sm font-black flex items-center justify-center gap-2 shadow-[0_8px_24px_rgba(243,209,121,0.35)] transition-all active:scale-[0.97] cursor-pointer"
+            >
+              <RotateCcw className="w-4 h-4 stroke-[2.5]" />
+              <span>{isVictory ? 'بازی جدید' : 'شروع مجدد'}</span>
+            </button>
+          ) : (
+            <div className="flex-1 min-h-[48px] px-4 py-2.5 rounded-2xl bg-white/8 border border-[#D4AE58]/35 text-[#D8E7E1] text-xs font-bold flex items-center justify-center">
+              در انتظار میزبان برای شروع مسابقه جدید...
+            </div>
+          )}
 
           <button
             type="button"

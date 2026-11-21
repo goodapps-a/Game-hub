@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { AlertTriangle, Crown } from 'lucide-react';
+import { AlertTriangle, Crown, Wifi, WifiOff } from 'lucide-react';
 import {
   Card,
   DEFAULT_PLAYERS,
@@ -25,6 +25,21 @@ export interface FlyingDealCard {
 
 export type TrickCollectPhase = 'idle' | 'stacking' | 'sliding';
 
+export interface OnlineSeatPlayerMeta {
+  name: string;
+  avatarSrc: string;
+  connected?: boolean;
+  disconnectRemainingSec?: number | null;
+}
+
+export interface OnlineTableHudInfo {
+  roomCode: string;
+  connectionState: 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
+  rttMs: number | null;
+  bannerNotice?: string | null;
+  waitingHakemName?: string | null;
+}
+
 interface HokmTableProps {
   state: HokmState;
   visibleHandCounts: Record<Seat, number>;
@@ -39,6 +54,10 @@ interface HokmTableProps {
   reducedMotion: boolean;
   canHumanPlay: boolean;
   exitConfirmOpen: boolean;
+  seatPlayers?: Record<Seat, OnlineSeatPlayerMeta>;
+  deckCount?: number;
+  onlineHud?: OnlineTableHudInfo;
+  canStartRematch?: boolean;
   onSelectCard: (cardId: string | null) => void;
   onPlayCard: (cardId: string) => void;
   onChooseTrump: (suit: Suit) => void;
@@ -87,16 +106,27 @@ const SeatProfile: React.FC<{
   avatarSrc: string;
   isTurn: boolean;
   isHakem: boolean;
-}> = ({ seat, displayName, avatarSrc, isTurn, isHakem }) => {
+  connected?: boolean;
+  disconnectRemainingSec?: number | null;
+}> = ({
+  seat,
+  displayName,
+  avatarSrc,
+  isTurn,
+  isHakem,
+  connected = true,
+  disconnectRemainingSec = null,
+}) => {
   return (
     <div
       className="relative inline-flex flex-col items-center select-none shrink-0"
       data-seat={seat}
       data-active-turn={isTurn ? 'true' : 'false'}
+      data-connected={connected ? 'true' : 'false'}
     >
       {/* Circular Avatar Medallion */}
       <div className="relative">
-        {isTurn && (
+        {isTurn && connected && (
           <span
             className="absolute -inset-1.5 rounded-full bg-[#F3D179]/28 blur-[5px] animate-pulse pointer-events-none"
             aria-hidden="true"
@@ -104,9 +134,11 @@ const SeatProfile: React.FC<{
         )}
         <div
           className={`relative w-11 h-11 sm:w-12 sm:h-12 rounded-full overflow-hidden border-[2.5px] bg-[#0B1E1A] transition-all duration-200 ${
-            isTurn
-              ? 'border-[#F3D179] shadow-[0_0_20px_rgba(243,209,121,0.65)] scale-[1.04]'
-              : 'border-[#D4AE58]/60 shadow-[0_4px_12px_rgba(0,0,0,0.45)]'
+            !connected
+              ? 'border-[#F59E0B] opacity-70 grayscale-[0.4]'
+              : isTurn
+                ? 'border-[#F3D179] shadow-[0_0_20px_rgba(243,209,121,0.65)] scale-[1.04]'
+                : 'border-[#D4AE58]/60 shadow-[0_4px_12px_rgba(0,0,0,0.45)]'
           }`}
         >
           <img
@@ -133,9 +165,11 @@ const SeatProfile: React.FC<{
       {/* Uniform Centered Dark-Glass English Nameplate overlapping bottom edge of ring */}
       <div
         className={`relative z-10 -mt-2 px-2.5 py-[2px] rounded-full border backdrop-blur-md transition-colors duration-200 ${
-          isTurn
-            ? 'bg-[#0E2B24]/95 border-[#F3D179] shadow-[0_3px_10px_rgba(0,0,0,0.5)]'
-            : 'bg-[#061814]/88 border-[#D4AE58]/40 shadow-[0_2px_8px_rgba(0,0,0,0.4)]'
+          !connected
+            ? 'bg-[#3B1D0A]/95 border-[#F59E0B] shadow-[0_2px_8px_rgba(0,0,0,0.5)]'
+            : isTurn
+              ? 'bg-[#0E2B24]/95 border-[#F3D179] shadow-[0_3px_10px_rgba(0,0,0,0.5)]'
+              : 'bg-[#061814]/88 border-[#D4AE58]/40 shadow-[0_2px_8px_rgba(0,0,0,0.4)]'
         }`}
       >
         <span
@@ -145,6 +179,16 @@ const SeatProfile: React.FC<{
           {displayName}
         </span>
       </div>
+
+      {/* Disconnected Grace Countdown Badge (Online Mode Only) */}
+      {!connected && (
+        <span className="mt-1 px-2 py-[1px] rounded-full bg-[#78350F]/90 border border-[#F59E0B]/70 text-[9px] font-bold text-[#FDE68A] whitespace-nowrap">
+          قطع اتصال
+          {disconnectRemainingSec !== null
+            ? ` · ${toPersianDigits(disconnectRemainingSec)}ث`
+            : ''}
+        </span>
+      )}
     </div>
   );
 };
@@ -676,6 +720,10 @@ export const HokmTable: React.FC<HokmTableProps> = ({
   reducedMotion,
   canHumanPlay,
   exitConfirmOpen,
+  seatPlayers,
+  deckCount,
+  onlineHud,
+  canStartRematch = true,
   onSelectCard,
   onPlayCard,
   onChooseTrump,
@@ -737,11 +785,35 @@ export const HokmTable: React.FC<HokmTableProps> = ({
       : []
   );
 
+  const effectiveDeckCount = deckCount ?? state.deck.length;
   const showDeckOnTable =
     state.phase === 'SHUFFLING' ||
     state.phase === 'DEALING_INITIAL_5' ||
     state.phase === 'DEALING_REMAINING_8' ||
-    (state.phase === 'CHOOSING_TRUMP' && state.deck.length > 0);
+    (state.phase === 'CHOOSING_TRUMP' && effectiveDeckCount > 0);
+
+  const resolvedSeats: Record<Seat, OnlineSeatPlayerMeta> = {
+    south: seatPlayers?.south ?? {
+      name: playerName,
+      avatarSrc: SEAT_AVATARS.south,
+      connected: true,
+    },
+    east: seatPlayers?.east ?? {
+      name: DEFAULT_PLAYERS.east.name,
+      avatarSrc: SEAT_AVATARS.east,
+      connected: true,
+    },
+    north: seatPlayers?.north ?? {
+      name: DEFAULT_PLAYERS.north.name,
+      avatarSrc: SEAT_AVATARS.north,
+      connected: true,
+    },
+    west: seatPlayers?.west ?? {
+      name: DEFAULT_PLAYERS.west.name,
+      avatarSrc: SEAT_AVATARS.west,
+      connected: true,
+    },
+  };
 
   // Team-based collection slide target:
   // myTeam -> always South (bottom player); opponentTeam -> always East (right player)
@@ -804,6 +876,42 @@ export const HokmTable: React.FC<HokmTableProps> = ({
         />
       </header>
 
+      {/* Subtle Online Status Strip (Online Mode ONLY) */}
+      {onlineHud && (
+        <div
+          className="relative z-25 flex flex-wrap items-center justify-center gap-2 px-3 pt-1.5"
+          data-testid="online-table-hud"
+        >
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#061814]/88 border border-[#D4AE58]/35 text-[11px] font-bold text-[#DCECE6] backdrop-blur-md">
+            <span dir="ltr" className="font-mono text-[#F3D179]">
+              #{onlineHud.roomCode}
+            </span>
+            <span className="opacity-40">|</span>
+            {onlineHud.connectionState === 'connected' ? (
+              <span className="inline-flex items-center gap-1 text-[#6EE7B7]">
+                <Wifi className="w-3 h-3" />
+                {onlineHud.rttMs !== null
+                  ? `${toPersianDigits(onlineHud.rttMs)}ms`
+                  : 'متصل'}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-[#FDE68A]">
+                <WifiOff className="w-3 h-3 animate-pulse" />
+                در حال اتصال مجدد...
+              </span>
+            )}
+          </div>
+
+          {(onlineHud.bannerNotice || onlineHud.waitingHakemName) && (
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#0E3129]/92 border border-[#F3D179]/55 text-[11px] font-bold text-[#FDE68A] backdrop-blur-md">
+              {onlineHud.bannerNotice
+                ? onlineHud.bannerNotice
+                : `در انتظار انتخاب خال حکم توسط ${onlineHud.waitingHakemName}...`}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Main Traditional Salon Arena */}
       <main className="flex-1 relative z-10 flex flex-col justify-between px-2 sm:px-6 py-2 sm:py-3 max-w-6xl w-full mx-auto">
         {/* Inlaid Persian Gold & Khatamkari Perimeter Rail */}
@@ -828,12 +936,14 @@ export const HokmTable: React.FC<HokmTableProps> = ({
         {/* TOP SEAT: North (Partner) */}
         <section
           className="relative z-10 flex flex-col items-center gap-1 pt-1"
-          aria-label={DEFAULT_PLAYERS.north.name}
+          aria-label={resolvedSeats.north.name}
         >
           <SeatProfile
             seat="north"
-            displayName={DEFAULT_PLAYERS.north.name}
-            avatarSrc={SEAT_AVATARS.north}
+            displayName={resolvedSeats.north.name}
+            avatarSrc={resolvedSeats.north.avatarSrc}
+            connected={resolvedSeats.north.connected}
+            disconnectRemainingSec={resolvedSeats.north.disconnectRemainingSec}
             isTurn={
               (state.phase === 'PLAYING_TRICK' ||
                 state.phase === 'CHOOSING_TRUMP') &&
@@ -853,12 +963,14 @@ export const HokmTable: React.FC<HokmTableProps> = ({
           <div
             dir="rtl"
             className="flex flex-col items-center justify-center gap-2"
-            aria-label={DEFAULT_PLAYERS.west.name}
+            aria-label={resolvedSeats.west.name}
           >
             <SeatProfile
               seat="west"
-              displayName={DEFAULT_PLAYERS.west.name}
-              avatarSrc={SEAT_AVATARS.west}
+              displayName={resolvedSeats.west.name}
+              avatarSrc={resolvedSeats.west.avatarSrc}
+              connected={resolvedSeats.west.connected}
+              disconnectRemainingSec={resolvedSeats.west.disconnectRemainingSec}
               isTurn={
                 (state.phase === 'PLAYING_TRICK' ||
                   state.phase === 'CHOOSING_TRUMP') &&
@@ -1110,12 +1222,14 @@ export const HokmTable: React.FC<HokmTableProps> = ({
           <div
             dir="rtl"
             className="flex flex-col items-center justify-center gap-2"
-            aria-label={DEFAULT_PLAYERS.east.name}
+            aria-label={resolvedSeats.east.name}
           >
             <SeatProfile
               seat="east"
-              displayName={DEFAULT_PLAYERS.east.name}
-              avatarSrc={SEAT_AVATARS.east}
+              displayName={resolvedSeats.east.name}
+              avatarSrc={resolvedSeats.east.avatarSrc}
+              connected={resolvedSeats.east.connected}
+              disconnectRemainingSec={resolvedSeats.east.disconnectRemainingSec}
               isTurn={
                 (state.phase === 'PLAYING_TRICK' ||
                   state.phase === 'CHOOSING_TRUMP') &&
@@ -1143,13 +1257,15 @@ export const HokmTable: React.FC<HokmTableProps> = ({
         {/* BOTTOM SEAT: South (Main Player) + My Team Pile (zero-shift anchored) + Hand */}
         <section
           className="relative z-20 flex flex-col items-center gap-4 sm:gap-3.5 pb-2 sm:pb-3"
-          aria-label={playerName}
+          aria-label={resolvedSeats.south.name}
         >
           <div className="relative flex items-center justify-center min-h-[58px] sm:min-h-[64px]">
             <SeatProfile
               seat="south"
-              displayName={playerName}
-              avatarSrc={SEAT_AVATARS.south}
+              displayName={resolvedSeats.south.name}
+              avatarSrc={resolvedSeats.south.avatarSrc}
+              connected={resolvedSeats.south.connected}
+              disconnectRemainingSec={resolvedSeats.south.disconnectRemainingSec}
               isTurn={
                 (state.phase === 'PLAYING_TRICK' ||
                   state.phase === 'CHOOSING_TRUMP') &&
@@ -1277,6 +1393,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               onNewMatch={onNewMatch}
               onBackToMenu={onConfirmExit}
               reducedMotion={reducedMotion}
+              canStartRematch={canStartRematch}
             />
           )}
       </AnimatePresence>
