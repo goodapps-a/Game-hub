@@ -1,5 +1,5 @@
 import { GameModuleDescriptor } from '../platform/types/platform';
-import { PLATFORM_ASSETS } from '../platform/data/demoData';
+import { PLATFORM_ASSETS } from '../platform/data/assets';
 
 /**
  * Central plug-and-play game module registry.

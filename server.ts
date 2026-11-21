@@ -2,7 +2,7 @@ import 'dotenv/config';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import express, { Request, Response, NextFunction } from 'express';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import { WebSocketServer } from 'ws';
 import {
   DEFAULT_DISCONNECT_GRACE_MS,
@@ -17,6 +17,7 @@ import {
   buildSetSessionCookieHeader,
   parseSessionCookieFromHeader,
 } from './cloudflare/src/lib/sessionCookie';
+import { handleAuthHttpRequest } from './cloudflare/src/lib/auth/httpHandler';
 import { EyvanDatabase } from './server/database';
 import { HokmRoomManager } from './server/roomManager';
 
@@ -123,6 +124,81 @@ async function startServer() {
       disconnectGraceMs: DISCONNECT_GRACE_MS,
       serverTime: Date.now(),
     });
+  });
+
+  // Central Platform Authentication (`/api/auth/*` — shared handler with Cloudflare Workers)
+  app.all('/api/auth/*', async (req: Request, res: Response) => {
+    try {
+      const protocol = isSecureExpressReq(req) ? 'https' : 'http';
+      const host = req.headers.host ?? `localhost:${PORT}`;
+      const fullUrl = `${protocol}://${host}${req.originalUrl}`;
+      const headers = new Headers();
+      for (const [key, val] of Object.entries(req.headers)) {
+        const lower = key.toLowerCase();
+        if (
+          lower === 'content-length' ||
+          lower === 'transfer-encoding' ||
+          lower === 'connection'
+        ) {
+          continue;
+        }
+        if (typeof val === 'string') {
+          headers.set(key, val);
+        } else if (Array.isArray(val)) {
+          headers.set(key, val.join(', '));
+        }
+      }
+
+      const method = req.method.toUpperCase();
+      const hasBody = method !== 'GET' && method !== 'HEAD';
+      const bodyStr =
+        hasBody && req.body !== undefined && Object.keys(req.body ?? {}).length > 0
+          ? JSON.stringify(req.body)
+          : hasBody && typeof req.body === 'object' && req.body !== null
+          ? JSON.stringify(req.body)
+          : undefined;
+
+      const webReq = new Request(fullUrl, {
+        method,
+        headers,
+        body: bodyStr,
+      });
+
+      const xff = req.headers['x-forwarded-for'];
+      const clientIp =
+        (typeof xff === 'string' ? xff.split(',')[0]?.trim() : undefined) ||
+        req.socket.remoteAddress ||
+        'unknown';
+
+      const webRes = await handleAuthHttpRequest(webReq, req.path, {
+        db: db.getD1Adapter(),
+        corsHeaders: {},
+        secureCookie: isSecureExpressReq(req),
+        cookieOptions: cookieOpts,
+        originAllowed: isOriginAllowed(req),
+        clientIp,
+        userAgent: String(req.headers['user-agent'] ?? 'unknown'),
+        sessionTtlSec: process.env.AUTH_SESSION_TTL_SEC,
+      });
+
+      if (!webRes) {
+        res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'مسیر یافت نشد.' });
+        return;
+      }
+
+      webRes.headers.forEach((value, key) => {
+        res.setHeader(key, value);
+      });
+      const responseText = await webRes.text();
+      res.status(webRes.status).send(responseText);
+    } catch (err) {
+      console.error('[Auth] Express route adapter error:', err instanceof Error ? err.message : 'unknown');
+      res.status(500).json({
+        ok: false,
+        code: 'DATABASE_ERROR',
+        message: 'خطای داخلی سرور رخ داد.',
+      });
+    }
   });
 
   app.post('/api/rooms', (req: Request, res: Response) => {
@@ -292,6 +368,27 @@ async function startServer() {
     }
     res.json(db.getPlayerStats(cleanName));
   });
+
+  // Clean JSON parse error handler for `/api/*` routes (never leak stack traces or HTML)
+  app.use(
+    '/api',
+    (
+      err: unknown,
+      _req: Request,
+      res: Response,
+      next: NextFunction
+    ) => {
+      if (err && typeof err === 'object' && 'type' in err && (err as { type?: string }).type === 'entity.parse.failed') {
+        res.status(400).json({
+          ok: false,
+          code: 'INVALID_INPUT',
+          message: 'فرمت JSON درخواست نامعتبر است.',
+        });
+        return;
+      }
+      next(err);
+    }
+  );
 
   // -------------------------------------------------------------------------
   // Frontend SPA Middleware (Vite dev middleware vs production dist/)

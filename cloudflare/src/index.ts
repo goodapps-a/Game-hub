@@ -31,6 +31,7 @@ import {
   isHttpsRequest,
   parseSessionCookieFromHeader,
 } from './lib/sessionCookie';
+import { handleAuthHttpRequest } from './lib/auth/httpHandler';
 
 export { HokmRoomDO };
 
@@ -178,6 +179,25 @@ export default {
         },
         { headers: cors }
       );
+    }
+
+    // 1b) Central Platform Authentication (`/api/auth/*` — independent of Hokm room sessions)
+    if (url.pathname.startsWith('/api/auth/')) {
+      const clientIp =
+        request.headers.get('CF-Connecting-IP') ??
+        request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ??
+        'unknown';
+      const authRes = await handleAuthHttpRequest(request, url.pathname, {
+        db: env.EYVAN_DB,
+        corsHeaders: cors,
+        secureCookie,
+        cookieOptions: cookieOpts,
+        originAllowed: isOriginAllowed(request, env),
+        clientIp,
+        userAgent: request.headers.get('User-Agent') ?? 'unknown',
+        sessionTtlSec: env.AUTH_SESSION_TTL_SEC,
+      });
+      if (authRes) return authRes;
     }
 
     // 2) R2 asset serving (card artwork, audio, avatars)

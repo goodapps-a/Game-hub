@@ -8,7 +8,7 @@ import {
   Moon,
 } from 'lucide-react';
 import { PlatformTabId, ThemeMode, UserProfile } from '../types/platform';
-import { PLATFORM_ASSETS } from '../data/demoData';
+import { PLATFORM_ASSETS } from '../data/assets';
 import { EyvanLogo } from '../theme/PersianPatterns';
 import { toPersianDigits } from '../theme/tokens';
 

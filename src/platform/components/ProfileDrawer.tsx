@@ -19,15 +19,20 @@ import {
   toPersianDigits,
 } from '../theme/tokens';
 import {
-  validateAndSuggestUsername,
+  validateUsernameFormat,
   UsernameValidationResult,
-} from '../data/demoData';
+} from '../data/guestDefaults';
+import { AuthUserSummary } from '../auth/authClient';
+import { AccountAuthPanel } from './AccountAuthPanel';
 
 interface ProfileDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   profile: UserProfile;
   onUpdateProfile: (updater: (prev: UserProfile) => UserProfile) => void;
+  authUser: AuthUserSummary | null;
+  authLoading: boolean;
+  onAuthChange: (user: AuthUserSummary | null) => void;
 }
 
 type DrawerSection = 'overview' | 'edit' | 'account' | 'app';
@@ -47,6 +52,9 @@ export const ProfileDrawer: React.FC<ProfileDrawerProps> = ({
   onClose,
   profile,
   onUpdateProfile,
+  authUser,
+  authLoading,
+  onAuthChange,
 }) => {
   const [section, setSection] = useState<DrawerSection>('overview');
   const [draftName, setDraftName] = useState(profile.username);
@@ -81,7 +89,7 @@ export const ProfileDrawer: React.FC<ProfileDrawerProps> = ({
     setDraftName(value);
     setSavedFeedback(false);
     if (value.trim().length > 0) {
-      setValidation(validateAndSuggestUsername(value, profile.username));
+      setValidation(validateUsernameFormat(value));
     } else {
       setValidation({ valid: false, suggestions: [] });
     }
@@ -89,13 +97,13 @@ export const ProfileDrawer: React.FC<ProfileDrawerProps> = ({
 
   const handlePickSuggestion = (suggested: string) => {
     setDraftName(suggested);
-    setValidation(validateAndSuggestUsername(suggested, profile.username));
+    setValidation(validateUsernameFormat(suggested));
     setSavedFeedback(false);
   };
 
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
-    const check = validateAndSuggestUsername(draftName, profile.username);
+    const check = validateUsernameFormat(draftName);
     setValidation(check);
     if (!check.valid) return;
 
@@ -174,7 +182,8 @@ export const ProfileDrawer: React.FC<ProfileDrawerProps> = ({
                       {profile.username}
                     </div>
                     <div className="text-xs theme-muted mt-0.5">
-                      شناسه بازیکن · سطح {toPersianDigits(profile.level)}
+                      {authUser ? 'حساب مرکزی ایوان' : 'حالت مهمان'} · سطح{' '}
+                      {toPersianDigits(profile.level)}
                     </div>
                   </div>
                 </div>
@@ -410,8 +419,13 @@ export const ProfileDrawer: React.FC<ProfileDrawerProps> = ({
                 )}
 
                 {section === 'account' && (
-                  <div className="space-y-2.5">
-                    <h3 className="text-sm font-bold theme-heading">
+                  <div className="space-y-3.5">
+                    <AccountAuthPanel
+                      authUser={authUser}
+                      authLoading={authLoading}
+                      onAuthChange={onAuthChange}
+                    />
+                    <h3 className="text-sm font-bold theme-heading pt-1">
                       تنظیمات حساب
                     </h3>
                     {(

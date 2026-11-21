@@ -29,7 +29,7 @@ import {
   sanitizeUsername,
 } from '../online/protocol';
 import { ConnectionState } from '../online/client';
-import { PLATFORM_ASSETS } from '../../../platform/data/demoData';
+import { PLATFORM_ASSETS } from '../../../platform/data/assets';
 import { toPersianDigits } from '../../../platform/theme/tokens';
 
 export const ONLINE_AVATAR_OPTIONS: readonly {

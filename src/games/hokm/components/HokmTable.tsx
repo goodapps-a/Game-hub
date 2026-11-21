@@ -16,7 +16,7 @@ import { HandResultModal } from './HandResultModal';
 import { CardBackSvg } from './CardBackSvg';
 import { PersianCornerOrnament } from '../../../platform/theme/PersianPatterns';
 import { toPersianDigits } from '../../../platform/theme/tokens';
-import { PLATFORM_ASSETS } from '../../../platform/data/demoData';
+import { PLATFORM_ASSETS } from '../../../platform/data/assets';
 
 export interface FlyingDealCard {
   id: string;

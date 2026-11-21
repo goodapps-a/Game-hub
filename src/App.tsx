@@ -5,7 +5,12 @@ import {
   ThemeMode,
   UserProfile,
 } from './platform/types/platform';
-import { INITIAL_DEMO_PROFILE, PLATFORM_ASSETS } from './platform/data/demoData';
+import { PLATFORM_ASSETS } from './platform/data/assets';
+import { createInitialGuestProfile } from './platform/data/guestDefaults';
+import {
+  AuthUserSummary,
+  fetchCurrentAuthSession,
+} from './platform/auth/authClient';
 import { TopBar } from './platform/components/TopBar';
 import { BottomNav } from './platform/components/BottomNav';
 import { ProfileDrawer } from './platform/components/ProfileDrawer';
@@ -73,18 +78,64 @@ export default function App() {
   const [initialRoomCode, setInitialRoomCode] = useState<string>(
     getInitialRoomCodeFromQuery
   );
-  const [profile, setProfile] = useState<UserProfile>(() => ({
-    ...INITIAL_DEMO_PROFILE,
-    appSettings: {
-      ...INITIAL_DEMO_PROFILE.appSettings,
-      themeMode: getInitialThemeMode(),
-    },
-  }));
+  const [profile, setProfile] = useState<UserProfile>(() =>
+    createInitialGuestProfile(getInitialThemeMode())
+  );
+  const [authUser, setAuthUser] = useState<AuthUserSummary | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isInChatRoom, setIsInChatRoom] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
 
   const themeMode = profile.appSettings.themeMode;
+
+  const applyAuthenticatedUser = (user: AuthUserSummary | null) => {
+    setAuthUser(user);
+    if (user) {
+      const validAvatar: UserProfile['avatarCode'] =
+        user.avatarCode === 'portrait' ||
+        user.avatarCode === 'shamsa' ||
+        user.avatarCode === 'turquoise' ||
+        user.avatarCode === 'jade' ||
+        user.avatarCode === 'lapis'
+          ? user.avatarCode
+          : 'portrait';
+      setProfile((prev) => ({
+        ...prev,
+        id: user.userId,
+        username: user.username,
+        avatarCode: validAvatar,
+      }));
+    } else {
+      setProfile((prev) => ({
+        ...createInitialGuestProfile(prev.appSettings.themeMode),
+        appSettings: prev.appSettings,
+      }));
+    }
+  };
+
+  // Hydrate central account session strictly from server HttpOnly cookie (`/api/auth/me`)
+  useEffect(() => {
+    let active = true;
+    fetchCurrentAuthSession()
+      .then((res) => {
+        if (!active) return;
+        if (res.ok && res.authenticated && res.user) {
+          applyAuthenticatedUser(res.user);
+        } else {
+          setAuthUser(null);
+        }
+      })
+      .catch(() => {
+        if (active) setAuthUser(null);
+      })
+      .finally(() => {
+        if (active) setAuthLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // Pre-decode court/ace card artwork gently after initial paint so home preview opens immediately
   useEffect(() => {
@@ -323,6 +374,9 @@ export default function App() {
           onClose={() => setIsProfileOpen(false)}
           profile={profile}
           onUpdateProfile={setProfile}
+          authUser={authUser}
+          authLoading={authLoading}
+          onAuthChange={applyAuthenticatedUser}
         />
       </div>
     </div>

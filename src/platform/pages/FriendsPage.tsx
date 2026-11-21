@@ -13,12 +13,6 @@ import {
   X,
 } from 'lucide-react';
 import {
-  INITIAL_DIRECT_CHATS,
-  INITIAL_FRIENDS_DEMO,
-  INITIAL_GROUP_CHATS,
-  INITIAL_GROUPS_DEMO,
-} from '../data/demoData';
-import {
   ChatGroupDemo,
   ChatMessage,
   FriendDemo,
@@ -51,13 +45,13 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
   onChatModeChange,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<FriendsTab>('people');
-  const [friends, setFriends] = useState<FriendDemo[]>(INITIAL_FRIENDS_DEMO);
-  const [groups, setGroups] = useState<ChatGroupDemo[]>(INITIAL_GROUPS_DEMO);
+  const [friends, setFriends] = useState<FriendDemo[]>([]);
+  const [groups, setGroups] = useState<ChatGroupDemo[]>([]);
   const [directChats, setDirectChats] = useState<Record<string, ChatMessage[]>>(
-    INITIAL_DIRECT_CHATS
+    {}
   );
   const [groupChats, setGroupChats] = useState<Record<string, ChatMessage[]>>(
-    INITIAL_GROUP_CHATS
+    {}
   );
   const [activeChat, setActiveChat] = useState<ActiveChatTarget>(null);
   const [draftMessage, setDraftMessage] = useState('');
@@ -66,13 +60,11 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
   // Local create-group modal state
   const [isCreatingGroup, setIsCreatingGroup] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
-  const [selectedMembers, setSelectedMembers] = useState<string[]>([
-    'parvin_sh',
-    'sohrab_k',
-  ]);
+  const [selectedMembers, setSelectedMembers] = useState<string[]>([]);
 
   const chatEndRef = useRef<HTMLDivElement | null>(null);
-  const inviteLink = `https://eyvan.play/invite/${currentUsername}`;
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const inviteLink = `${origin}/?invite=${encodeURIComponent(currentUsername)}`;
 
   // Inform App when entering/leaving chat room so mobile BottomNav hides inside chat
   useEffect(() => {
@@ -525,57 +517,63 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
         <div>
           {/* Friends Chat List (Every friend has a cohesive portrait avatar) */}
           <section className="eyvan-card rounded-2xl overflow-hidden divide-y divide-[var(--eyvan-gold-border)]">
-            {friends.map((friend) => (
-              <button
-                key={friend.id}
-                type="button"
-                onClick={() => handleOpenDirectChat(friend.id)}
-                data-friend-chat={friend.username}
-                className="w-full px-4 py-3.5 flex items-center justify-between gap-3 hover:bg-black/5 transition-colors text-right cursor-pointer"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="relative shrink-0">
-                    <img
-                      src={friend.avatarSrc}
-                      alt={friend.username}
-                      decoding="sync"
-                      loading="eager"
-                      className="w-11 h-11 rounded-full object-cover border-2 border-[#D4AE58]/55"
-                    />
-                    <span
-                      className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-[#0B1528] ${
-                        friend.status === 'online'
-                          ? 'bg-[#22C55E]'
-                          : 'bg-[#64748B]'
-                      }`}
-                    />
+            {friends.length === 0 ? (
+              <div className="px-4 py-8 text-center text-xs sm:text-sm theme-muted">
+                هنوز دوستی اضافه نشده است.
+              </div>
+            ) : (
+              friends.map((friend) => (
+                <button
+                  key={friend.id}
+                  type="button"
+                  onClick={() => handleOpenDirectChat(friend.id)}
+                  data-friend-chat={friend.username}
+                  className="w-full px-4 py-3.5 flex items-center justify-between gap-3 hover:bg-black/5 transition-colors text-right cursor-pointer"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="relative shrink-0">
+                      <img
+                        src={friend.avatarSrc}
+                        alt={friend.username}
+                        decoding="sync"
+                        loading="eager"
+                        className="w-11 h-11 rounded-full object-cover border-2 border-[#D4AE58]/55"
+                      />
+                      <span
+                        className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-[#0B1528] ${
+                          friend.status === 'online'
+                            ? 'bg-[#22C55E]'
+                            : 'bg-[#64748B]'
+                        }`}
+                      />
+                    </div>
+
+                    <div className="min-w-0">
+                      <div
+                        dir="ltr"
+                        className="text-sm font-extrabold theme-heading truncate text-right"
+                      >
+                        {friend.username}
+                      </div>
+                      <div className="text-xs theme-muted truncate mt-0.5">
+                        {friend.lastMessage}
+                      </div>
+                    </div>
                   </div>
 
-                  <div className="min-w-0">
-                    <div
-                      dir="ltr"
-                      className="text-sm font-extrabold theme-heading truncate text-right"
-                    >
-                      {friend.username}
-                    </div>
-                    <div className="text-xs theme-muted truncate mt-0.5">
-                      {friend.lastMessage}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex flex-col items-end gap-1.5 shrink-0">
-                  <span className="text-[10px] theme-muted whitespace-nowrap">
-                    {friend.lastMessageTime}
-                  </span>
-                  {friend.unreadCount > 0 && (
-                    <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-[#0D8A8A] text-white text-[10px] font-extrabold flex items-center justify-center tabular-nums">
-                      {toPersianDigits(friend.unreadCount)}
+                  <div className="flex flex-col items-end gap-1.5 shrink-0">
+                    <span className="text-[10px] theme-muted whitespace-nowrap">
+                      {friend.lastMessageTime}
                     </span>
-                  )}
-                </div>
-              </button>
-            ))}
+                    {friend.unreadCount > 0 && (
+                      <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-[#0D8A8A] text-white text-[10px] font-extrabold flex items-center justify-center tabular-nums">
+                        {toPersianDigits(friend.unreadCount)}
+                      </span>
+                    )}
+                  </div>
+                </button>
+              ))
+            )}
           </section>
         </div>
       )}
@@ -671,49 +669,55 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
           )}
 
           <section className="eyvan-card rounded-2xl overflow-hidden divide-y divide-[var(--eyvan-gold-border)]">
-            {groups.map((group) => (
-              <button
-                key={group.id}
-                type="button"
-                onClick={() => handleOpenGroupChat(group.id)}
-                data-group-chat={group.id}
-                className="w-full px-4 py-3.5 flex items-center justify-between gap-3 hover:bg-black/5 transition-colors text-right cursor-pointer"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <div
-                    className="w-11 h-11 rounded-full border border-[#D4AE58]/50 flex items-center justify-center text-white shrink-0"
-                    style={{ backgroundColor: group.accentColor }}
-                  >
-                    <Users className="w-5 h-5" />
+            {groups.length === 0 ? (
+              <div className="px-4 py-8 text-center text-xs sm:text-sm theme-muted">
+                هنوز گروهی ثبت نشده است.
+              </div>
+            ) : (
+              groups.map((group) => (
+                <button
+                  key={group.id}
+                  type="button"
+                  onClick={() => handleOpenGroupChat(group.id)}
+                  data-group-chat={group.id}
+                  className="w-full px-4 py-3.5 flex items-center justify-between gap-3 hover:bg-black/5 transition-colors text-right cursor-pointer"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div
+                      className="w-11 h-11 rounded-full border border-[#D4AE58]/50 flex items-center justify-center text-white shrink-0"
+                      style={{ backgroundColor: group.accentColor }}
+                    >
+                      <Users className="w-5 h-5" />
+                    </div>
+
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-extrabold theme-heading truncate">
+                          {group.name}
+                        </span>
+                        <span className="text-[10px] theme-accent-teal font-bold whitespace-nowrap">
+                          {toPersianDigits(group.members.length)} عضو
+                        </span>
+                      </div>
+                      <div className="text-xs theme-muted truncate mt-0.5">
+                        {group.lastMessage}
+                      </div>
+                    </div>
                   </div>
 
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-extrabold theme-heading truncate">
-                        {group.name}
-                      </span>
-                      <span className="text-[10px] theme-accent-teal font-bold whitespace-nowrap">
-                        {toPersianDigits(group.members.length)} عضو
-                      </span>
-                    </div>
-                    <div className="text-xs theme-muted truncate mt-0.5">
-                      {group.lastMessage}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex flex-col items-end gap-1.5 shrink-0">
-                  <span className="text-[10px] theme-muted whitespace-nowrap">
-                    {group.lastMessageTime}
-                  </span>
-                  {group.unreadCount > 0 && (
-                    <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-[#0D8A8A] text-white text-[10px] font-extrabold flex items-center justify-center tabular-nums">
-                      {toPersianDigits(group.unreadCount)}
+                  <div className="flex flex-col items-end gap-1.5 shrink-0">
+                    <span className="text-[10px] theme-muted whitespace-nowrap">
+                      {group.lastMessageTime}
                     </span>
-                  )}
-                </div>
-              </button>
-            ))}
+                    {group.unreadCount > 0 && (
+                      <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-[#0D8A8A] text-white text-[10px] font-extrabold flex items-center justify-center tabular-nums">
+                        {toPersianDigits(group.unreadCount)}
+                      </span>
+                    )}
+                  </div>
+                </button>
+              ))
+            )}
           </section>
         </div>
       )}

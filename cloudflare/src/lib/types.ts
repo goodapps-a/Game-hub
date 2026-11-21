@@ -74,4 +74,5 @@ export interface CfWorkerEnv {
   ALLOWED_ORIGINS?: string;
   COOKIE_DOMAIN?: string;
   ROOM_CLEANUP_TTL_MS?: string;
+  AUTH_SESSION_TTL_SEC?: string;
 }

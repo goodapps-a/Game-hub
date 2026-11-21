@@ -197,8 +197,8 @@ class FakeDurableObjectState implements DurableObjectStateLike {
 }
 
 /**
- * Real SQLite-backed D1 simulator running the ACTUAL Cloudflare D1 migrations
- * (`0001_init.sql` + `0002_indexes.sql`), with fault injection for outage testing.
+ * Real SQLite-backed D1 simulator running ALL ACTUAL Cloudflare D1 migrations
+ * (`0001_init.sql` through `0005_social_chat.sql`), with fault injection for outage testing.
  */
 class SqliteBackedD1 implements D1DatabaseLike {
   public readonly sqlite: Database.Database;
@@ -209,24 +209,16 @@ class SqliteBackedD1 implements D1DatabaseLike {
     this.sqlite = new Database(':memory:');
     this.sqlite.pragma('foreign_keys = ON');
 
-    const initSql = fs.readFileSync(
-      path.resolve(process.cwd(), 'cloudflare/migrations/0001_init.sql'),
-      'utf8'
-    );
-    const idxSql = fs.readFileSync(
-      path.resolve(process.cwd(), 'cloudflare/migrations/0002_indexes.sql'),
-      'utf8'
-    );
-    const canonSql = fs.readFileSync(
-      path.resolve(
-        process.cwd(),
-        'cloudflare/migrations/0003_username_canonical_key.sql'
-      ),
-      'utf8'
-    );
-    this.sqlite.exec(initSql);
-    this.sqlite.exec(idxSql);
-    this.sqlite.exec(canonSql);
+    const migrationsDir = path.resolve(process.cwd(), 'cloudflare/migrations');
+    const migrationFiles = fs
+      .readdirSync(migrationsDir)
+      .filter((file) => /^\d+_.*\.sql$/i.test(file))
+      .sort((a, b) => a.localeCompare(b));
+
+    for (const fileName of migrationFiles) {
+      const sql = fs.readFileSync(path.join(migrationsDir, fileName), 'utf8');
+      this.sqlite.exec(sql);
+    }
   }
 
   prepare(query: string): D1PreparedStatementLike {

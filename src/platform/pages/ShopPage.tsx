@@ -11,7 +11,7 @@ import {
   ShopRarity,
   ShopSectionId,
 } from '../types/platform';
-import { SHOP_ITEMS_DEMO, SHOP_SECTIONS } from '../data/demoData';
+import { SHOP_ITEMS_DEMO, SHOP_SECTIONS } from '../data/shopCatalog';
 import { toPersianDigits } from '../theme/tokens';
 import { GoldCoinSvg, PurpleGemSvg } from '../components/TopBar';
 

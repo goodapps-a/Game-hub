@@ -1,6 +1,6 @@
 import React from 'react';
 import { Card, RANK_META, Rank, Suit, SUIT_META } from '../engine/types';
-import { CARD_ART_ASSETS } from '../../../platform/data/demoData';
+import { CARD_ART_ASSETS } from '../../../platform/data/assets';
 import { CardBackSvg } from './CardBackSvg';
 
 const CARD_RED = '#C8102E';

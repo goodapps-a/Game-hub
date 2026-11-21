@@ -39,10 +39,20 @@ interface D1PlayerStatsRow {
   last_played_at: number | null;
 }
 
+function generateD1UserId(): string {
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  let hex = '';
+  for (let i = 0; i < bytes.length; i += 1) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return `usr_${hex}`;
+}
+
 /**
- * Non-fatal parameterized user upsert in Cloudflare D1.
- * Primary key `username` is always canonical lowercase (`normalizeUsernameKey`),
- * while original display casing is preserved in `display_username`.
+ * Non-fatal parameterized user upsert in Cloudflare D1 (aligned with migration 0004).
+ * Uses canonical lowercase `username_key` as unique lookup key while preserving
+ * `user_id` and NEVER overwriting/downgrading registered (non-guest) accounts.
  */
 export async function upsertUserInD1(
   db: D1DatabaseLike | undefined,
@@ -53,16 +63,23 @@ export async function upsertUserInD1(
   if (!db) return;
   const canonicalKey = normalizeUsernameKey(username);
   const displayName = username.trim();
+  const newUserId = generateD1UserId();
   await db
     .prepare(
-      `INSERT INTO users (username, display_username, avatar_code, created_at, last_seen_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(username) DO UPDATE SET
-         display_username = excluded.display_username,
-         avatar_code = excluded.avatar_code,
-         last_seen_at = excluded.last_seen_at`
+      `INSERT INTO users (
+         user_id, username, username_key, display_name,
+         avatar_code, auth_provider, account_status,
+         created_at, last_seen_at, updated_at
+       )
+       VALUES (?, ?, ?, ?, ?, 'guest', 'guest', ?, ?, ?)
+       ON CONFLICT(username_key) DO UPDATE SET
+         username = CASE WHEN users.account_status = 'guest' THEN excluded.username ELSE users.username END,
+         display_name = CASE WHEN users.account_status = 'guest' THEN excluded.display_name ELSE users.display_name END,
+         avatar_code = CASE WHEN users.account_status = 'guest' THEN excluded.avatar_code ELSE users.avatar_code END,
+         last_seen_at = excluded.last_seen_at,
+         updated_at = excluded.updated_at`
     )
-    .bind(canonicalKey, displayName, avatarCode, now, now)
+    .bind(newUserId, displayName, canonicalKey, displayName, avatarCode, now, now, now)
     .run();
 }
 
@@ -74,7 +91,7 @@ export async function upsertUserInD1(
  * - Checks whether `match_id` already exists BEFORE updating `player_stats`, so retries
  *   after network glitches or DO restarts NEVER double-count wins/losses/kot stats!
  * - Uses canonical lowercase `username` keys in `player_stats` (with `display_username`
- *   preserved) so `Amir` and `amir` NEVER split or duplicate statistics.
+ *   preserved) and links `user_id` non-destructively when a matching `users` row exists.
  * - Executes `matches`, `match_players`, and `player_stats` in one atomic `db.batch(...)`
  *   transaction (all succeed or all roll back cleanly).
  */
@@ -125,13 +142,14 @@ export async function persistCompletedMatchToD1(
       db
         .prepare(
           `INSERT INTO match_players
-           (match_id, player_id, username, username_key, canonical_seat, team, won)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
+           (match_id, player_id, username, username_key, user_id, canonical_seat, team, won)
+           VALUES (?, ?, ?, ?, (SELECT user_id FROM users WHERE username_key = ? LIMIT 1), ?, ?, ?)`
         )
         .bind(
           record.matchId,
           p.playerId,
           displayName,
+          canonicalKey,
           canonicalKey,
           p.canonicalSeat,
           p.team,
@@ -145,10 +163,11 @@ export async function persistCompletedMatchToD1(
       db
         .prepare(
           `INSERT INTO player_stats
-           (username, display_username, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at)
-           VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+           (username, display_username, user_id, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at)
+           VALUES (?, ?, (SELECT user_id FROM users WHERE username_key = ? LIMIT 1), 1, ?, ?, ?, ?, ?)
            ON CONFLICT(username) DO UPDATE SET
              display_username = excluded.display_username,
+             user_id = COALESCE(player_stats.user_id, excluded.user_id),
              matches_played = matches_played + 1,
              wins = wins + excluded.wins,
              losses = losses + excluded.losses,
@@ -159,6 +178,7 @@ export async function persistCompletedMatchToD1(
         .bind(
           canonicalKey,
           displayName,
+          canonicalKey,
           p.won ? 1 : 0,
           p.won ? 0 : 1,
           isKotWin,
