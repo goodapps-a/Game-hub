@@ -3,7 +3,12 @@ main = "src/index.ts"
 compatibility_date = "2026-01-15"
 
 [vars]
+# Grace period (ms) to hold a disconnected player's seat before closing the room
 DISCONNECT_GRACE_MS = "90000"
+# TTL (ms) before a CLOSED room's Durable Object storage is purged automatically
+ROOM_CLEANUP_TTL_MS = "300000"
+# REQUIRED FOR PRODUCTION: Comma-separated frontend origins (e.g. "https://eyvan.example.com,https://www.eyvan.example.com")
+# Never use "*" — leave empty ONLY for localhost development.
 ALLOWED_ORIGINS = ""
 
 [[durable_objects.bindings]]
@@ -17,6 +22,7 @@ new_sqlite_classes = ["HokmRoomDO"]
 [[d1_databases]]
 binding = "EYVAN_DB"
 database_name = "eyvan-hokm-db"
+# MANUAL SETUP REQUIRED: Run `wrangler d1 create eyvan-hokm-db` and paste the real UUID below
 database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 migrations_dir = "migrations"
 

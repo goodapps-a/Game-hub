@@ -180,6 +180,7 @@ export class HokmRoomManager {
     if (outcome.completedMatch) {
       try {
         this.db.recordCompletedMatch(outcome.completedMatch);
+        room.controller.markMatchPersisted(outcome.completedMatch.matchId);
       } catch (err) {
         console.error('[HokmRoomManager] Failed to persist match:', err);
       }
@@ -440,6 +441,7 @@ export class HokmRoomManager {
     }
 
     let authedPlayerId: string | null = null;
+    const connectionId = crypto.randomUUID();
     const rate: SocketRateState = { windowStart: Date.now(), count: 0 };
 
     const authTimer = setTimeout(() => {
@@ -501,7 +503,8 @@ export class HokmRoomManager {
 
         const auth = room.controller.authenticateConnection(
           msg.playerId,
-          msg.sessionToken
+          msg.sessionToken,
+          connectionId
         );
         if (auth.ok === false) {
           this.sendError(ws, auth.code, auth.message);
@@ -549,6 +552,21 @@ export class HokmRoomManager {
               event: auth.event,
             });
           }
+        }
+        return;
+      }
+
+      // Guard against messages arriving on a superseded socket before TCP close settles
+      if (!room.controller.isActiveConnection(authedPlayerId, connectionId)) {
+        this.sendError(
+          ws,
+          'SUPERSEDED_CONNECTION',
+          'اتصال جدیدی جایگزین این نشست شده است.'
+        );
+        try {
+          ws.close(4001, 'superseded');
+        } catch {
+          // Ignore
         }
         return;
       }
@@ -658,11 +676,14 @@ export class HokmRoomManager {
       const current = room.socketsByPlayer.get(authedPlayerId);
       if (current === ws) {
         room.socketsByPlayer.delete(authedPlayerId);
-        // If player is still in the room (didn't explicitly leave), reserve seat & start grace timer
-        if (room.controller.getPlayerById(authedPlayerId)) {
-          const disc = room.controller.markPlayerDisconnected(authedPlayerId);
-          this.handleOutcome(room, disc);
-        }
+      }
+      // Controller checks activeConnectionId so stale sockets NEVER clobber a newer connection
+      if (room.controller.getPlayerById(authedPlayerId)) {
+        const disc = room.controller.markPlayerDisconnected(
+          authedPlayerId,
+          connectionId
+        );
+        this.handleOutcome(room, disc);
       }
     });
 

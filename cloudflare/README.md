@@ -1,35 +1,36 @@
 # Eyvan Hokm Online — Cloudflare Workers + Durable Objects + D1 + R2
 
 ## Architecture Overview
-- **Cloudflare Worker (`src/index.ts`)**: HTTP REST API (`/api/rooms`, `/api/matches`, `/api/stats/:username`), WebSocket upgrade router (`/ws/rooms/:code`), and R2 static asset delivery (`/r2/*`).
-- **Cloudflare Durable Object (`src/HokmRoomDO.ts`)**: Single-authority stateful instance per room wrapping the exact shared `HokmRoomController` and Phase 1 pure Hokm engine (`src/games/hokm/engine/*`). Handles real-time WebSocket rooms, strict card privacy, action idempotency, trick collection alarms, auto-next-hand, and disconnect grace windows.
-- **Cloudflare D1 (`migrations/0001_init.sql`)**: Persists completed matches, participants, and aggregate win/loss/kot/hakem-kot statistics ONLY at match completion (minimizing D1 row writes).
+- **Cloudflare Worker (`src/index.ts`)**: HTTP REST API (`/api/health`, `/api/rooms`, `/api/rooms/:code`, `/api/rooms/:code/join`, `/api/matches`, `/api/stats/:username`), WebSocket upgrade router (`/ws/rooms/:code`), strict Origin/CORS enforcement, body size limits, and R2 static asset delivery (`/r2/*`).
+- **Cloudflare Durable Object (`src/HokmRoomDO.ts`)**: Single-authority stateful instance per room wrapping the shared `HokmRoomController` and Phase 1 pure Hokm engine (`src/games/hokm/engine/*`).
+  - **Durable Storage Persistence**: Persists room & game state (`room:state`) and scheduled alarms (`sys:alarms`) in Durable Object Storage with `blockConcurrencyWhile` hydration on cold start/wake-up.
+  - **Official WebSocket Hibernation API**: Uses `ctx.acceptWebSocket`, `ws.serializeAttachment` / `ws.deserializeAttachment`, `ctx.getWebSockets()`, and `webSocketMessage` / `webSocketClose` / `webSocketError` handlers with per-connection `connectionId` race protection.
+  - **Game-Agnostic Primitives (`src/lib/`)**: `DurableAlarmScheduler`, `hibernationSockets`, and `d1Persistence` are decoupled from Hokm rules so future games (Chess, Ludo/Mensch, Backgammon) reuse the exact same reliability layer.
+- **Cloudflare D1 (`migrations/0001_init.sql`, `migrations/0002_indexes.sql`)**: Persists completed matches, participants, and aggregate win/loss/kot/hakem-kot statistics strictly ONCE at match completion, with durable retry alarms on transient D1 errors.
 - **Cloudflare R2 (`EYVAN_ASSETS`)**: Serves card artwork, avatars, and studio MP3 audio files with immutable edge caching.
 
-## Deployment Steps
+## Manual Production Configuration Checklist
 1. Create the D1 database and R2 bucket:
    ```bash
    wrangler d1 create eyvan-hokm-db
    wrangler r2 bucket create eyvan-assets
    ```
-2. Put the returned `database_id` into `cloudflare/wrangler.toml`.
-3. Apply the D1 migration:
+2. Paste the real `database_id` returned by Wrangler into `cloudflare/wrangler.toml` (replacing `REPLACE_WITH_YOUR_D1_DATABASE_ID`).
+3. Apply both D1 migrations:
    ```bash
    wrangler d1 migrations apply eyvan-hokm-db --remote
    ```
-4. Configure `ALLOWED_ORIGINS` in `wrangler.toml` with your frontend domain, then deploy:
+4. Set `ALLOWED_ORIGINS` in `cloudflare/wrangler.toml` to your exact frontend domain(s), e.g. `"https://play.yourdomain.com"` (never `*`).
+5. Bind a **Custom Domain** (TLS 443) to the Worker in the Cloudflare Dashboard or `[[routes]]` in `wrangler.toml` (do not rely on `*.workers.dev` for Iranian users).
+6. Deploy the Worker & Durable Object:
    ```bash
    wrangler deploy
    ```
-5. Point the frontend build to your deployed Worker via `VITE_ONLINE_API_BASE=https://your-custom-domain.example`.
+7. Set `VITE_ONLINE_API_BASE=https://api.yourdomain.com` in your frontend build environment.
 
-## Iran Real-Network Testing Checklist (همراه اول، ایرانسل، مخابرات)
-Because Iranian ISPs may throttle or block default `*.workers.dev` subdomains or silently drop idle WebSocket connections through NAT/DPI firewalls, follow these verified practices:
-1. **Always bind a Custom Domain (TLS on port 443)** instead of `*.workers.dev`.
-2. **Application-level Heartbeat (already implemented in `HokmOnlineClient`)**: Sends JSON `ping` every 10s with a 6s `pong` watchdog so silently dropped sockets reconnect immediately rather than hanging.
-3. **Network / IP Switch Recovery**: Switching Wi-Fi ↔ 4G/LTE triggers automatic jittered backoff reconnect and re-authenticates using the player's `sessionToken` without losing seat or replaying moves.
-4. **Field Test Matrix to Execute from Iran**:
-   - Initial `wss://` handshake & RTT on MCI (همراه اول), Irancell (ایرانسل), and fixed ADSL/Fiber (مخابرات / شاتل).
-   - 15-minute sustained 4-player match measuring RTT jitter & packet drops.
-   - Mid-trick airplane-mode toggle (15s offline -> online) verifying seat reservation and instant state resync.
-   - Wi-Fi to 4G switch mid-hand verifying seamless token resume.
+## Operational Field-Testing Checklist (Iran ISPs: همراه اول، ایرانسل، مخابرات)
+Real-network testing from Iranian ISPs must be executed after deploying to your Custom Domain:
+1. Verify initial `wss://` handshake & RTT from MCI (همراه اول), Irancell (ایرانسل), and fixed ADSL/Fiber.
+2. Run a full 4-player match across 4 separate devices/networks for 15+ minutes, verifying RTT stability and zero dropped moves.
+3. Mid-trick airplane-mode toggle (15s offline -> online) verifying seat reservation, reconnect recovery, and zero duplicate card plays.
+4. Mid-hand Wi-Fi ↔ 4G/LTE network switch verifying seamless `sessionToken` resume and old-socket superseding.

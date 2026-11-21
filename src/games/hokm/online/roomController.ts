@@ -46,9 +46,34 @@ export interface SeatMember {
   sessionToken: string;
   isReady: boolean;
   connected: boolean;
+  activeConnectionId: string | null;
   disconnectedAt: number | null;
   disconnectDeadline: number | null;
   joinedAt: number;
+}
+
+export interface PersistedHokmRoomState {
+  readonly schemaVersion: 1;
+  readonly roomId: string;
+  readonly roomCode: string;
+  readonly targetMatchScore: number;
+  readonly disconnectGraceMs: number;
+  readonly trickCollectDelayMs: number;
+  readonly nextHandDelayMs: number;
+  readonly status: RoomStatus;
+  readonly stateVersion: number;
+  readonly hostPlayerId: string | null;
+  readonly seats: Record<Seat, SeatMember | null>;
+  readonly gameState: HokmState | null;
+  readonly currentMatchId: string | null;
+  readonly matchStartedAt: number | null;
+  readonly matchPersisted: boolean;
+  readonly pendingMatchPersistence: CompletedMatchRecord | null;
+  readonly processedActions: Array<
+    [string, { ok: boolean; errorCode?: OnlineErrorCode }]
+  >;
+  readonly createdAt: number;
+  readonly closedAt: number | null;
 }
 
 export interface RoomActionOutcome {
@@ -140,6 +165,9 @@ export class HokmRoomController {
   private currentMatchId: string | null = null;
   private matchStartedAt: number | null = null;
   private matchPersisted = false;
+  private pendingMatchPersistence: CompletedMatchRecord | null = null;
+  private createdAt: number;
+  private closedAt: number | null = null;
 
   /** Tracks processed client actionIds for strict idempotency (bounded LRU-like cap) */
   private processedActions = new Map<string, { ok: boolean; errorCode?: OnlineErrorCode }>();
@@ -157,6 +185,124 @@ export class HokmRoomController {
     this.rng = options.rng ?? Math.random;
     this.now = options.now ?? (() => Date.now());
     this.generateId = options.generateId ?? defaultGenerateId;
+    this.createdAt = this.now();
+  }
+
+  /**
+   * Serializes ONLY durable authoritative state for Durable Object Storage.
+   * Excludes transient socket references and computed per-viewer projections.
+   */
+  public exportPersistedState(): PersistedHokmRoomState {
+    return {
+      schemaVersion: 1,
+      roomId: this.roomId,
+      roomCode: this.roomCode,
+      targetMatchScore: this.targetMatchScore,
+      disconnectGraceMs: this.disconnectGraceMs,
+      trickCollectDelayMs: this.trickCollectDelayMs,
+      nextHandDelayMs: this.nextHandDelayMs,
+      status: this.status,
+      stateVersion: this.stateVersion,
+      hostPlayerId: this.hostPlayerId,
+      seats: {
+        south: this.seats.south ? { ...this.seats.south } : null,
+        east: this.seats.east ? { ...this.seats.east } : null,
+        north: this.seats.north ? { ...this.seats.north } : null,
+        west: this.seats.west ? { ...this.seats.west } : null,
+      },
+      gameState: this.gameState,
+      currentMatchId: this.currentMatchId,
+      matchStartedAt: this.matchStartedAt,
+      matchPersisted: this.matchPersisted,
+      pendingMatchPersistence: this.pendingMatchPersistence,
+      processedActions: Array.from(this.processedActions.entries()),
+      createdAt: this.createdAt,
+      closedAt: this.closedAt,
+    };
+  }
+
+  /**
+   * Rehydrates a HokmRoomController from Durable Object Storage after restart or hibernation.
+   */
+  public static fromPersistedState(
+    data: PersistedHokmRoomState,
+    runtimeOptions?: Pick<RoomControllerOptions, 'rng' | 'now' | 'generateId'>
+  ): HokmRoomController {
+    const ctrl = new HokmRoomController({
+      roomId: data.roomId,
+      roomCode: data.roomCode,
+      targetMatchScore: data.targetMatchScore,
+      disconnectGraceMs: data.disconnectGraceMs,
+      trickCollectDelayMs: data.trickCollectDelayMs,
+      nextHandDelayMs: data.nextHandDelayMs,
+      rng: runtimeOptions?.rng,
+      now: runtimeOptions?.now,
+      generateId: runtimeOptions?.generateId,
+    });
+
+    ctrl.status = data.status;
+    ctrl.stateVersion = data.stateVersion;
+    ctrl.hostPlayerId = data.hostPlayerId;
+    ctrl.seats = {
+      south: data.seats.south ? { ...data.seats.south } : null,
+      east: data.seats.east ? { ...data.seats.east } : null,
+      north: data.seats.north ? { ...data.seats.north } : null,
+      west: data.seats.west ? { ...data.seats.west } : null,
+    };
+    ctrl.gameState = data.gameState;
+    ctrl.currentMatchId = data.currentMatchId;
+    ctrl.matchStartedAt = data.matchStartedAt;
+    ctrl.matchPersisted = Boolean(data.matchPersisted);
+    ctrl.pendingMatchPersistence = data.pendingMatchPersistence ?? null;
+    ctrl.processedActions = new Map(data.processedActions ?? []);
+    ctrl.createdAt = data.createdAt ?? ctrl.now();
+    ctrl.closedAt = data.closedAt ?? null;
+    return ctrl;
+  }
+
+  public getCreatedAt(): number {
+    return this.createdAt;
+  }
+
+  public getClosedAt(): number | null {
+    return this.closedAt;
+  }
+
+  public getPendingMatchPersistence(): CompletedMatchRecord | null {
+    return this.pendingMatchPersistence;
+  }
+
+  public markMatchPersisted(matchId: string): void {
+    if (
+      this.pendingMatchPersistence &&
+      this.pendingMatchPersistence.matchId === matchId
+    ) {
+      this.pendingMatchPersistence = null;
+      this.matchPersisted = true;
+    } else if (this.currentMatchId === matchId) {
+      this.matchPersisted = true;
+    }
+  }
+
+  public getEarliestDisconnectDeadline(): number | null {
+    let earliest: number | null = null;
+    for (const m of this.getAllMembers()) {
+      if (!m.connected && m.disconnectDeadline !== null) {
+        if (earliest === null || m.disconnectDeadline < earliest) {
+          earliest = m.disconnectDeadline;
+        }
+      }
+    }
+    return earliest;
+  }
+
+  public isActiveConnection(playerId: string, connectionId: string): boolean {
+    const member = this.getPlayerById(playerId);
+    if (!member) return false;
+    return (
+      member.activeConnectionId !== null &&
+      member.activeConnectionId === connectionId
+    );
   }
 
   public getStatus(): RoomStatus {
@@ -313,6 +459,7 @@ export class HokmRoomController {
       };
     }
 
+    const ts = this.now();
     const playerId = input.playerId ?? `p_${this.generateId()}`;
     const member: SeatMember = {
       playerId,
@@ -322,9 +469,12 @@ export class HokmRoomController {
       sessionToken: defaultGenerateToken(),
       isReady: false,
       connected: false,
+      activeConnectionId: null,
       disconnectedAt: null,
-      disconnectDeadline: null,
-      joinedAt: this.now(),
+      // Give newly-joined HTTP callers the grace window to complete WS handshake;
+      // cleared immediately upon WS auth so abandoned HTTP joins auto-expire cleanly.
+      disconnectDeadline: ts + this.disconnectGraceMs,
+      joinedAt: ts,
     };
 
     this.seats[targetSeat] = member;
@@ -338,12 +488,14 @@ export class HokmRoomController {
 
   public authenticateConnection(
     playerId: string,
-    sessionToken: string
+    sessionToken: string,
+    connectionId?: string
   ):
     | {
         ok: true;
         member: SeatMember;
         wasReconnect: boolean;
+        previousConnectionId: string | null;
         event: RoomEventNotice;
       }
     | { ok: false; code: OnlineErrorCode; message: string } {
@@ -360,8 +512,10 @@ export class HokmRoomController {
       };
     }
 
+    const previousConnectionId = member.activeConnectionId;
     const wasReconnect = member.disconnectedAt !== null;
     member.connected = true;
+    member.activeConnectionId = connectionId ?? `conn_${this.generateId()}`;
     member.disconnectedAt = null;
     member.disconnectDeadline = null;
     this.bumpVersion();
@@ -370,6 +524,7 @@ export class HokmRoomController {
       ok: true,
       member,
       wasReconnect,
+      previousConnectionId,
       event: {
         type: wasReconnect ? 'PLAYER_RECONNECTED' : 'PLAYER_JOINED',
         actorSeat: member.canonicalSeat,
@@ -378,12 +533,31 @@ export class HokmRoomController {
     };
   }
 
-  public markPlayerDisconnected(playerId: string): RoomActionOutcome {
+  public markPlayerDisconnected(
+    playerId: string,
+    connectionId?: string
+  ): RoomActionOutcome {
     const member = this.getPlayerById(playerId);
     if (!member) return { ok: false, shouldBroadcast: false };
 
+    // Race-condition protection: if a newer socket has already superseded this connectionId,
+    // ignore the stale socket's close event so it cannot corrupt the live session!
+    if (
+      connectionId !== undefined &&
+      member.activeConnectionId !== null &&
+      member.activeConnectionId !== connectionId
+    ) {
+      return { ok: true, shouldBroadcast: false };
+    }
+
+    // Idempotent if already marked disconnected
+    if (!member.connected && member.disconnectedAt !== null) {
+      return { ok: true, shouldBroadcast: false };
+    }
+
     const ts = this.now();
     member.connected = false;
+    member.activeConnectionId = null;
     member.disconnectedAt = ts;
     member.disconnectDeadline = ts + this.disconnectGraceMs;
     this.bumpVersion();
@@ -421,6 +595,7 @@ export class HokmRoomController {
       }
       if (this.isEmpty()) {
         this.status = 'CLOSED';
+        this.closedAt = ts;
         this.bumpVersion();
         return {
           ok: true,
@@ -445,6 +620,7 @@ export class HokmRoomController {
       );
       if (expired) {
         this.status = 'CLOSED';
+        this.closedAt = ts;
         this.bumpVersion();
         return {
           ok: true,
@@ -569,10 +745,9 @@ export class HokmRoomController {
       if (this.hostPlayerId === playerId) {
         this.reassignHost();
       }
-      if (this.isEmpty() || this.status === 'FINISHED') {
-        if (this.isEmpty()) {
-          this.status = 'CLOSED';
-        }
+      if (this.isEmpty()) {
+        this.status = 'CLOSED';
+        this.closedAt = this.now();
       }
       this.bumpVersion();
       this.recordAction(actionId, { ok: true });
@@ -588,8 +763,10 @@ export class HokmRoomController {
     }
 
     // Leaving intentionally mid-game closes the match cleanly for remaining players
+    // (never marks as FINISHED and never emits a fake completedMatch record!)
     this.seats[leftSeat] = null;
     this.status = 'CLOSED';
+    this.closedAt = this.now();
     this.bumpVersion();
     this.recordAction(actionId, { ok: true });
     return {
@@ -845,7 +1022,8 @@ export class HokmRoomController {
     if (collected.phase === 'MATCH_COMPLETE' && collected.handOutcome && collected.matchWinner) {
       this.status = 'FINISHED';
       const completedMatch = this.buildCompletedMatchRecord(collected);
-      this.matchPersisted = true;
+      this.pendingMatchPersistence = completedMatch;
+      this.matchPersisted = false;
       return {
         ok: true,
         shouldBroadcast: true,
@@ -960,6 +1138,7 @@ export class HokmRoomController {
     this.currentMatchId = `m_${this.generateId()}`;
     this.matchStartedAt = this.now();
     this.matchPersisted = false;
+    this.pendingMatchPersistence = null;
     this.bumpVersion();
     this.recordAction(actionId, { ok: true });
 

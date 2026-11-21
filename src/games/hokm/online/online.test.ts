@@ -403,4 +403,88 @@ describe('Online Hokm Room Rules & Security Boundaries', () => {
     assert.equal(badVersion.ok, false);
     if (!badVersion.ok) assert.equal(badVersion.code, 'UNSUPPORTED_PROTOCOL');
   });
+
+  it('roundtrips persisted room state faithfully across restarts and preserves actionId idempotency', () => {
+    let clock = 1_700_000_000_000;
+    const { controller, members } = setupReadyFourPlayerRoom(88, () => clock);
+
+    assert.equal(
+      controller.startMatch(members[0].playerId, 'start_persist_1234').ok,
+      true
+    );
+    const hakemSeat = controller.getAuthoritativeGameState()!.hakem;
+    const hakem = members.find((m) => m.canonicalSeat === hakemSeat)!;
+    assert.equal(
+      controller.chooseTrump(hakem.playerId, 'hearts', 'trump_persist_1234').ok,
+      true
+    );
+
+    const exported = controller.exportPersistedState();
+    const cloned = structuredClone(exported);
+    const restored = HokmRoomController.fromPersistedState(cloned, {
+      now: () => clock,
+      rng: makeSeededRng(88),
+    });
+
+    assert.equal(restored.roomCode, controller.roomCode);
+    assert.equal(restored.getStatus(), 'PLAYING');
+    assert.equal(restored.getStateVersion(), controller.getStateVersion());
+    assert.deepEqual(
+      restored.getSnapshotForPlayer(members[0].playerId),
+      controller.getSnapshotForPlayer(members[0].playerId)
+    );
+
+    // Action idempotency cache survived serialization
+    const replay = restored.chooseTrump(
+      hakem.playerId,
+      'hearts',
+      'trump_persist_1234'
+    );
+    assert.equal(replay.ok, true);
+    assert.equal(replay.duplicate, true);
+  });
+
+  it('prevents stale connectionId disconnect from affecting a newer active connection and expires abandoned HTTP joins', () => {
+    let clock = 1_700_000_000_000;
+    const ctrl = new HokmRoomController({
+      roomId: 'room_conn_race',
+      roomCode: 'R9T4W2',
+      disconnectGraceMs: 30_000,
+      now: () => clock,
+    });
+
+    const p1 = ctrl.joinPlayer({ username: 'amir_race' });
+    const p2 = ctrl.joinPlayer({ username: 'abandoned_http' });
+    assert.equal(p1.ok && p2.ok, true);
+    if (!p1.ok || !p2.ok) return;
+
+    // p1 connects on conn_1, then reconnects concurrently on conn_2
+    const auth1 = ctrl.authenticateConnection(
+      p1.member.playerId,
+      p1.member.sessionToken,
+      'conn_1'
+    );
+    assert.equal(auth1.ok, true);
+
+    const auth2 = ctrl.authenticateConnection(
+      p1.member.playerId,
+      p1.member.sessionToken,
+      'conn_2'
+    );
+    assert.equal(auth2.ok, true);
+    if (auth2.ok) assert.equal(auth2.previousConnectionId, 'conn_1');
+
+    // Stale conn_1 closing MUST be ignored
+    const staleDisc = ctrl.markPlayerDisconnected(p1.member.playerId, 'conn_1');
+    assert.equal(staleDisc.shouldBroadcast, false);
+    assert.equal(ctrl.isActiveConnection(p1.member.playerId, 'conn_2'), true);
+    assert.equal(ctrl.isActiveConnection(p1.member.playerId, 'conn_1'), false);
+
+    // p2 joined via HTTP only and never connected -> expires after grace window!
+    clock += 31_000;
+    const sweep = ctrl.sweepExpiredDisconnects();
+    assert.equal(sweep.shouldBroadcast, true);
+    assert.equal(ctrl.getPublicSummary().playerCount, 1);
+  });
 });
+
