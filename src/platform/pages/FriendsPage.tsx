@@ -1,14 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  Ban,
   Check,
   Clock,
   Eye,
   EyeOff,
+  Gamepad2,
   Loader2,
+  MessageSquare,
   RefreshCw,
   Search,
   Shield,
+  ShieldOff,
   UserCheck,
   UserMinus,
   UserPlus,
@@ -17,24 +21,36 @@ import {
   X,
 } from 'lucide-react';
 import { AuthUserSummary } from '../auth/authClient';
+import { PrivateChatPanel } from '../components/PrivateChatPanel';
 import { ProfileAvatar } from '../components/TopBar';
 import { toPersianDigits } from '../theme/tokens';
 import { UserProfile } from '../types/platform';
 import {
+  BlockedUserItem,
+  ChatConversationItem,
   FriendListItem,
   FriendRequestItem,
+  GameInviteItem,
   SocialPrivacySettings,
   SocialUserSummary,
   acceptFriendRequestApi,
+  acceptGameInviteApi,
+  blockUserApi,
   cancelFriendRequestApi,
+  declineGameInviteApi,
+  fetchBlockedUsersRequest,
+  fetchChatConversationsRequest,
   fetchFriendRequestsRequest,
   fetchFriendsPresenceRequest,
   fetchFriendsRequest,
+  fetchGameInvitesRequest,
   fetchSocialPrivacyRequest,
+  openDirectConversationApi,
   rejectFriendRequestApi,
   removeFriendApi,
   searchSocialUsersRequest,
   sendFriendRequestApi,
+  unblockUserApi,
   updateSocialPrivacyRequest,
 } from '../social/socialClient';
 
@@ -42,9 +58,10 @@ interface FriendsPageProps {
   authUser: AuthUserSummary | null;
   authLoading: boolean;
   onOpenAccount: () => void;
+  onJoinInvitedRoom?: (roomCode: string) => void;
 }
 
-type SocialSubTab = 'friends' | 'incoming' | 'outgoing';
+type SocialSubTab = 'friends' | 'incoming' | 'outgoing' | 'blocked';
 
 const PRESENCE_POLL_INTERVAL_MS = 20_000;
 const SEARCH_PAGE_SIZE = 15;
@@ -66,6 +83,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
   authUser,
   authLoading,
   onOpenAccount,
+  onJoinInvitedRoom,
 }) => {
   const [activeTab, setActiveTab] = useState<SocialSubTab>('friends');
 
@@ -73,6 +91,11 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
   const [friends, setFriends] = useState<FriendListItem[]>([]);
   const [incoming, setIncoming] = useState<FriendRequestItem[]>([]);
   const [outgoing, setOutgoing] = useState<FriendRequestItem[]>([]);
+  const [blockedUsers, setBlockedUsers] = useState<BlockedUserItem[]>([]);
+  const [conversations, setConversations] = useState<ChatConversationItem[]>([]);
+  const [activeConversation, setActiveConversation] =
+    useState<ChatConversationItem | null>(null);
+  const [incomingInvites, setIncomingInvites] = useState<GameInviteItem[]>([]);
   const [privacy, setPrivacy] = useState<SocialPrivacySettings | null>(null);
   const [initialLoading, setInitialLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -93,6 +116,9 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
   // Action feedback & pending states
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [confirmRemoveUserId, setConfirmRemoveUserId] = useState<string | null>(
+    null
+  );
+  const [confirmBlockUserId, setConfirmBlockUserId] = useState<string | null>(
     null
   );
   const [feedback, setFeedback] = useState<{
@@ -127,10 +153,20 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
     else setRefreshing(true);
 
     try {
-      const [friendsRes, requestsRes, privacyRes] = await Promise.all([
+      const [
+        friendsRes,
+        requestsRes,
+        privacyRes,
+        blocksRes,
+        convsRes,
+        invitesRes,
+      ] = await Promise.all([
         fetchFriendsRequest(),
         fetchFriendRequestsRequest(),
         fetchSocialPrivacyRequest(),
+        fetchBlockedUsersRequest(),
+        fetchChatConversationsRequest(),
+        fetchGameInvitesRequest(),
       ]);
 
       if (friendsRes.ok && Array.isArray(friendsRes.friends)) {
@@ -142,6 +178,15 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
       }
       if (privacyRes.ok && privacyRes.privacy) {
         setPrivacy(privacyRes.privacy);
+      }
+      if (blocksRes.ok && Array.isArray(blocksRes.blocked)) {
+        setBlockedUsers(blocksRes.blocked);
+      }
+      if (convsRes.ok && Array.isArray(convsRes.conversations)) {
+        setConversations(convsRes.conversations);
+      }
+      if (invitesRes.ok && Array.isArray(invitesRes.incoming)) {
+        setIncomingInvites(invitesRes.incoming);
       }
     } catch {
       if (!silent) {
@@ -159,43 +204,62 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
       setFriends([]);
       setIncoming([]);
       setOutgoing([]);
+      setBlockedUsers([]);
+      setConversations([]);
+      setActiveConversation(null);
+      setIncomingInvites([]);
       setPrivacy(null);
       setSearchQuery('');
       setSearchResults([]);
       setSearchExecutedQuery('');
       setSearchError(null);
       setConfirmRemoveUserId(null);
+      setConfirmBlockUserId(null);
       return;
     }
     void loadSocialSnapshot(false);
   }, [authUser, loadSocialSnapshot]);
 
-  // Lightweight live presence polling while viewing Friends tab
+  // Lightweight live presence, invites & chat unread polling while viewing Friends tab
   useEffect(() => {
     if (!authUser) return;
 
-    const pollPresence = async () => {
+    const pollLiveSocial = async () => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
         return;
       }
       try {
-        const res = await fetchFriendsPresenceRequest();
-        if (!res.ok || !Array.isArray(res.presence)) return;
-        const map = new Map(res.presence.map((p) => [p.userId, p.onlineStatus]));
-        setFriends((prev) =>
-          prev.map((friend) => {
-            const nextStatus = map.get(friend.userId);
-            return nextStatus && nextStatus !== friend.onlineStatus
-              ? { ...friend, onlineStatus: nextStatus }
-              : friend;
-          })
-        );
+        const [presenceRes, invitesRes, convsRes] = await Promise.all([
+          fetchFriendsPresenceRequest(),
+          fetchGameInvitesRequest(),
+          fetchChatConversationsRequest(),
+        ]);
+
+        if (presenceRes.ok && Array.isArray(presenceRes.presence)) {
+          const map = new Map(
+            presenceRes.presence.map((p) => [p.userId, p.onlineStatus])
+          );
+          setFriends((prev) =>
+            prev.map((friend) => {
+              const nextStatus = map.get(friend.userId);
+              return nextStatus && nextStatus !== friend.onlineStatus
+                ? { ...friend, onlineStatus: nextStatus }
+                : friend;
+            })
+          );
+        }
+        if (invitesRes.ok && Array.isArray(invitesRes.incoming)) {
+          setIncomingInvites(invitesRes.incoming);
+        }
+        if (convsRes.ok && Array.isArray(convsRes.conversations)) {
+          setConversations(convsRes.conversations);
+        }
       } catch {
         // Ignore transient polling hiccups
       }
     };
 
-    const timer = window.setInterval(pollPresence, PRESENCE_POLL_INTERVAL_MS);
+    const timer = window.setInterval(pollLiveSocial, PRESENCE_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [authUser]);
 
@@ -372,10 +436,109 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
         return;
       }
       setConfirmRemoveUserId(null);
+      if (activeConversation?.partner.userId === targetUserId) {
+        setActiveConversation(null);
+      }
       showToast('success', res.message ?? 'این کاربر از لیست دوستان شما حذف شد.');
       await refreshAfterMutation();
     } catch {
       showToast('error', 'خطا در ارتباط با سرور هنگام حذف دوستی.');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleBlockUser = async (targetUserId: string) => {
+    setBusyKey(`blk:${targetUserId}`);
+    try {
+      const res = await blockUserApi(targetUserId);
+      if (!res.ok) {
+        showToast('error', res.message ?? 'مسدود کردن کاربر انجام نشد.');
+        return;
+      }
+      setConfirmBlockUserId(null);
+      setConfirmRemoveUserId(null);
+      if (activeConversation?.partner.userId === targetUserId) {
+        setActiveConversation(null);
+      }
+      showToast('success', res.message ?? 'کاربر مسدود شد.');
+      await refreshAfterMutation();
+    } catch {
+      showToast('error', 'خطا در ارتباط با سرور هنگام مسدود کردن کاربر.');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleUnblockUser = async (targetUserId: string) => {
+    setBusyKey(`ublk:${targetUserId}`);
+    try {
+      const res = await unblockUserApi(targetUserId);
+      if (!res.ok) {
+        showToast('error', res.message ?? 'رفع مسدودیت انجام نشد.');
+        return;
+      }
+      showToast('success', res.message ?? 'مسدودیت کاربر برداشته شد.');
+      await refreshAfterMutation();
+    } catch {
+      showToast('error', 'خطا در ارتباط با سرور هنگام رفع مسدودیت.');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleOpenChat = async (friendUserId: string) => {
+    setBusyKey(`chat:${friendUserId}`);
+    try {
+      const res = await openDirectConversationApi(friendUserId);
+      if (!res.ok || !res.conversation) {
+        showToast('error', res.message ?? 'باز کردن گفتگوی خصوصی انجام نشد.');
+        return;
+      }
+      setActiveConversation(res.conversation);
+    } catch {
+      showToast('error', 'خطا در برقراری ارتباط برای شروع گفتگو.');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleAcceptGameInvite = async (invite: GameInviteItem) => {
+    setBusyKey(`invacc:${invite.inviteId}`);
+    try {
+      const res = await acceptGameInviteApi(invite.inviteId);
+      if (!res.ok || !res.roomCode) {
+        showToast('error', res.message ?? 'ورود به اتاق دعوت‌شده انجام نشد.');
+        await loadSocialSnapshot(true);
+        return;
+      }
+      setIncomingInvites((prev) =>
+        prev.filter((i) => i.inviteId !== invite.inviteId)
+      );
+      if (onJoinInvitedRoom) {
+        onJoinInvitedRoom(res.roomCode);
+      } else {
+        showToast('success', `دعوت پذیرفته شد. کد اتاق: ${res.roomCode}`);
+      }
+    } catch {
+      showToast('error', 'خطا در ارتباط با سرور هنگام پذیرش دعوت‌نامه.');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleDeclineGameInvite = async (inviteId: string) => {
+    setBusyKey(`invdec:${inviteId}`);
+    try {
+      const res = await declineGameInviteApi(inviteId);
+      if (!res.ok) {
+        showToast('error', res.message ?? 'رد کردن دعوت‌نامه انجام نشد.');
+        return;
+      }
+      setIncomingInvites((prev) => prev.filter((i) => i.inviteId !== inviteId));
+      showToast('success', res.message ?? 'دعوت‌نامه بازی رد شد.');
+    } catch {
+      showToast('error', 'خطا در ارتباط با سرور هنگام رد دعوت‌نامه.');
     } finally {
       setBusyKey(null);
     }
@@ -423,6 +586,14 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
     () => friends.filter((f) => f.onlineStatus === 'online').length,
     [friends]
   );
+
+  const unreadByPartnerId = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const c of conversations) {
+      map.set(c.partner.userId, c.unreadCount);
+    }
+    return map;
+  }, [conversations]);
 
   // =========================================================================
   // LOADING SESSION STATE
@@ -637,6 +808,90 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
           </div>
         )}
       </section>
+
+      {/* Incoming Real-Room Game Invites Banner (Stage D3) */}
+      {incomingInvites.length > 0 && (
+        <section
+          data-testid="incoming-game-invites-banner"
+          className="eyvan-card rounded-2xl p-4 border border-[#D4AE58]/60 space-y-2.5"
+        >
+          <div className="flex items-center gap-2 text-xs sm:text-sm font-black theme-accent-gold">
+            <Gamepad2 className="w-4 h-4 shrink-0" />
+            <span>دعوت به بازی آنلاین حکم ({toPersianDigits(incomingInvites.length)})</span>
+          </div>
+          <div className="space-y-2">
+            {incomingInvites.map((inv) => {
+              const accepting = busyKey === `invacc:${inv.inviteId}`;
+              const declining = busyKey === `invdec:${inv.inviteId}`;
+              return (
+                <div
+                  key={inv.inviteId}
+                  data-testid={`incoming-invite-${inv.inviteId}`}
+                  className="theme-subcard border rounded-xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <ProfileAvatar
+                      avatarCode={toValidAvatarCode(inv.otherUser.avatarCode)}
+                      username={inv.otherUser.username}
+                      size="sm"
+                    />
+                    <div className="min-w-0">
+                      <div className="text-xs sm:text-sm font-extrabold theme-heading truncate">
+                        <span dir="ltr">{inv.otherUser.username}</span> شما را به اتاق{' '}
+                        <span dir="ltr" className="font-mono theme-accent-gold">
+                          {inv.roomCode}
+                        </span>{' '}
+                        دعوت کرده است
+                      </div>
+                      <div className="text-[11px] theme-muted">
+                        حکم آنلاین · اتصال مستقیم به اتاق واقعی
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      disabled={accepting || declining}
+                      onClick={() => void handleAcceptGameInvite(inv)}
+                      data-testid={`accept-invite-btn-${inv.roomCode}`}
+                      className="min-h-[36px] px-3.5 rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] hover:from-[#F8DD94] hover:to-[#D4AE58] text-[#0B1628] text-xs font-black inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      {accepting ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Gamepad2 className="w-3.5 h-3.5" />
+                      )}
+                      <span>ورود به اتاق</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={accepting || declining}
+                      onClick={() => void handleDeclineGameInvite(inv.inviteId)}
+                      data-testid={`decline-invite-btn-${inv.roomCode}`}
+                      className="min-h-[36px] px-3 rounded-xl theme-btn-secondary border hover:border-red-500/45 hover:text-red-400 text-xs font-bold cursor-pointer disabled:opacity-50"
+                    >
+                      رد
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* Active Private 1-on-1 Direct Chat Panel (Stage D2) */}
+      {activeConversation && (
+        <PrivateChatPanel
+          currentUserId={authUser.userId}
+          conversation={activeConversation}
+          onClose={() => {
+            setActiveConversation(null);
+            void loadSocialSnapshot(true);
+          }}
+          onConversationActivity={() => void loadSocialSnapshot(true)}
+        />
+      )}
 
       {/* Inline Feedback Toast */}
       {feedback && (
@@ -897,12 +1152,12 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
         )}
       </section>
 
-      {/* 3-Tab Switcher: دوستان | دریافتی | ارسالی */}
+      {/* 4-Tab Switcher: دوستان | دریافتی | ارسالی | مسدودشده‌ها */}
       <section className="eyvan-card rounded-xl p-1" data-testid="friends-tabs-card">
         <div
           role="tablist"
           aria-label="بخش‌های دوستان"
-          className="grid grid-cols-3 gap-1 p-0.5 theme-tab-track rounded-lg border"
+          className="grid grid-cols-2 sm:grid-cols-4 gap-1 p-0.5 theme-tab-track rounded-lg border"
         >
           <button
             type="button"
@@ -970,6 +1225,27 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
               </span>
             )}
           </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'blocked'}
+            data-testid="social-tab-blocked"
+            onClick={() => setActiveTab('blocked')}
+            className={`min-h-[40px] rounded-md text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'blocked'
+                ? 'bg-gradient-to-b from-[#F3D179] to-[#C89B3C] text-[#0B1628] shadow-xs'
+                : 'theme-muted'
+            }`}
+          >
+            <Ban className="w-3.5 h-3.5 shrink-0" />
+            <span>مسدودشده‌ها</span>
+            {blockedUsers.length > 0 && (
+              <span className="text-[11px] opacity-85 tabular-nums">
+                ({toPersianDigits(blockedUsers.length)})
+              </span>
+            )}
+          </button>
         </div>
       </section>
 
@@ -995,14 +1271,19 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
             </div>
           ) : (
             sortedFriends.map((friend) => {
-              const isConfirming = confirmRemoveUserId === friend.userId;
-              const isBusy = busyKey === `rem:${friend.userId}`;
+              const isConfirmingRemove = confirmRemoveUserId === friend.userId;
+              const isConfirmingBlock = confirmBlockUserId === friend.userId;
+              const isRemoving = busyKey === `rem:${friend.userId}`;
+              const isBlocking = busyKey === `blk:${friend.userId}`;
+              const isOpeningChat = busyKey === `chat:${friend.userId}`;
+              const unreadCount = unreadByPartnerId.get(friend.userId) ?? 0;
+
               return (
                 <div
                   key={friend.userId}
                   data-testid={`friend-row-${friend.username}`}
                   data-presence={friend.onlineStatus}
-                  className="px-4 py-3.5 flex items-center justify-between gap-3"
+                  className="px-4 py-3.5 flex flex-wrap items-center justify-between gap-3"
                 >
                   <div className="flex items-center gap-3 min-w-0">
                     <div className="relative shrink-0">
@@ -1051,17 +1332,17 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
-                    {isConfirming ? (
+                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                    {isConfirmingRemove ? (
                       <>
                         <button
                           type="button"
-                          disabled={isBusy}
+                          disabled={isRemoving}
                           onClick={() => void handleRemoveFriend(friend.userId)}
                           data-testid={`confirm-remove-friend-${friend.username}`}
                           className="min-h-[36px] px-3 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
                         >
-                          {isBusy ? (
+                          {isRemoving ? (
                             <Loader2 className="w-3.5 h-3.5 animate-spin" />
                           ) : (
                             <UserMinus className="w-3.5 h-3.5" />
@@ -1070,23 +1351,91 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                         </button>
                         <button
                           type="button"
-                          disabled={isBusy}
+                          disabled={isRemoving}
                           onClick={() => setConfirmRemoveUserId(null)}
                           className="min-h-[36px] px-2.5 rounded-xl theme-btn-secondary border text-xs font-bold cursor-pointer"
                         >
                           انصراف
                         </button>
                       </>
+                    ) : isConfirmingBlock ? (
+                      <>
+                        <button
+                          type="button"
+                          disabled={isBlocking}
+                          onClick={() => void handleBlockUser(friend.userId)}
+                          data-testid={`confirm-block-friend-${friend.username}`}
+                          className="min-h-[36px] px-3 rounded-xl bg-red-700 hover:bg-red-800 text-white text-xs font-extrabold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                        >
+                          {isBlocking ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Ban className="w-3.5 h-3.5" />
+                          )}
+                          <span>تأیید مسدودسازی</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isBlocking}
+                          onClick={() => setConfirmBlockUserId(null)}
+                          className="min-h-[36px] px-2.5 rounded-xl theme-btn-secondary border text-xs font-bold cursor-pointer"
+                        >
+                          انصراف
+                        </button>
+                      </>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={() => setConfirmRemoveUserId(friend.userId)}
-                        data-testid={`remove-friend-btn-${friend.username}`}
-                        className="min-h-[36px] px-3 rounded-xl theme-btn-secondary border hover:border-red-500/50 hover:text-red-400 text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
-                      >
-                        <UserMinus className="w-3.5 h-3.5" />
-                        <span>حذف دوستی</span>
-                      </button>
+                      <>
+                        <button
+                          type="button"
+                          disabled={isOpeningChat}
+                          onClick={() => void handleOpenChat(friend.userId)}
+                          data-testid={`open-chat-btn-${friend.username}`}
+                          className="min-h-[36px] px-3 rounded-xl bg-[#0D8A8A] hover:bg-[#11A3A3] text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          {isOpeningChat ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <MessageSquare className="w-3.5 h-3.5" />
+                          )}
+                          <span>گفتگو</span>
+                          {unreadCount > 0 && (
+                            <span
+                              data-testid={`chat-unread-${friend.username}`}
+                              className="min-w-[18px] h-[18px] px-1 rounded-full bg-[#F3D179] text-[#0B1628] text-[10px] font-black inline-flex items-center justify-center tabular-nums"
+                            >
+                              {toPersianDigits(unreadCount)}
+                            </span>
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmBlockUserId(null);
+                            setConfirmRemoveUserId(friend.userId);
+                          }}
+                          data-testid={`remove-friend-btn-${friend.username}`}
+                          className="min-h-[36px] px-2.5 rounded-xl theme-btn-secondary border hover:border-red-500/50 hover:text-red-400 text-xs font-bold inline-flex items-center gap-1 transition-colors cursor-pointer"
+                        >
+                          <UserMinus className="w-3.5 h-3.5" />
+                          <span>حذف</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmRemoveUserId(null);
+                            setConfirmBlockUserId(friend.userId);
+                          }}
+                          data-testid={`block-friend-btn-${friend.username}`}
+                          aria-label={`مسدود کردن ${friend.username}`}
+                          title="مسدود کردن کاربر"
+                          className="min-h-[36px] px-2.5 rounded-xl theme-btn-secondary border hover:border-red-500/50 hover:text-red-400 text-xs font-bold inline-flex items-center gap-1 transition-colors cursor-pointer"
+                        >
+                          <Ban className="w-3.5 h-3.5" />
+                          <span className="hidden sm:inline">مسدود</span>
+                        </button>
+                      </>
                     )}
                   </div>
                 </div>
@@ -1165,26 +1514,80 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
               );
             })
           )
-        ) : outgoing.length === 0 ? (
+        ) : activeTab === 'outgoing' ? (
+          outgoing.length === 0 ? (
+            <div
+              className="px-5 py-10 text-center text-xs sm:text-sm theme-muted"
+              data-testid="outgoing-empty-state"
+            >
+              درخواست دوستی ارسال‌شده در انتظار تأییدی ندارید.
+            </div>
+          ) : (
+            outgoing.map((req) => {
+              const canceling = busyKey === `can:${req.friendshipId}`;
+              return (
+                <div
+                  key={req.friendshipId}
+                  data-testid={`outgoing-request-${req.user.username}`}
+                  className="px-4 py-3.5 flex items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <ProfileAvatar
+                      avatarCode={toValidAvatarCode(req.user.avatarCode)}
+                      username={req.user.username}
+                      size="md"
+                    />
+                    <div className="min-w-0">
+                      <div
+                        dir="ltr"
+                        className="text-sm font-extrabold theme-heading truncate text-right"
+                      >
+                        {req.user.username}
+                      </div>
+                      <div className="text-xs theme-muted mt-0.5">
+                        در انتظار تأیید کاربر مقابل
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={canceling}
+                    onClick={() => void handleCancelRequest(req.friendshipId)}
+                    data-testid={`outgoing-cancel-${req.user.username}`}
+                    className="min-h-[38px] px-3.5 rounded-xl theme-btn-secondary border hover:border-amber-500/45 text-xs font-bold inline-flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-50"
+                  >
+                    {canceling ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <X className="w-3.5 h-3.5" />
+                    )}
+                    <span>لغو درخواست</span>
+                  </button>
+                </div>
+              );
+            })
+          )
+        ) : blockedUsers.length === 0 ? (
           <div
             className="px-5 py-10 text-center text-xs sm:text-sm theme-muted"
-            data-testid="outgoing-empty-state"
+            data-testid="blocked-empty-state"
           >
-            درخواست دوستی ارسال‌شده در انتظار تأییدی ندارید.
+            هیچ کاربری را مسدود نکرده‌اید.
           </div>
         ) : (
-          outgoing.map((req) => {
-            const canceling = busyKey === `can:${req.friendshipId}`;
+          blockedUsers.map((blk) => {
+            const unblocking = busyKey === `ublk:${blk.userId}`;
             return (
               <div
-                key={req.friendshipId}
-                data-testid={`outgoing-request-${req.user.username}`}
+                key={blk.userId}
+                data-testid={`blocked-user-${blk.username}`}
                 className="px-4 py-3.5 flex items-center justify-between gap-3"
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <ProfileAvatar
-                    avatarCode={toValidAvatarCode(req.user.avatarCode)}
-                    username={req.user.username}
+                    avatarCode={toValidAvatarCode(blk.avatarCode)}
+                    username={blk.username}
                     size="md"
                   />
                   <div className="min-w-0">
@@ -1192,27 +1595,27 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                       dir="ltr"
                       className="text-sm font-extrabold theme-heading truncate text-right"
                     >
-                      {req.user.username}
+                      {blk.username}
                     </div>
                     <div className="text-xs theme-muted mt-0.5">
-                      در انتظار تأیید کاربر مقابل
+                      کاربر مسدودشده
                     </div>
                   </div>
                 </div>
 
                 <button
                   type="button"
-                  disabled={canceling}
-                  onClick={() => void handleCancelRequest(req.friendshipId)}
-                  data-testid={`outgoing-cancel-${req.user.username}`}
-                  className="min-h-[38px] px-3.5 rounded-xl theme-btn-secondary border hover:border-amber-500/45 text-xs font-bold inline-flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-50"
+                  disabled={unblocking}
+                  onClick={() => void handleUnblockUser(blk.userId)}
+                  data-testid={`unblock-btn-${blk.username}`}
+                  className="min-h-[38px] px-3.5 rounded-xl theme-btn-secondary border hover:border-[#0D8A8A]/50 text-xs font-bold inline-flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-50"
                 >
-                  {canceling ? (
+                  {unblocking ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   ) : (
-                    <X className="w-3.5 h-3.5" />
+                    <ShieldOff className="w-3.5 h-3.5" />
                   )}
-                  <span>لغو درخواست</span>
+                  <span>رفع مسدودیت</span>
                 </button>
               </div>
             );

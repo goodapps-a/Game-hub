@@ -2,6 +2,7 @@ import http from 'node:http';
 import express, { type Express, type Request, type Response, type NextFunction } from 'express';
 import {
   DEFAULT_DISCONNECT_GRACE_MS,
+  PublicRoomSummary,
   isValidSeat,
   sanitizeRoomCode,
   sanitizeUsername,
@@ -14,8 +15,14 @@ import {
 } from '../cloudflare/src/lib/sessionCookie';
 import { parseAuthCookieFromHeader } from '../cloudflare/src/lib/auth/authCookie';
 import { verifyAuthSession } from '../cloudflare/src/lib/auth/authService';
+import {
+  buildSetGuestCookieHeader,
+  parseGuestCookieFromHeader,
+  resolveOrCreateGuestIdentity,
+} from '../cloudflare/src/lib/auth/guestSession';
 import { handleAuthHttpRequest } from '../cloudflare/src/lib/auth/httpHandler';
 import { handleSocialHttpRequest } from '../cloudflare/src/lib/social/httpHandler';
+import { RoomInviteCheckSummary } from '../cloudflare/src/lib/social/types';
 import {
   EmailSender,
   createEmailSender,
@@ -44,6 +51,10 @@ export interface ExpressAppConfig {
   readonly emailProvider?: string;
   readonly resendApiKey?: string;
   readonly emailFrom?: string;
+  readonly googleOAuthClientId?: string;
+  readonly googleOAuthClientSecret?: string;
+  readonly googleOAuthRedirectUri?: string;
+  readonly googleOAuthFetch?: typeof fetch;
 }
 
 export interface CreateEyvanExpressAppDeps {
@@ -51,6 +62,50 @@ export interface CreateEyvanExpressAppDeps {
   readonly roomManager: HokmRoomManager;
   readonly config: ExpressAppConfig;
   readonly emailSender?: EmailSender;
+}
+
+function mapSummaryToInviteCheck(
+  summary: PublicRoomSummary
+): RoomInviteCheckSummary {
+  const playerUsernames = summary.seats
+    .map((s) => s.username)
+    .filter((u): u is string => typeof u === 'string' && u.length > 0);
+  const host = summary.seats.find((s) => s.isHost)?.username ?? null;
+  const status =
+    summary.status === 'WAITING'
+      ? 'WAITING'
+      : summary.status === 'PLAYING'
+        ? 'PLAYING'
+        : 'FINISHED';
+  return {
+    roomCode: summary.roomCode,
+    status,
+    playerCount: summary.playerCount,
+    maxPlayers: summary.maxPlayers,
+    hostUsername: host,
+    playerUsernames,
+  };
+}
+
+function forwardWebHeadersToExpress(webHeaders: Headers, res: Response): void {
+  const setCookies =
+    typeof webHeaders.getSetCookie === 'function'
+      ? webHeaders.getSetCookie()
+      : [];
+  webHeaders.forEach((value, key) => {
+    if (key.toLowerCase() === 'set-cookie') return;
+    res.setHeader(key, value);
+  });
+  if (setCookies.length > 0) {
+    for (const c of setCookies) {
+      res.append('Set-Cookie', c);
+    }
+  } else {
+    const singleCookie = webHeaders.get('set-cookie');
+    if (singleCookie) {
+      res.append('Set-Cookie', singleCookie);
+    }
+  }
 }
 
 export interface EyvanExpressBundle {
@@ -285,6 +340,12 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
         publicAppBaseUrl: publicAppBaseUrl ?? undefined,
         isProduction: config.isProduction,
         emailSender,
+        googleOAuth: {
+          clientId: config.googleOAuthClientId,
+          clientSecret: config.googleOAuthClientSecret,
+          redirectUri: config.googleOAuthRedirectUri,
+          fetchImpl: config.googleOAuthFetch,
+        },
       });
 
       if (!webRes) {
@@ -292,9 +353,7 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
         return;
       }
 
-      webRes.headers.forEach((value, key) => {
-        res.setHeader(key, value);
-      });
+      forwardWebHeadersToExpress(webRes.headers, res);
       const responseText = await webRes.text();
       res.status(webRes.status).send(responseText);
     } catch (err) {
@@ -354,6 +413,10 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
         cookieOptions: cookieOpts,
         originAllowed: isRequestOriginAllowed(req),
         clientIp: extractClientIp(req),
+        roomLookup: async (roomCode: string) => {
+          const summary = roomManager.getRoomSummary(roomCode);
+          return summary ? mapSummaryToInviteCheck(summary) : null;
+        },
       });
 
       if (!webRes) {
@@ -361,9 +424,7 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
         return;
       }
 
-      webRes.headers.forEach((value, key) => {
-        res.setHeader(key, value);
-      });
+      forwardWebHeadersToExpress(webRes.headers, res);
       const responseText = await webRes.text();
       res.status(webRes.status).send(responseText);
     } catch (err) {
@@ -402,9 +463,28 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
   app.post('/api/rooms', async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const verifiedUser = await resolveOptionalVerifiedAuthUser(req);
+    let guestIdentity: Awaited<ReturnType<typeof resolveOrCreateGuestIdentity>> =
+      null;
+    if (!verifiedUser && sanitizeUsername(body.username)) {
+      try {
+        guestIdentity = await resolveOrCreateGuestIdentity(
+          db.getD1Adapter(),
+          parseGuestCookieFromHeader(req.headers.cookie),
+          body.username,
+          body.avatarCode
+        );
+      } catch {
+        guestIdentity = null;
+      }
+    }
+
     const result = roomManager.createRoom({
       username: verifiedUser ? verifiedUser.username : body.username,
-      userId: verifiedUser ? verifiedUser.userId : null,
+      userId: verifiedUser
+        ? verifiedUser.userId
+        : guestIdentity
+          ? guestIdentity.userId
+          : null,
       avatarCode: verifiedUser ? verifiedUser.avatarCode : body.avatarCode,
       targetMatchScore: body.targetMatchScore,
     });
@@ -415,7 +495,8 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
       });
       return;
     }
-    res.setHeader(
+    const secure = isSecureIncomingReq(req);
+    res.append(
       'Set-Cookie',
       buildSetSessionCookieHeader(
         {
@@ -423,10 +504,21 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
           playerId: result.response.playerId,
           sessionToken: result.sessionToken,
         },
-        isSecureIncomingReq(req),
+        secure,
         cookieOpts
       )
     );
+    if (guestIdentity?.issuedNewCookie && guestIdentity.rawGuestToken) {
+      res.append(
+        'Set-Cookie',
+        buildSetGuestCookieHeader(
+          guestIdentity.rawGuestToken,
+          secure,
+          guestIdentity.ttlSec,
+          cookieOpts
+        )
+      );
+    }
     res.status(201).json(result.response);
   });
 
@@ -448,10 +540,28 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
       ? body.preferredSeat
       : undefined;
     const verifiedUser = await resolveOptionalVerifiedAuthUser(req);
+    let guestIdentity: Awaited<ReturnType<typeof resolveOrCreateGuestIdentity>> =
+      null;
+    if (!verifiedUser && sanitizeUsername(body.username)) {
+      try {
+        guestIdentity = await resolveOrCreateGuestIdentity(
+          db.getD1Adapter(),
+          parseGuestCookieFromHeader(req.headers.cookie),
+          body.username,
+          body.avatarCode
+        );
+      } catch {
+        guestIdentity = null;
+      }
+    }
 
     const result = roomManager.joinRoom(String(req.params.code ?? ''), {
       username: verifiedUser ? verifiedUser.username : body.username,
-      userId: verifiedUser ? verifiedUser.userId : null,
+      userId: verifiedUser
+        ? verifiedUser.userId
+        : guestIdentity
+          ? guestIdentity.userId
+          : null,
       avatarCode: verifiedUser ? verifiedUser.avatarCode : body.avatarCode,
       preferredSeat,
     });
@@ -462,7 +572,8 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
       });
       return;
     }
-    res.setHeader(
+    const secure = isSecureIncomingReq(req);
+    res.append(
       'Set-Cookie',
       buildSetSessionCookieHeader(
         {
@@ -470,10 +581,21 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
           playerId: result.response.playerId,
           sessionToken: result.sessionToken,
         },
-        isSecureIncomingReq(req),
+        secure,
         cookieOpts
       )
     );
+    if (guestIdentity?.issuedNewCookie && guestIdentity.rawGuestToken) {
+      res.append(
+        'Set-Cookie',
+        buildSetGuestCookieHeader(
+          guestIdentity.rawGuestToken,
+          secure,
+          guestIdentity.ttlSec,
+          cookieOpts
+        )
+      );
+    }
     res.status(200).json(result.response);
   });
 

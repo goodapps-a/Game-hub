@@ -15,13 +15,16 @@
 import { D1DatabaseLike } from '../types';
 import {
   AccountStatus,
+  ActiveAuthSessionItem,
   AuthProvider,
   AuthRegisterResult,
   AuthRequestContext,
   AuthSessionResult,
+  LinkedAuthProvider,
   PublicAuthUser,
   VerifySessionResult,
 } from './types';
+import { revokeGuestSessionsForUser } from './guestSession';
 import {
   EmailDeliveryResult,
   EmailSender,
@@ -703,6 +706,68 @@ export async function revokeAuthSessionById(
   return Number(res.meta?.changes ?? 0) > 0;
 }
 
+/**
+ * Lists non-revoked, non-expired sessions for `userId` (safe metadata only — never exposes token hashes).
+ */
+export async function listActiveAuthSessions(
+  db: D1DatabaseLike,
+  userId: string,
+  currentSessionId: string | null,
+  now = Date.now()
+): Promise<ActiveAuthSessionItem[]> {
+  const res = await db
+    .prepare(
+      `SELECT session_id, created_at, last_seen_at, expires_at
+       FROM auth_sessions
+       WHERE user_id = ?
+         AND revoked_at IS NULL
+         AND expires_at > ?
+       ORDER BY last_seen_at DESC, created_at DESC
+       LIMIT 25`
+    )
+    .bind(userId, now)
+    .all<{
+      session_id: string;
+      created_at: number;
+      last_seen_at: number;
+      expires_at: number;
+    }>();
+
+  return (res.results ?? []).map((row) => ({
+    sessionId: row.session_id,
+    createdAt: row.created_at,
+    lastSeenAt: row.last_seen_at,
+    expiresAt: row.expires_at,
+    isCurrent: currentSessionId !== null && row.session_id === currentSessionId,
+  }));
+}
+
+/**
+ * Lists linked authentication providers (`password`, `google`) for `userId`.
+ */
+export async function listLinkedAuthProviders(
+  db: D1DatabaseLike,
+  userId: string
+): Promise<LinkedAuthProvider[]> {
+  const res = await db
+    .prepare(
+      `SELECT provider
+       FROM auth_identities
+       WHERE user_id = ?
+       ORDER BY provider ASC`
+    )
+    .bind(userId)
+    .all<{ provider: string }>();
+
+  const out: LinkedAuthProvider[] = [];
+  for (const row of res.results ?? []) {
+    if (row.provider === 'password' || row.provider === 'google') {
+      out.push(row.provider);
+    }
+  }
+  return out;
+}
+
 export interface UsernameAvailabilityResult {
   readonly ok: true;
   readonly status: number;
@@ -1116,6 +1181,8 @@ export async function upgradeGuestAccountToRegistered(
     }
     throw err;
   }
+
+  await revokeGuestSessionsForUser(db, guestUserId, now);
 
   let delivery: EmailDeliveryResult;
   if (ctx.isProduction && !ctx.publicAppBaseUrl) {

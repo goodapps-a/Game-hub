@@ -12,6 +12,7 @@
 import {
   CreateRoomResponse,
   JoinRoomResponse,
+  PublicRoomSummary,
   sanitizeAvatarCode,
   sanitizeRoomCode,
   sanitizeUsername,
@@ -27,7 +28,6 @@ import {
   fetchPlayerStatsFromD1,
   fetchRecentMatchesFromD1,
   touchVerifiedUserLastSeenInD1,
-  upsertUserInD1,
 } from './lib/d1Persistence';
 import { readBoundedUtf8Body } from './lib/httpBounds';
 import {
@@ -39,6 +39,12 @@ import {
 } from './lib/sessionCookie';
 import { parseAuthCookieFromHeader } from './lib/auth/authCookie';
 import { verifyAuthSession } from './lib/auth/authService';
+import {
+  buildSetGuestCookieHeader,
+  parseGuestCookieFromHeader,
+  pruneExpiredGuestSessionsBatched,
+  resolveOrCreateGuestIdentity,
+} from './lib/auth/guestSession';
 import { handleAuthHttpRequest } from './lib/auth/httpHandler';
 import {
   createEmailSender,
@@ -51,6 +57,7 @@ import {
 } from './lib/auth/securityPolicy';
 import { handleSocialHttpRequest } from './lib/social/httpHandler';
 import { pruneExpiredPresenceSessionsBatched } from './lib/social/socialService';
+import { RoomInviteCheckSummary } from './lib/social/types';
 
 export { HokmRoomDO };
 
@@ -166,16 +173,43 @@ function buildJsonResponse(
   body: string,
   status: number,
   cors: Record<string, string>,
-  setCookie?: string
+  setCookie?: string | string[]
 ): Response {
   const headers = new Headers({
     'Content-Type': 'application/json',
     ...cors,
   });
-  if (setCookie) {
-    headers.set('Set-Cookie', setCookie);
+  if (typeof setCookie === 'string' && setCookie) {
+    headers.append('Set-Cookie', setCookie);
+  } else if (Array.isArray(setCookie)) {
+    for (const c of setCookie) {
+      if (c) headers.append('Set-Cookie', c);
+    }
   }
   return new Response(body, { status, headers });
+}
+
+function mapPublicSummaryToInviteCheck(
+  summary: PublicRoomSummary
+): RoomInviteCheckSummary {
+  const playerUsernames = summary.seats
+    .map((s) => s.username)
+    .filter((u): u is string => typeof u === 'string' && u.length > 0);
+  const host = summary.seats.find((s) => s.isHost)?.username ?? null;
+  const status =
+    summary.status === 'WAITING'
+      ? 'WAITING'
+      : summary.status === 'PLAYING'
+        ? 'PLAYING'
+        : 'FINISHED';
+  return {
+    roomCode: summary.roomCode,
+    status,
+    playerCount: summary.playerCount,
+    maxPlayers: summary.maxPlayers,
+    hostUsername: host,
+    playerUsernames,
+  };
 }
 
 export default {
@@ -250,11 +284,17 @@ export default {
         publicAppBaseUrl: publicAppBaseUrl ?? undefined,
         isProduction: isProd,
         emailSender,
+        googleOAuth: {
+          clientId: env.GOOGLE_OAUTH_CLIENT_ID,
+          clientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+          redirectUri: env.GOOGLE_OAUTH_REDIRECT_URI,
+          fetchImpl: env.GOOGLE_OAUTH_FETCH,
+        },
       });
       if (authRes) return authRes;
     }
 
-    // 1c) Stage D1 Social & Online Presence (`/api/social/*`)
+    // 1c) Social, Online Presence, Private Chat (D2) & Real-Room Game Invites (D3) (`/api/social/*`)
     if (url.pathname.startsWith('/api/social/')) {
       const clientIp = resolveClientIp({
         cfConnectingIp: request.headers.get('CF-Connecting-IP'),
@@ -266,6 +306,20 @@ export default {
         cookieOptions: cookieOpts,
         originAllowed: isOriginAllowed(request, env),
         clientIp,
+        roomLookup: async (roomCode: string) => {
+          try {
+            const id = env.HOKM_ROOM.idFromName(roomCode);
+            const stub = env.HOKM_ROOM.get(id);
+            const res = await stub.fetch(
+              new Request(`https://room.internal/summary?code=${roomCode}`)
+            );
+            if (!res.ok) return null;
+            const summary = (await res.json()) as PublicRoomSummary;
+            return mapPublicSummaryToInviteCheck(summary);
+          } catch {
+            return null;
+          }
+        },
       });
       if (socialRes) return socialRes;
     }
@@ -468,13 +522,15 @@ export default {
         );
       }
 
-      // Optionally resolve verified central user identity from HttpOnly auth cookie (never trust body/headers)
+      // Resolve verified central user OR independent server-issued guest identity (never trust spoofed userId)
       let verifiedUser: {
         userId: string;
         username: string;
         avatarCode: string;
       } | null = null;
-      const rawAuthToken = parseAuthCookieFromHeader(request.headers.get('Cookie'));
+      let guestSetCookie: string | undefined;
+      const cookieHeader = request.headers.get('Cookie');
+      const rawAuthToken = parseAuthCookieFromHeader(cookieHeader);
       if (rawAuthToken && env.EYVAN_DB) {
         try {
           const verifiedAuth = await verifyAuthSession(env.EYVAN_DB, rawAuthToken);
@@ -486,7 +542,35 @@ export default {
             };
           }
         } catch {
-          // Non-fatal: continue as guest room join
+          // Non-fatal: fall through to independent guest session
+        }
+      }
+
+      let guestUserId: string | null = null;
+      if (!verifiedUser && env.EYVAN_DB) {
+        const extractedGuest = tryExtractUserForUpsert(bodyRead.text);
+        if (extractedGuest) {
+          try {
+            const guestResolved = await resolveOrCreateGuestIdentity(
+              env.EYVAN_DB,
+              parseGuestCookieFromHeader(cookieHeader),
+              extractedGuest.username,
+              extractedGuest.avatarCode
+            );
+            if (guestResolved) {
+              guestUserId = guestResolved.userId;
+              if (guestResolved.issuedNewCookie && guestResolved.rawGuestToken) {
+                guestSetCookie = buildSetGuestCookieHeader(
+                  guestResolved.rawGuestToken,
+                  secureCookie,
+                  guestResolved.ttlSec,
+                  cookieOpts
+                );
+              }
+            }
+          } catch (err) {
+            console.error('[Worker] Non-fatal D1 guest session error:', err);
+          }
         }
       }
 
@@ -502,6 +586,8 @@ export default {
           forwardHeaders['X-Eyvan-Verified-User-Id'] = verifiedUser.userId;
           forwardHeaders['X-Eyvan-Verified-Username'] = verifiedUser.username;
           forwardHeaders['X-Eyvan-Verified-Avatar'] = verifiedUser.avatarCode;
+        } else if (guestUserId) {
+          forwardHeaders['X-Eyvan-Verified-User-Id'] = guestUserId;
         }
         const res = await stub.fetch(
           new Request(`https://room.internal/create?code=${code}`, {
@@ -514,7 +600,7 @@ export default {
         if (res.status !== 409) {
           const text = await res.text();
           const internalToken = res.headers.get(INTERNAL_SESSION_TOKEN_HEADER);
-          let setCookie: string | undefined;
+          const setCookies: string[] = [];
           if (res.ok) {
             if (verifiedUser) {
               try {
@@ -522,34 +608,30 @@ export default {
               } catch (err) {
                 console.error('[Worker] Non-fatal D1 last_seen update error:', err);
               }
-            } else {
-              const user = tryExtractUserForUpsert(bodyRead.text);
-              if (user) {
-                try {
-                  await upsertUserInD1(env.EYVAN_DB, user.username, user.avatarCode);
-                } catch (err) {
-                  console.error('[Worker] Non-fatal D1 user upsert error:', err);
-                }
-              }
             }
             try {
               const created = JSON.parse(text) as CreateRoomResponse;
               if (created.roomCode && created.playerId && internalToken) {
-                setCookie = buildSetSessionCookieHeader(
-                  {
-                    roomCode: created.roomCode,
-                    playerId: created.playerId,
-                    sessionToken: internalToken,
-                  },
-                  secureCookie,
-                  cookieOpts
+                setCookies.push(
+                  buildSetSessionCookieHeader(
+                    {
+                      roomCode: created.roomCode,
+                      playerId: created.playerId,
+                      sessionToken: internalToken,
+                    },
+                    secureCookie,
+                    cookieOpts
+                  )
                 );
               }
             } catch {
               // Ignore
             }
+            if (!verifiedUser && guestSetCookie) {
+              setCookies.push(guestSetCookie);
+            }
           }
-          return buildJsonResponse(text, res.status, cors, setCookie);
+          return buildJsonResponse(text, res.status, cors, setCookies);
         }
       }
 
@@ -595,7 +677,9 @@ export default {
           username: string;
           avatarCode: string;
         } | null = null;
-        const rawAuthToken = parseAuthCookieFromHeader(request.headers.get('Cookie'));
+        let guestSetCookie: string | undefined;
+        const cookieHeader = request.headers.get('Cookie');
+        const rawAuthToken = parseAuthCookieFromHeader(cookieHeader);
         if (rawAuthToken && env.EYVAN_DB) {
           try {
             const verifiedAuth = await verifyAuthSession(env.EYVAN_DB, rawAuthToken);
@@ -607,7 +691,35 @@ export default {
               };
             }
           } catch {
-            // Non-fatal: continue as guest room join
+            // Non-fatal: fall through to independent guest session
+          }
+        }
+
+        let guestUserId: string | null = null;
+        if (!verifiedUser && env.EYVAN_DB) {
+          const extractedGuest = tryExtractUserForUpsert(bodyRead.text);
+          if (extractedGuest) {
+            try {
+              const guestResolved = await resolveOrCreateGuestIdentity(
+                env.EYVAN_DB,
+                parseGuestCookieFromHeader(cookieHeader),
+                extractedGuest.username,
+                extractedGuest.avatarCode
+              );
+              if (guestResolved) {
+                guestUserId = guestResolved.userId;
+                if (guestResolved.issuedNewCookie && guestResolved.rawGuestToken) {
+                  guestSetCookie = buildSetGuestCookieHeader(
+                    guestResolved.rawGuestToken,
+                    secureCookie,
+                    guestResolved.ttlSec,
+                    cookieOpts
+                  );
+                }
+              }
+            } catch (err) {
+              console.error('[Worker] Non-fatal D1 guest session error:', err);
+            }
           }
         }
 
@@ -618,6 +730,8 @@ export default {
           forwardHeaders['X-Eyvan-Verified-User-Id'] = verifiedUser.userId;
           forwardHeaders['X-Eyvan-Verified-Username'] = verifiedUser.username;
           forwardHeaders['X-Eyvan-Verified-Avatar'] = verifiedUser.avatarCode;
+        } else if (guestUserId) {
+          forwardHeaders['X-Eyvan-Verified-User-Id'] = guestUserId;
         }
         const res = await stub.fetch(
           new Request(`https://room.internal/join?code=${code}`, {
@@ -629,7 +743,7 @@ export default {
 
         const text = await res.text();
         const internalToken = res.headers.get(INTERNAL_SESSION_TOKEN_HEADER);
-        let setCookie: string | undefined;
+        const setCookies: string[] = [];
         if (res.ok) {
           if (verifiedUser) {
             try {
@@ -637,35 +751,31 @@ export default {
             } catch (err) {
               console.error('[Worker] Non-fatal D1 last_seen update error:', err);
             }
-          } else {
-            const user = tryExtractUserForUpsert(bodyRead.text);
-            if (user) {
-              try {
-                await upsertUserInD1(env.EYVAN_DB, user.username, user.avatarCode);
-              } catch (err) {
-                console.error('[Worker] Non-fatal D1 user upsert error:', err);
-              }
-            }
           }
           try {
             const joined = JSON.parse(text) as JoinRoomResponse;
             if (joined.roomCode && joined.playerId && internalToken) {
-              setCookie = buildSetSessionCookieHeader(
-                {
-                  roomCode: joined.roomCode,
-                  playerId: joined.playerId,
-                  sessionToken: internalToken,
-                },
-                secureCookie,
-                cookieOpts
+              setCookies.push(
+                buildSetSessionCookieHeader(
+                  {
+                    roomCode: joined.roomCode,
+                    playerId: joined.playerId,
+                    sessionToken: internalToken,
+                  },
+                  secureCookie,
+                  cookieOpts
+                )
               );
             }
           } catch {
             // Ignore
           }
+          if (!verifiedUser && guestSetCookie) {
+            setCookies.push(guestSetCookie);
+          }
         }
 
-        return buildJsonResponse(text, res.status, cors, setCookie);
+        return buildJsonResponse(text, res.status, cors, setCookies);
       }
 
       if (!isJoin && request.method === 'GET') {
@@ -809,6 +919,15 @@ export default {
       } catch (err) {
         console.error(
           '[Worker] Scheduled presence cleanup failed:',
+          err instanceof Error ? err.message : 'unknown'
+        );
+      }
+
+      try {
+        await pruneExpiredGuestSessionsBatched(env.EYVAN_DB, { now });
+      } catch (err) {
+        console.error(
+          '[Worker] Scheduled guest-session cleanup failed:',
           err instanceof Error ? err.message : 'unknown'
         );
       }

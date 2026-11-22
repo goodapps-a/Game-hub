@@ -93,4 +93,8 @@ export interface CfWorkerEnv {
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
   EMAIL_SENDER?: import('./auth/emailService').EmailSender;
+  GOOGLE_OAUTH_CLIENT_ID?: string;
+  GOOGLE_OAUTH_CLIENT_SECRET?: string;
+  GOOGLE_OAUTH_REDIRECT_URI?: string;
+  GOOGLE_OAUTH_FETCH?: typeof fetch;
 }

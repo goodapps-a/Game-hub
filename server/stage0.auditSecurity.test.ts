@@ -1260,7 +1260,10 @@ describe('Stage 0 — Security, Identity Isolation, Blocking Privacy & Migration
       };
 
       // Apply Stage 0 migration 0008
-      const res0008 = runDatabaseMigrations(db, { migrationsDir: DEFAULT_MIGRATIONS_DIR });
+      const res0008 = runDatabaseMigrations(db, {
+        migrationsDir: DEFAULT_MIGRATIONS_DIR,
+        upTo: '0008_stage0_identity_audit_and_guards.sql',
+      });
       assert.deepEqual(res0008.applied, ['0008_stage0_identity_audit_and_guards.sql']);
 
       // ZERO rows deleted across all historical tables!
@@ -1341,7 +1344,10 @@ describe('Stage 0 — Security, Identity Isolation, Blocking Privacy & Migration
       );
 
       // Re-running migrations is 100% idempotent
-      const repeat = runDatabaseMigrations(db, { migrationsDir: DEFAULT_MIGRATIONS_DIR });
+      const repeat = runDatabaseMigrations(db, {
+        migrationsDir: DEFAULT_MIGRATIONS_DIR,
+        upTo: '0008_stage0_identity_audit_and_guards.sql',
+      });
       assert.equal(repeat.applied.length, 0);
       assert.ok(repeat.skipped.includes('0008_stage0_identity_audit_and_guards.sql'));
     } finally {

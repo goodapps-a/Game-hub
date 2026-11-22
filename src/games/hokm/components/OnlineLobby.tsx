@@ -9,15 +9,19 @@ import {
   Crown,
   Gamepad2,
   Link2,
+  Loader2,
   LogOut,
   Play,
   Plus,
   RefreshCw,
+  Send,
   ShieldCheck,
   Trophy,
+  UserPlus,
   Users,
   Wifi,
   WifiOff,
+  X,
 } from 'lucide-react';
 import { Seat } from '../engine/types';
 import {
@@ -31,6 +35,11 @@ import {
 import { ConnectionState } from '../online/client';
 import { PLATFORM_ASSETS } from '../../../platform/data/assets';
 import { toPersianDigits } from '../../../platform/theme/tokens';
+import {
+  FriendListItem,
+  fetchFriendsRequest,
+  sendGameInviteApi,
+} from '../../../platform/social/socialClient';
 
 export const ONLINE_AVATAR_OPTIONS: readonly {
   code: string;
@@ -58,6 +67,7 @@ const SEAT_PERSIAN_LABELS: Record<Seat, string> = {
 interface OnlineLobbyProps {
   username: string;
   avatarCode: string;
+  isAuthenticated?: boolean;
   initialRoomCode?: string;
   snapshot: RoomSnapshot | null;
   connectionState: ConnectionState;
@@ -202,6 +212,7 @@ const LobbySeatCard: React.FC<{
 export const OnlineLobby: React.FC<OnlineLobbyProps> = ({
   username,
   avatarCode,
+  isAuthenticated = false,
   initialRoomCode = '',
   snapshot,
   connectionState,
@@ -225,9 +236,79 @@ export const OnlineLobby: React.FC<OnlineLobbyProps> = ({
     initialRoomCode.toUpperCase()
   );
   const [copiedMode, setCopiedMode] = useState<'code' | 'link' | null>(null);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteFriends, setInviteFriends] = useState<FriendListItem[]>([]);
+  const [inviteLoading, setInviteLoading] = useState(false);
+  const [inviteSendingId, setInviteSendingId] = useState<string | null>(null);
+  const [invitedUserIds, setInvitedUserIds] = useState<Record<string, boolean>>({});
+  const [inviteFeedback, setInviteFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
 
   const validUsername = sanitizeUsername(username) !== null;
   const cleanJoinCode = sanitizeRoomCode(joinCodeInput);
+
+  const handleToggleInvitePanel = async () => {
+    const next = !inviteOpen;
+    setInviteOpen(next);
+    setInviteFeedback(null);
+    if (!next) return;
+    setInviteLoading(true);
+    try {
+      const res = await fetchFriendsRequest();
+      if (res.ok && Array.isArray(res.friends)) {
+        const sorted = [...res.friends].sort((a, b) =>
+          a.onlineStatus === b.onlineStatus
+            ? a.username.localeCompare(b.username, 'en', { sensitivity: 'base' })
+            : a.onlineStatus === 'online'
+              ? -1
+              : 1
+        );
+        setInviteFriends(sorted);
+      } else {
+        setInviteFeedback({
+          type: 'error',
+          text: res.message ?? 'دریافت لیست دوستان انجام نشد.',
+        });
+      }
+    } catch {
+      setInviteFeedback({
+        type: 'error',
+        text: 'خطا در ارتباط با سرور برای دریافت لیست دوستان.',
+      });
+    } finally {
+      setInviteLoading(false);
+    }
+  };
+
+  const handleSendRoomInvite = async (targetUserId: string) => {
+    if (!snapshot || inviteSendingId) return;
+    setInviteSendingId(targetUserId);
+    setInviteFeedback(null);
+    try {
+      const res = await sendGameInviteApi(targetUserId, snapshot.roomCode, 'hokm');
+      if (!res.ok) {
+        setInviteFeedback({
+          type: 'error',
+          text: res.message ?? 'ارسال دعوت‌نامه انجام نشد.',
+        });
+        return;
+      }
+      setInvitedUserIds((prev) => ({ ...prev, [targetUserId]: true }));
+      setInviteFeedback({
+        type: 'success',
+        text: res.message ?? 'دعوت‌نامه بازی ارسال شد.',
+      });
+    } catch {
+      setInviteFeedback({
+        type: 'error',
+        text: 'خطا در ارسال دعوت‌نامه به سرور.',
+      });
+    } finally {
+      setInviteSendingId(null);
+    }
+  };
 
   const handleCopy = async (mode: 'code' | 'link') => {
     if (!snapshot) return;
@@ -364,8 +445,120 @@ export const OnlineLobby: React.FC<OnlineLobbyProps> = ({
                   {copiedMode === 'link' ? 'لینک کپی شد' : 'لینک دعوت'}
                 </span>
               </button>
+              {isAuthenticated && seatedCount < MAX_ROOM_PLAYERS && (
+                <button
+                  type="button"
+                  onClick={() => void handleToggleInvitePanel()}
+                  data-testid="lobby-invite-friends-btn"
+                  className={`min-h-[42px] px-3 rounded-xl border text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition-colors ${
+                    inviteOpen
+                      ? 'bg-[#D4AE58] border-[#F3D179] text-[#0B1628]'
+                      : 'bg-[#0D8A8A]/25 hover:bg-[#0D8A8A]/40 border-[#34D399]/50 text-[#ECFDF5]'
+                  }`}
+                  title="دعوت دوستان به این اتاق"
+                >
+                  <UserPlus className="w-4 h-4" />
+                  <span className="hidden sm:inline">دعوت دوستان</span>
+                </button>
+              )}
             </div>
           </header>
+
+          {inviteOpen && isAuthenticated && (
+            <section
+              data-testid="lobby-invite-friends-panel"
+              className="rounded-2xl bg-[#0A251F]/95 border border-[#D4AE58]/50 p-4 space-y-3 backdrop-blur-md shadow-xl"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs sm:text-sm font-extrabold text-[#F3D179]">
+                  <UserPlus className="w-4 h-4" />
+                  <span>دعوت مستقیم دوستان به اتاق {snapshot.roomCode}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setInviteOpen(false)}
+                  aria-label="بستن پنل دعوت دوستان"
+                  className="p-1.5 rounded-lg bg-white/8 hover:bg-white/15 text-[#B8CEC6] cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {inviteFeedback && (
+                <div
+                  role="status"
+                  className={`rounded-xl px-3 py-2 text-xs font-bold border ${
+                    inviteFeedback.type === 'success'
+                      ? 'bg-[#107C41]/20 border-[#34D399]/40 text-[#6EE7B7]'
+                      : 'bg-[#7F1D1D]/70 border-[#F87171]/50 text-[#FEE2E2]'
+                  }`}
+                >
+                  {inviteFeedback.text}
+                </div>
+              )}
+
+              {inviteLoading ? (
+                <div className="py-4 flex items-center justify-center gap-2 text-xs text-[#A7C4BA]">
+                  <Loader2 className="w-4 h-4 animate-spin text-[#F3D179]" />
+                  <span>در حال دریافت لیست دوستان...</span>
+                </div>
+              ) : inviteFriends.length === 0 ? (
+                <p className="text-xs text-[#9BB8AE] py-2 text-center">
+                  هنوز دوستی در حساب شما ثبت نشده است. از تب «دوستان» می‌توانید دوستان خود را اضافه کنید.
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-[200px] overflow-y-auto">
+                  {inviteFriends.map((f) => {
+                    const alreadyInvited = Boolean(invitedUserIds[f.userId]);
+                    const sendingThis = inviteSendingId === f.userId;
+                    return (
+                      <div
+                        key={f.userId}
+                        data-testid={`lobby-invite-row-${f.username}`}
+                        className="flex items-center justify-between gap-2 rounded-xl bg-[#051411]/85 border border-white/10 px-3 py-2"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className={`w-2 h-2 rounded-full shrink-0 ${
+                              f.onlineStatus === 'online'
+                                ? 'bg-[#34D399]'
+                                : 'bg-[#64748B]'
+                            }`}
+                          />
+                          <span
+                            dir="ltr"
+                            className="text-xs font-extrabold text-[#FAF6EE] truncate"
+                          >
+                            {f.username}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={alreadyInvited || sendingThis}
+                          onClick={() => void handleSendRoomInvite(f.userId)}
+                          data-testid={`lobby-send-invite-${f.username}`}
+                          className={`min-h-[32px] px-2.5 rounded-lg text-[11px] font-extrabold inline-flex items-center gap-1 shrink-0 cursor-pointer transition-colors ${
+                            alreadyInvited
+                              ? 'bg-[#34D399]/18 border border-[#34D399]/40 text-[#6EE7B7] cursor-default'
+                              : 'bg-[#D4AE58] hover:bg-[#E5BF69] text-[#0B1628] disabled:opacity-50'
+                          }`}
+                        >
+                          {sendingThis ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : alreadyInvited ? (
+                            <Check className="w-3 h-3" />
+                          ) : (
+                            <Send className="w-3 h-3" />
+                          )}
+                          <span>{alreadyInvited ? 'دعوت شد' : 'دعوت'}</span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          )}
 
           {errorMessage && (
             <div
@@ -531,33 +724,56 @@ export const OnlineLobby: React.FC<OnlineLobbyProps> = ({
           </div>
         </header>
 
-        {/* Player Identity Strip (English Username + Avatar) */}
+        {/* Player Identity Strip (Central Verified Account or Guest Username + Avatar) */}
         <section className="rounded-2xl bg-[#0A241E]/90 border border-[#D4AE58]/40 p-4 backdrop-blur-md space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="space-y-1 flex-1">
-              <label
-                htmlFor="online-username-input"
-                className="block text-xs font-bold text-[#D4AE58]"
-              >
-                شناسه کاربری شما در میز آنلاین (انگلیسی)
-              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                <label
+                  htmlFor="online-username-input"
+                  className="block text-xs font-bold text-[#D4AE58]"
+                >
+                  شناسه کاربری شما در میز آنلاین (انگلیسی)
+                </label>
+                {isAuthenticated && (
+                  <span
+                    data-testid="online-verified-identity-badge"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#0D8A8A]/20 border border-[#34D399]/40 text-[10px] font-extrabold text-[#6EE7B7]"
+                  >
+                    <ShieldCheck className="w-3 h-3" />
+                    <span>هویت تأییدشده حساب مرکزی</span>
+                  </span>
+                )}
+              </div>
               <input
                 id="online-username-input"
                 data-testid="online-username-input"
                 dir="ltr"
                 type="text"
                 value={username}
+                readOnly={isAuthenticated}
                 maxLength={20}
-                onChange={(e) =>
-                  onChangeUsername(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))
-                }
+                onChange={(e) => {
+                  if (isAuthenticated) return;
+                  onChangeUsername(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''));
+                }}
                 placeholder="amir_rad"
-                className="w-full sm:max-w-xs min-h-[42px] px-3.5 rounded-xl bg-[#051411] border border-[#D4AE58]/45 focus:border-[#F3D179] focus:outline-none text-sm font-bold text-white"
+                className={`w-full sm:max-w-xs min-h-[42px] px-3.5 rounded-xl bg-[#051411] border text-sm font-bold text-white focus:outline-none ${
+                  isAuthenticated
+                    ? 'border-[#34D399]/45 opacity-90 cursor-not-allowed'
+                    : 'border-[#D4AE58]/45 focus:border-[#F3D179]'
+                }`}
               />
-              {!validUsername && (
-                <p className="text-[11px] text-[#FCA5A5]">
-                  حداقل ۳ کاراکتر انگلیسی، عدد یا _ وارد کنید.
+              {isAuthenticated ? (
+                <p className="text-[11px] text-[#9EBAB0]">
+                  برای تغییر نام کاربری یا آواتار، از بخش پروفایل حساب مرکزی اقدام کنید.
                 </p>
+              ) : (
+                !validUsername && (
+                  <p className="text-[11px] text-[#FCA5A5]">
+                    حداقل ۳ کاراکتر انگلیسی، عدد یا _ وارد کنید.
+                  </p>
+                )
               )}
             </div>
 
@@ -568,11 +784,16 @@ export const OnlineLobby: React.FC<OnlineLobbyProps> = ({
                   <button
                     key={av.code}
                     type="button"
-                    onClick={() => onChangeAvatar(av.code)}
-                    className={`w-11 h-11 rounded-full overflow-hidden border-2 transition-all cursor-pointer ${
+                    disabled={isAuthenticated}
+                    onClick={() => {
+                      if (!isAuthenticated) onChangeAvatar(av.code);
+                    }}
+                    className={`w-11 h-11 rounded-full overflow-hidden border-2 transition-all ${
+                      isAuthenticated ? 'cursor-default' : 'cursor-pointer'
+                    } ${
                       active
                         ? 'border-[#F3D179] scale-108 shadow-[0_0_14px_rgba(243,209,121,0.5)]'
-                        : 'border-white/20 opacity-70 hover:opacity-100'
+                        : 'border-white/20 opacity-60 hover:opacity-100 disabled:hover:opacity-60'
                     }`}
                     title={av.label}
                   >

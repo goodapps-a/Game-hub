@@ -91,6 +91,8 @@ export function validateUserId(
   return { ok: true, userId: cleaned };
 }
 
+export const validateTargetUserId = validateUserId;
+
 export function validateFriendshipId(
   raw: unknown
 ): { ok: true; friendshipId: string } | ValidationFailure {

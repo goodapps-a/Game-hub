@@ -128,6 +128,122 @@ export interface SocialPrivacyResponse {
   readonly message?: string;
 }
 
+export interface BlockedUserItem {
+  readonly userId: string;
+  readonly username: string;
+  readonly displayName: string;
+  readonly avatarCode: string;
+  readonly avatarUrl: string | null;
+  readonly blockedAt: number;
+}
+
+export interface SocialBlockedListResponse {
+  readonly ok: boolean;
+  readonly blocked?: BlockedUserItem[];
+  readonly code?: string;
+  readonly message?: string;
+}
+
+export interface ChatPartnerSummary {
+  readonly userId: string;
+  readonly username: string;
+  readonly displayName: string;
+  readonly avatarCode: string;
+  readonly avatarUrl: string | null;
+  readonly onlineStatus: PresenceStatus;
+}
+
+export interface ChatConversationItem {
+  readonly conversationId: string;
+  readonly partner: ChatPartnerSummary;
+  readonly lastMessagePreview: string | null;
+  readonly lastMessageAt: number | null;
+  readonly unreadCount: number;
+  readonly createdAt: number;
+}
+
+export interface ChatMessageItem {
+  readonly messageId: string;
+  readonly conversationId: string;
+  readonly senderId: string;
+  readonly kind: 'text' | 'system' | 'game_invite';
+  readonly body: string;
+  readonly clientMsgId: string | null;
+  readonly createdAt: number;
+}
+
+export interface ChatConversationsResponse {
+  readonly ok: boolean;
+  readonly conversations?: ChatConversationItem[];
+  readonly serverTime?: number;
+  readonly code?: string;
+  readonly message?: string;
+}
+
+export interface ChatOpenDirectResponse {
+  readonly ok: boolean;
+  readonly conversation?: ChatConversationItem;
+  readonly code?: string;
+  readonly message?: string;
+}
+
+export interface ChatMessagesResponse {
+  readonly ok: boolean;
+  readonly conversationId?: string;
+  readonly messages?: ChatMessageItem[];
+  readonly hasMore?: boolean;
+  readonly nextBefore?: number | null;
+  readonly partnerLastReadAt?: number | null;
+  readonly code?: string;
+  readonly message?: string;
+}
+
+export interface ChatSendMessageResponse {
+  readonly ok: boolean;
+  readonly message?: ChatMessageItem | string;
+  readonly deduplicated?: boolean;
+  readonly code?: string;
+}
+
+export interface GameInviteItem {
+  readonly inviteId: string;
+  readonly gameId: 'hokm';
+  readonly roomCode: string;
+  readonly status: 'pending' | 'accepted' | 'declined' | 'canceled' | 'expired';
+  readonly direction: 'incoming' | 'outgoing';
+  readonly otherUser: {
+    readonly userId: string;
+    readonly username: string;
+    readonly displayName: string;
+    readonly avatarCode: string;
+    readonly avatarUrl: string | null;
+  };
+  readonly createdAt: number;
+  readonly expiresAt: number;
+  readonly respondedAt: number | null;
+}
+
+export interface GameInvitesListResponse {
+  readonly ok: boolean;
+  readonly incoming?: GameInviteItem[];
+  readonly outgoing?: GameInviteItem[];
+  readonly serverTime?: number;
+  readonly code?: string;
+  readonly message?: string;
+}
+
+export interface GameInviteMutationResponse {
+  readonly ok: boolean;
+  readonly invite?: GameInviteItem;
+  readonly inviteId?: string;
+  readonly decision?: 'accept' | 'decline';
+  readonly roomCode?: string;
+  readonly gameId?: 'hokm';
+  readonly deduplicated?: boolean;
+  readonly code?: string;
+  readonly message?: string;
+}
+
 const DEVICE_ID_STORAGE_KEY = 'eyvan_presence_device_id';
 let memoryFallbackDeviceId: string | null = null;
 
@@ -407,3 +523,275 @@ export async function updateSocialPrivacyRequest(payload: {
     'خطا در ذخیره تنظیمات حریم خصوصی.'
   );
 }
+
+// =========================================================================
+// STAGE 1.3 — BLOCK MANAGEMENT
+// =========================================================================
+
+export async function fetchBlockedUsersRequest(
+  signal?: AbortSignal
+): Promise<SocialBlockedListResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/social/blocks'), {
+    method: 'GET',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+  return parseSocialJson<SocialBlockedListResponse>(
+    res,
+    'خطا در دریافت لیست کاربران مسدودشده.'
+  );
+}
+
+export async function blockUserApi(
+  targetUserId: string,
+  reason?: string
+): Promise<SocialMutationResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/social/blocks'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'eyvan-client',
+    },
+    body: JSON.stringify({ targetUserId, ...(reason ? { reason } : {}) }),
+  });
+  return parseSocialJson<SocialMutationResponse>(
+    res,
+    'خطا در مسدود کردن کاربر.'
+  );
+}
+
+export async function unblockUserApi(
+  targetUserId: string
+): Promise<SocialMutationResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/social/blocks/remove'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'eyvan-client',
+    },
+    body: JSON.stringify({ targetUserId }),
+  });
+  return parseSocialJson<SocialMutationResponse>(
+    res,
+    'خطا در رفع مسدودیت کاربر.'
+  );
+}
+
+// =========================================================================
+// STAGE 6 (D2) — PRIVATE 1-ON-1 DIRECT CHAT
+// =========================================================================
+
+export async function fetchChatConversationsRequest(
+  signal?: AbortSignal
+): Promise<ChatConversationsResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/social/chat/conversations'), {
+    method: 'GET',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+  return parseSocialJson<ChatConversationsResponse>(
+    res,
+    'خطا در دریافت لیست گفتگوهای خصوصی.'
+  );
+}
+
+export async function openDirectConversationApi(
+  targetUserId: string
+): Promise<ChatOpenDirectResponse> {
+  const res = await fetch(
+    buildOnlineHttpUrl('/api/social/chat/conversations/direct'),
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'eyvan-client',
+      },
+      body: JSON.stringify({ targetUserId }),
+    }
+  );
+  return parseSocialJson<ChatOpenDirectResponse>(
+    res,
+    'خطا در باز کردن گفتگوی خصوصی.'
+  );
+}
+
+export async function fetchChatMessagesRequest(
+  conversationId: string,
+  before?: number,
+  limit = 30,
+  signal?: AbortSignal
+): Promise<ChatMessagesResponse> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (typeof before === 'number' && Number.isFinite(before)) {
+    params.set('before', String(Math.floor(before)));
+  }
+  const res = await fetch(
+    buildOnlineHttpUrl(
+      `/api/social/chat/conversations/${encodeURIComponent(conversationId)}/messages?${params.toString()}`
+    ),
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { Accept: 'application/json' },
+      signal,
+    }
+  );
+  return parseSocialJson<ChatMessagesResponse>(
+    res,
+    'خطا در دریافت پیام‌های گفتگو.'
+  );
+}
+
+export async function sendChatMessageApi(
+  conversationId: string,
+  body: string,
+  clientMsgId?: string
+): Promise<ChatSendMessageResponse> {
+  const res = await fetch(
+    buildOnlineHttpUrl(
+      `/api/social/chat/conversations/${encodeURIComponent(conversationId)}/messages`
+    ),
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'eyvan-client',
+      },
+      body: JSON.stringify({
+        body,
+        ...(clientMsgId ? { clientMsgId } : {}),
+      }),
+    }
+  );
+  return parseSocialJson<ChatSendMessageResponse>(
+    res,
+    'خطا در ارسال پیام خصوصی.'
+  );
+}
+
+export async function markChatReadApi(
+  conversationId: string,
+  lastReadMessageId?: string
+): Promise<{ readonly ok: boolean; readonly code?: string; readonly message?: string }> {
+  const res = await fetch(
+    buildOnlineHttpUrl(
+      `/api/social/chat/conversations/${encodeURIComponent(conversationId)}/read`
+    ),
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'eyvan-client',
+      },
+      body: JSON.stringify({
+        ...(lastReadMessageId ? { lastReadMessageId } : {}),
+      }),
+    }
+  );
+  return parseSocialJson<{
+    readonly ok: boolean;
+    readonly code?: string;
+    readonly message?: string;
+  }>(res, 'خطا در ثبت وضعیت خوانده‌شدن گفتگو.');
+}
+
+// =========================================================================
+// STAGE 7 (D3) — REAL-ROOM GAME INVITES
+// =========================================================================
+
+export async function fetchGameInvitesRequest(
+  signal?: AbortSignal
+): Promise<GameInvitesListResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/social/invites'), {
+    method: 'GET',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+  return parseSocialJson<GameInvitesListResponse>(
+    res,
+    'خطا در دریافت دعوت‌نامه‌های بازی.'
+  );
+}
+
+export async function sendGameInviteApi(
+  targetUserId: string,
+  roomCode: string,
+  gameId: 'hokm' = 'hokm'
+): Promise<GameInviteMutationResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/social/invites'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'eyvan-client',
+    },
+    body: JSON.stringify({ targetUserId, roomCode, gameId }),
+  });
+  return parseSocialJson<GameInviteMutationResponse>(
+    res,
+    'خطا در ارسال دعوت‌نامه بازی.'
+  );
+}
+
+export async function acceptGameInviteApi(
+  inviteId: string
+): Promise<GameInviteMutationResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/social/invites/accept'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'eyvan-client',
+    },
+    body: JSON.stringify({ inviteId }),
+  });
+  return parseSocialJson<GameInviteMutationResponse>(
+    res,
+    'خطا در پذیرش دعوت‌نامه بازی.'
+  );
+}
+
+export async function declineGameInviteApi(
+  inviteId: string
+): Promise<GameInviteMutationResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/social/invites/decline'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'eyvan-client',
+    },
+    body: JSON.stringify({ inviteId }),
+  });
+  return parseSocialJson<GameInviteMutationResponse>(
+    res,
+    'خطا در رد کردن دعوت‌نامه بازی.'
+  );
+}
+
+export async function cancelGameInviteApi(
+  inviteId: string
+): Promise<GameInviteMutationResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/social/invites/cancel'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'eyvan-client',
+    },
+    body: JSON.stringify({ inviteId }),
+  });
+  return parseSocialJson<GameInviteMutationResponse>(
+    res,
+    'خطا در لغو دعوت‌نامه بازی.'
+  );
+}
+

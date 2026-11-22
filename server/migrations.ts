@@ -141,6 +141,19 @@ function detectLegacyBaselineMigrations(
     detected.push('0008_stage0_identity_audit_and_guards.sql');
   }
 
+  const has0009 =
+    has0008 &&
+    tableExists(db, 'guest_sessions') &&
+    tableExists(db, 'game_invites') &&
+    columnExists(db, 'oauth_states', 'flow_mode');
+
+  if (
+    has0009 &&
+    availableFiles.includes('0009_guest_identity_and_game_invites.sql')
+  ) {
+    detected.push('0009_guest_identity_and_game_invites.sql');
+  }
+
   return detected;
 }
 

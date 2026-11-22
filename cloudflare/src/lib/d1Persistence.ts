@@ -554,13 +554,17 @@ export async function fetchPlayerStatsFromD1(
     if (byId) return byId;
   }
 
-  // Fallback ONLY for legacy pre-0004 unlinked rows (`user_id IS NULL`)
+  // Fallback ONLY for unlinked legacy rows (`user_id IS NULL`) OR independent guest rows (`u.account_status = 'guest'`).
+  // Never matches any registered/non-guest user's abandoned username after a rename.
   const legacyRow = await db
     .prepare(
       `SELECT
-         username, display_username, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at
-       FROM player_stats
-       WHERE username = ? AND user_id IS NULL
+         ps.user_id, ps.username, ps.display_username,
+         ps.matches_played, ps.wins, ps.losses, ps.kot_wins, ps.hakem_kot_wins, ps.last_played_at
+       FROM player_stats ps
+       LEFT JOIN users u ON u.user_id = ps.user_id
+       WHERE ps.username = ?
+         AND (ps.user_id IS NULL OR u.account_status = 'guest')
        LIMIT 1`
     )
     .bind(canonicalKey)
@@ -580,7 +584,7 @@ export async function fetchPlayerStatsFromD1(
   }
 
   return {
-    userId: null,
+    userId: legacyRow.user_id ?? null,
     username: legacyRow.display_username ?? legacyRow.username,
     matchesPlayed: legacyRow.matches_played,
     wins: legacyRow.wins,

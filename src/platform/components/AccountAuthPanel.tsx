@@ -3,26 +3,39 @@ import {
   AlertCircle,
   ArrowRight,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   KeyRound,
+  Link2,
   LogIn,
   LogOut,
   MailCheck,
+  Monitor,
   RefreshCw,
   ShieldCheck,
+  Trash2,
   UserPlus,
 } from 'lucide-react';
 import {
+  ActiveAuthSessionItem,
   AuthUserSummary,
+  LinkedAuthProvider,
   PendingAuthUrlAction,
+  fetchActiveAuthSessions,
+  fetchCurrentAuthSession,
+  fetchGoogleOAuthConfig,
   forgotPasswordRequest,
   loginAccount,
   logoutAccount,
   logoutAllAccountSessions,
+  openGoogleOAuthPopup,
   registerAccount,
   resendVerificationRequest,
   resetPasswordRequest,
+  revokeAuthSessionByIdRequest,
   verifyEmailWithTokenRequest,
 } from '../auth/authClient';
+import { toPersianDigits } from '../theme/tokens';
 
 interface AccountAuthPanelProps {
   authUser: AuthUserSummary | null;
@@ -65,6 +78,15 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
   const [verifyState, setVerifyState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [resetDone, setResetDone] = useState(false);
 
+  // Stage 2 & C3: Google OAuth availability, linked providers & active sessions
+  const [googleConfigured, setGoogleConfigured] = useState<boolean | null>(null);
+  const [googleBusy, setGoogleBusy] = useState(false);
+  const [linkedProviders, setLinkedProviders] = useState<LinkedAuthProvider[]>([]);
+  const [activeSessions, setActiveSessions] = useState<ActiveAuthSessionItem[]>([]);
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [revokingSessionId, setRevokingSessionId] = useState<string | null>(null);
+
   const lastAutoVerifiedTokenRef = useRef<string | null>(null);
 
   const resetFeedback = () => {
@@ -72,6 +94,45 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
     setInfoMsg(null);
     setUnverifiedNotice(false);
   };
+
+  useEffect(() => {
+    let active = true;
+    fetchGoogleOAuthConfig()
+      .then((res) => {
+        if (active) setGoogleConfigured(Boolean(res.ok && res.configured));
+      })
+      .catch(() => {
+        if (active) setGoogleConfigured(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const loadAccountSecurityState = async () => {
+    setSessionsLoading(true);
+    try {
+      const res = await fetchActiveAuthSessions();
+      if (res.ok) {
+        setActiveSessions(Array.isArray(res.sessions) ? res.sessions : []);
+        setLinkedProviders(Array.isArray(res.providers) ? res.providers : []);
+      }
+    } catch {
+      // Non-fatal
+    } finally {
+      setSessionsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!authUser) {
+      setActiveSessions([]);
+      setLinkedProviders([]);
+      setSessionsOpen(false);
+      return;
+    }
+    void loadAccountSecurityState();
+  }, [authUser?.userId]);
 
   // React to incoming `#verify-email=` or `#reset-password=` actions (already scrubbed from URL)
   useEffect(() => {
@@ -321,6 +382,63 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
       setErrorMsg(err instanceof Error ? err.message : 'خطا در لغو نشست‌ها.');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleGoogleOAuth = async (flowMode: 'login' | 'link') => {
+    if (submitting || googleBusy) return;
+    resetFeedback();
+    setGoogleBusy(true);
+    try {
+      const result = await openGoogleOAuthPopup(flowMode);
+      if (!result.ok) {
+        setErrorMsg(result.message);
+        return;
+      }
+      const me = await fetchCurrentAuthSession();
+      if (me.ok && me.authenticated && me.user) {
+        onAuthChange(me.user);
+        if (Array.isArray(me.providers)) {
+          setLinkedProviders(me.providers);
+        }
+        await loadAccountSecurityState();
+      }
+      setInfoMsg(
+        result.message ||
+          (flowMode === 'link'
+            ? 'حساب گوگل با موفقیت به حساب شما متصل شد.'
+            : 'ورود با گوگل با موفقیت انجام شد.')
+      );
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'خطا در ورود با حساب گوگل.'
+      );
+    } finally {
+      setGoogleBusy(false);
+    }
+  };
+
+  const handleRevokeSingleSession = async (sessionId: string) => {
+    if (revokingSessionId) return;
+    resetFeedback();
+    setRevokingSessionId(sessionId);
+    try {
+      const res = await revokeAuthSessionByIdRequest(sessionId);
+      if (!res.ok) {
+        setErrorMsg(res.message ?? 'لغو نشست انجام نشد.');
+        return;
+      }
+      if (res.revokedCurrentSession) {
+        onAuthChange(null);
+        setInfoMsg('نشست فعلی لغو شد.');
+        return;
+      }
+      setActiveSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
+      setInfoMsg(res.message ?? 'نشست انتخاب‌شده با موفقیت لغو شد.');
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'خطا در لغو نشست.');
+    } finally {
+      setRevokingSessionId(null);
     }
   };
 
@@ -574,6 +692,120 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
             <span>{infoMsg}</span>
           </div>
         )}
+
+        {/* Linked Providers & Explicit Google Linking */}
+        <div className="pt-1 border-t border-[var(--eyvan-line)] space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-[11px] font-bold theme-muted">
+              روش‌های ورود متصل:
+            </span>
+            <div className="flex items-center gap-1.5">
+              {linkedProviders.includes('password') && (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-md border border-[var(--eyvan-line)] theme-heading">
+                  رمز عبور
+                </span>
+              )}
+              {linkedProviders.includes('google') && (
+                <span
+                  data-testid="auth-provider-google-badge"
+                  className="text-[10px] font-bold px-2 py-0.5 rounded-md border border-[#0D8A8A]/50 theme-accent-teal"
+                >
+                  گوگل
+                </span>
+              )}
+            </div>
+          </div>
+
+          {!linkedProviders.includes('google') && (
+            <button
+              type="button"
+              disabled={submitting || googleBusy}
+              onClick={() => void handleGoogleOAuth('link')}
+              data-testid="auth-link-google-btn"
+              className="w-full min-h-[38px] px-3 rounded-xl border border-[var(--eyvan-gold-border)] hover:border-[#D4AE58] text-xs font-bold theme-heading flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
+            >
+              <Link2 className="w-3.5 h-3.5 theme-accent-gold" />
+              <span>
+                {googleBusy
+                  ? 'در حال اتصال به گوگل...'
+                  : 'اتصال حساب گوگل به این حساب'}
+              </span>
+            </button>
+          )}
+        </div>
+
+        {/* Collapsible Active Sessions Management */}
+        <div className="pt-1 border-t border-[var(--eyvan-line)] space-y-2">
+          <button
+            type="button"
+            onClick={() => {
+              const next = !sessionsOpen;
+              setSessionsOpen(next);
+              if (next) void loadAccountSecurityState();
+            }}
+            data-testid="auth-sessions-toggle"
+            className="w-full flex items-center justify-between text-[11px] font-bold theme-heading py-1 cursor-pointer"
+          >
+            <span className="inline-flex items-center gap-1.5">
+              <Monitor className="w-3.5 h-3.5 theme-accent-teal" />
+              <span>
+                نشست‌های فعال ({toPersianDigits(activeSessions.length)})
+              </span>
+            </span>
+            {sessionsOpen ? (
+              <ChevronUp className="w-3.5 h-3.5 theme-muted" />
+            ) : (
+              <ChevronDown className="w-3.5 h-3.5 theme-muted" />
+            )}
+          </button>
+
+          {sessionsOpen && (
+            <div
+              className="space-y-1.5"
+              data-testid="auth-sessions-list"
+            >
+              {sessionsLoading ? (
+                <div className="text-[11px] theme-muted py-2 text-center">
+                  در حال دریافت نشست‌ها...
+                </div>
+              ) : activeSessions.length === 0 ? (
+                <div className="text-[11px] theme-muted py-2 text-center">
+                  نشست فعالی یافت نشد.
+                </div>
+              ) : (
+                activeSessions.map((sess) => (
+                  <div
+                    key={sess.sessionId}
+                    data-testid={`auth-session-row-${sess.isCurrent ? 'current' : sess.sessionId}`}
+                    className="p-2 rounded-xl theme-input border flex items-center justify-between gap-2 text-[11px]"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-bold theme-heading truncate">
+                        {sess.isCurrent ? 'همین دستگاه (نشست فعلی)' : 'دستگاه دیگر'}
+                      </div>
+                      <div className="text-[10px] theme-muted">
+                        آخرین فعالیت:{' '}
+                        {new Date(sess.lastSeenAt).toLocaleDateString('fa-IR')}
+                      </div>
+                    </div>
+                    {!sess.isCurrent && (
+                      <button
+                        type="button"
+                        disabled={revokingSessionId === sess.sessionId}
+                        onClick={() => void handleRevokeSingleSession(sess.sessionId)}
+                        data-testid={`auth-revoke-session-${sess.sessionId}`}
+                        className="px-2.5 min-h-[30px] rounded-lg border border-[#DC2626]/45 text-[10px] font-bold theme-loss hover:bg-[#DC2626]/10 inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 shrink-0"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        <span>لغو</span>
+                      </button>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
 
         <div className="grid grid-cols-2 gap-2 pt-1">
           <button
@@ -866,6 +1098,45 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
             {submitting ? 'در حال ثبت‌نام...' : 'ساخت حساب کاربری'}
           </button>
         </form>
+      )}
+
+      {(mode === 'login' || mode === 'register') && (
+        <div className="pt-1 space-y-2">
+          <div className="flex items-center gap-2 text-[10px] theme-muted">
+            <span className="flex-1 h-px bg-[var(--eyvan-line)]" />
+            <span>یا</span>
+            <span className="flex-1 h-px bg-[var(--eyvan-line)]" />
+          </div>
+          <button
+            type="button"
+            disabled={submitting || googleBusy}
+            onClick={() => void handleGoogleOAuth('login')}
+            data-testid="auth-google-btn"
+            className="w-full min-h-[42px] px-3 rounded-xl theme-input border border-[var(--eyvan-gold-border)] hover:border-[#D4AE58] disabled:opacity-50 text-xs font-extrabold theme-heading flex items-center justify-center gap-2 cursor-pointer transition-colors"
+          >
+            <svg
+              aria-hidden="true"
+              className="w-4 h-4 shrink-0"
+              viewBox="0 0 24 24"
+            >
+              <path
+                fill="#EA4335"
+                d="M12 10.2v3.9h5.4c-.2 1.3-1.5 3.9-5.4 3.9-3.2 0-5.9-2.7-5.9-6s2.7-6 5.9-6c1.8 0 3.1.8 3.8 1.5l2.6-2.5C16.7 3.4 14.6 2.5 12 2.5 6.8 2.5 2.5 6.8 2.5 12s4.3 9.5 9.5 9.5c5.5 0 9.1-3.9 9.1-9.3 0-.6-.1-1.1-.2-1.6H12z"
+              />
+            </svg>
+            <span>
+              {googleBusy ? 'در حال اتصال به گوگل...' : 'ورود با حساب گوگل'}
+            </span>
+          </button>
+          {googleConfigured === false && (
+            <p
+              data-testid="auth-google-not-configured-hint"
+              className="text-[10px] theme-muted text-center leading-relaxed"
+            >
+              ورود با گوگل پس از تنظیم کلیدهای Google OAuth در سرور فعال می‌شود.
+            </p>
+          )}
+        </div>
       )}
 
       {mode === 'pending_verify' && (

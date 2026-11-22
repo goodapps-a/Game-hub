@@ -858,11 +858,10 @@ describe('Part 2 (Stage D1) — Friends System & Online Presence', () => {
       assert.equal(wfJson.ok, true);
       assert.equal(wfJson.incoming.length, 1);
 
-      // Out-of-scope D2/D3 routes must return 404
+      // Unimplemented legacy/out-of-scope routes must return 404
       for (const forbiddenPath of [
         '/api/social/messages',
         '/api/social/groups',
-        '/api/social/invites',
       ]) {
         const res404 = await worker.fetch(
           new Request(`https://api.eyvan.ir${forbiddenPath}`, {
@@ -875,7 +874,7 @@ describe('Part 2 (Stage D1) — Friends System & Online Presence', () => {
           }),
           workerEnv
         );
-        assert.equal(res404.status, 404, `${forbiddenPath} must not exist in Stage D1`);
+        assert.equal(res404.status, 404, `${forbiddenPath} must not exist`);
       }
 
       // Worker Cron `scheduled()` prunes expired presence sessions while preserving active ones

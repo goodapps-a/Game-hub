@@ -74,16 +74,113 @@ export interface SocialRequestContext {
   readonly now?: number;
 }
 
+export interface BlockedUserItem {
+  readonly userId: string;
+  readonly username: string;
+  readonly displayName: string;
+  readonly avatarCode: string;
+  readonly avatarUrl: string | null;
+  readonly blockedAt: number;
+}
+
+export interface PublicUserProfile {
+  readonly userId: string;
+  readonly username: string;
+  readonly displayName: string;
+  readonly avatarCode: string;
+  readonly avatarUrl: string | null;
+  readonly onlineStatus: PresenceStatus;
+  readonly relationshipStatus: RelationshipStatus;
+  readonly friendshipId: string | null;
+  readonly stats: {
+    readonly matchesPlayed: number;
+    readonly wins: number;
+    readonly losses: number;
+  };
+}
+
+export interface ChatPartnerSummary {
+  readonly userId: string;
+  readonly username: string;
+  readonly displayName: string;
+  readonly avatarCode: string;
+  readonly avatarUrl: string | null;
+  readonly onlineStatus: PresenceStatus;
+}
+
+export interface ChatConversationItem {
+  readonly conversationId: string;
+  readonly partner: ChatPartnerSummary;
+  readonly lastMessagePreview: string | null;
+  readonly lastMessageAt: number | null;
+  readonly unreadCount: number;
+  readonly createdAt: number;
+}
+
+export interface ChatMessageItem {
+  readonly messageId: string;
+  readonly conversationId: string;
+  readonly senderId: string;
+  readonly kind: 'text' | 'system' | 'game_invite';
+  readonly body: string;
+  readonly clientMsgId: string | null;
+  readonly createdAt: number;
+}
+
+export type GameInviteStatus =
+  | 'pending'
+  | 'accepted'
+  | 'declined'
+  | 'canceled'
+  | 'expired';
+
+export interface GameInviteItem {
+  readonly inviteId: string;
+  readonly gameId: 'hokm';
+  readonly roomCode: string;
+  readonly status: GameInviteStatus;
+  readonly direction: 'incoming' | 'outgoing';
+  readonly otherUser: {
+    readonly userId: string;
+    readonly username: string;
+    readonly displayName: string;
+    readonly avatarCode: string;
+    readonly avatarUrl: string | null;
+  };
+  readonly createdAt: number;
+  readonly expiresAt: number;
+  readonly respondedAt: number | null;
+}
+
+export interface RoomInviteCheckSummary {
+  readonly roomCode: string;
+  readonly status: 'WAITING' | 'PLAYING' | 'FINISHED';
+  readonly playerCount: number;
+  readonly maxPlayers: number;
+  readonly hostUsername: string | null;
+  readonly playerUsernames?: readonly string[];
+}
+
+export type GameRoomLookupFn = (
+  roomCode: string
+) => Promise<RoomInviteCheckSummary | null>;
+
 export type SocialErrorCode =
   | 'UNAUTHORIZED'
   | 'FORBIDDEN_ORIGIN'
   | 'CSRF_REJECTED'
   | 'INVALID_INPUT'
   | 'NOT_FOUND'
+  | 'FORBIDDEN'
   | 'SELF_ACTION_FORBIDDEN'
   | 'ALREADY_FRIENDS'
+  | 'NOT_FRIENDS'
   | 'REQUEST_ALREADY_SENT'
   | 'REQUEST_NOT_PENDING'
+  | 'INVITE_ALREADY_PENDING'
+  | 'INVITE_EXPIRED'
+  | 'INVITE_NOT_PENDING'
+  | 'ROOM_NOT_AVAILABLE'
   | 'PRIVACY_RESTRICTED'
   | 'USER_BLOCKED'
   | 'RATE_LIMITED'

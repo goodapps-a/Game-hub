@@ -30,7 +30,9 @@ import { preloadCardArtwork } from './components/PlayingCard';
 interface OnlineHokmGameProps {
   username: string;
   avatarCode: string;
+  isAuthenticated?: boolean;
   initialRoomCode?: string;
+  autoJoinRoom?: boolean;
   soundEnabled: boolean;
   reducedMotionPreference: boolean;
   onChangeUsername: (username: string) => void;
@@ -42,7 +44,9 @@ interface OnlineHokmGameProps {
 export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
   username,
   avatarCode,
+  isAuthenticated = false,
   initialRoomCode = '',
+  autoJoinRoom = false,
   soundEnabled,
   reducedMotionPreference,
   onChangeUsername,
@@ -110,15 +114,24 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
   // Secure page-refresh session recovery via server-verified HttpOnly cookie
   // (ZERO sessionToken in React state, localStorage, sessionStorage, or URL!)
   const resumeAttemptedRef = useRef(false);
+  const [resumeChecked, setResumeChecked] = useState(false);
+  const autoJoinAttemptedRef = useRef(false);
   useEffect(() => {
-    if (resumeAttemptedRef.current || sessionCreds) return;
+    if (resumeAttemptedRef.current || sessionCreds) {
+      setResumeChecked(true);
+      return;
+    }
     resumeAttemptedRef.current = true;
     let active = true;
-    void resumeOnlineSession(initialRoomCode || undefined).then((recovered) => {
-      if (active && recovered) {
-        setSessionCreds(recovered);
-      }
-    });
+    void resumeOnlineSession(initialRoomCode || undefined)
+      .then((recovered) => {
+        if (active && recovered) {
+          setSessionCreds(recovered);
+        }
+      })
+      .finally(() => {
+        if (active) setResumeChecked(true);
+      });
     return () => {
       active = false;
     };
@@ -402,6 +415,29 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
     [avatarCode, username]
   );
 
+  // One-click real-room join when arriving from an accepted game invite (Stage D3)
+  useEffect(() => {
+    if (
+      !autoJoinRoom ||
+      !resumeChecked ||
+      !initialRoomCode ||
+      sessionCreds ||
+      busy ||
+      autoJoinAttemptedRef.current
+    ) {
+      return;
+    }
+    autoJoinAttemptedRef.current = true;
+    void handleJoinRoom(initialRoomCode);
+  }, [
+    autoJoinRoom,
+    busy,
+    handleJoinRoom,
+    initialRoomCode,
+    resumeChecked,
+    sessionCreds,
+  ]);
+
   const handleLeaveToLobby = useCallback(() => {
     if (clientRef.current) {
       clientRef.current.leaveRoom();
@@ -566,6 +602,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
     <OnlineLobby
       username={username}
       avatarCode={avatarCode}
+      isAuthenticated={isAuthenticated}
       initialRoomCode={initialRoomCode}
       snapshot={snapshot}
       connectionState={connectionState}

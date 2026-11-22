@@ -86,6 +86,7 @@ export default function App() {
   const [initialRoomCode, setInitialRoomCode] = useState<string>(
     getInitialRoomCodeFromQuery
   );
+  const [autoJoinInviteRoom, setAutoJoinInviteRoom] = useState(false);
   const [profile, setProfile] = useState<UserProfile>(() =>
     createInitialGuestProfile(getInitialThemeMode())
   );
@@ -334,7 +335,9 @@ export default function App() {
       <OnlineHokmGame
         username={profile.username}
         avatarCode={profile.avatarCode}
+        isAuthenticated={Boolean(authUser)}
         initialRoomCode={initialRoomCode}
+        autoJoinRoom={autoJoinInviteRoom}
         soundEnabled={profile.appSettings.soundEnabled}
         reducedMotionPreference={profile.appSettings.reducedMotion}
         onChangeUsername={(nextUsername) =>
@@ -360,6 +363,7 @@ export default function App() {
         onLaunchOffline={() => setActiveGame('hokm-offline')}
         onBackToGames={() => {
           setInitialRoomCode('');
+          setAutoJoinInviteRoom(false);
           setActiveGame(null);
           setActiveTab('games');
         }}
@@ -454,6 +458,12 @@ export default function App() {
               authUser={authUser}
               authLoading={authLoading}
               onOpenAccount={() => setIsProfileOpen(true)}
+              onJoinInvitedRoom={(roomCode) => {
+                setIsProfileOpen(false);
+                setInitialRoomCode(roomCode);
+                setAutoJoinInviteRoom(true);
+                setActiveGame('hokm-online');
+              }}
             />
           )}
         </main>

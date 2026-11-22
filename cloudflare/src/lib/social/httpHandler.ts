@@ -39,10 +39,13 @@ import {
 } from '../auth/httpHandler';
 import {
   acceptFriendRequest,
+  blockUser,
   cancelFriendRequest,
   getFriendsPresence,
+  getPublicSocialProfile,
   getSocialPrivacySettings,
   heartbeatPresence,
+  listBlockedUsers,
   listFriendRequests,
   listFriends,
   markPresenceOffline,
@@ -50,11 +53,25 @@ import {
   removeFriend,
   searchSocialUsers,
   sendFriendRequest,
+  unblockUser,
   updateSocialPrivacySettings,
 } from './socialService';
-import { SocialRequestContext } from './types';
+import {
+  listConversationMessages,
+  listDirectConversations,
+  markConversationRead,
+  openOrCreateDirectConversation,
+  sendDirectMessage,
+} from './chatService';
+import {
+  cancelGameInvite,
+  createGameInvite,
+  listGameInvites,
+  respondToGameInvite,
+} from './inviteService';
+import { GameRoomLookupFn, SocialRequestContext } from './types';
 
-const MAX_SOCIAL_BODY_BYTES = 4 * 1024; // 4KB strict cap
+const MAX_SOCIAL_BODY_BYTES = 12 * 1024; // 12KB strict cap (supports 2000-char Persian UTF-8 messages)
 
 export interface SocialHttpEnv {
   readonly db: D1DatabaseLike;
@@ -64,6 +81,7 @@ export interface SocialHttpEnv {
   readonly originAllowed: boolean;
   readonly clientIp: string;
   readonly now?: number;
+  readonly roomLookup?: GameRoomLookupFn;
 }
 
 function buildSocialResponse(
@@ -565,6 +583,344 @@ export async function handleSocialHttpRequest(
       }
       return buildSocialResponse(
         { ok: true, privacy: result.privacy, message: result.message },
+        200,
+        env.corsHeaders
+      );
+    }
+
+    // 14) GET /api/social/blocks — List users blocked by actor
+    if (pathname === '/api/social/blocks' && method === 'GET') {
+      const blocked = await listBlockedUsers(env.db, ctx);
+      return buildSocialResponse({ ok: true, blocked }, 200, env.corsHeaders);
+    }
+
+    // 15) POST /api/social/blocks — Block a user (severs friendship & pending invites)
+    if (pathname === '/api/social/blocks' && method === 'POST') {
+      const body = await parseJsonObjectBody(request, env.corsHeaders);
+      if (body.ok === false) return body.response;
+      const result = await blockUser(
+        env.db,
+        body.data.targetUserId,
+        body.data.reason,
+        ctx
+      );
+      if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
+        return buildSocialResponse(
+          { ok: false, code: result.code, message: result.message },
+          result.status,
+          env.corsHeaders,
+          extra
+        );
+      }
+      return buildSocialResponse(
+        {
+          ok: true,
+          targetUserId: result.targetUserId,
+          blocked: result.blocked,
+          message: result.message,
+        },
+        result.status,
+        env.corsHeaders
+      );
+    }
+
+    // 16) POST /api/social/blocks/remove — Unblock a user strictly owned by actor
+    if (pathname === '/api/social/blocks/remove' && method === 'POST') {
+      const body = await parseJsonObjectBody(request, env.corsHeaders);
+      if (body.ok === false) return body.response;
+      const result = await unblockUser(env.db, body.data.targetUserId, ctx);
+      if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
+        return buildSocialResponse(
+          { ok: false, code: result.code, message: result.message },
+          result.status,
+          env.corsHeaders,
+          extra
+        );
+      }
+      return buildSocialResponse(
+        {
+          ok: true,
+          targetUserId: result.targetUserId,
+          blocked: result.blocked,
+          message: result.message,
+        },
+        result.status,
+        env.corsHeaders
+      );
+    }
+
+    // 17) GET /api/social/users/:userId — Safe public profile lookup (zero PII)
+    const publicUserMatch = pathname.match(
+      /^\/api\/social\/users\/(usr_[a-zA-Z0-9_-]{8,64})$/
+    );
+    if (publicUserMatch && method === 'GET') {
+      const result = await getPublicSocialProfile(
+        env.db,
+        publicUserMatch[1],
+        ctx
+      );
+      if (result.ok === false) {
+        return buildSocialResponse(
+          { ok: false, code: result.code, message: result.message },
+          result.status,
+          env.corsHeaders
+        );
+      }
+      return buildSocialResponse(
+        { ok: true, profile: result.profile },
+        200,
+        env.corsHeaders
+      );
+    }
+
+    // 18) GET /api/social/chat/conversations — List direct conversations with unread counts
+    if (pathname === '/api/social/chat/conversations' && method === 'GET') {
+      const conversations = await listDirectConversations(env.db, ctx);
+      return buildSocialResponse(
+        { ok: true, conversations, serverTime: now },
+        200,
+        env.corsHeaders
+      );
+    }
+
+    // 19) POST /api/social/chat/conversations/direct — Open or create 1-on-1 friend conversation
+    if (
+      pathname === '/api/social/chat/conversations/direct' &&
+      method === 'POST'
+    ) {
+      const body = await parseJsonObjectBody(request, env.corsHeaders);
+      if (body.ok === false) return body.response;
+      const result = await openOrCreateDirectConversation(
+        env.db,
+        body.data.targetUserId,
+        ctx
+      );
+      if (result.ok === false) {
+        return buildSocialResponse(
+          { ok: false, code: result.code, message: result.message },
+          result.status,
+          env.corsHeaders
+        );
+      }
+      return buildSocialResponse(
+        { ok: true, conversation: result.conversation },
+        result.status,
+        env.corsHeaders
+      );
+    }
+
+    // 20) GET/POST /api/social/chat/conversations/:id/messages
+    const chatMessagesMatch = pathname.match(
+      /^\/api\/social\/chat\/conversations\/(cnv_[a-zA-Z0-9_-]{8,64})\/messages$/
+    );
+    if (chatMessagesMatch) {
+      const conversationId = chatMessagesMatch[1];
+      if (method === 'GET') {
+        const reqUrl = new URL(request.url);
+        const result = await listConversationMessages(
+          env.db,
+          conversationId,
+          reqUrl.searchParams.get('before'),
+          reqUrl.searchParams.get('limit'),
+          ctx
+        );
+        if (result.ok === false) {
+          return buildSocialResponse(
+            { ok: false, code: result.code, message: result.message },
+            result.status,
+            env.corsHeaders
+          );
+        }
+        return buildSocialResponse(
+          {
+            ok: true,
+            conversationId: result.conversationId,
+            messages: result.messages,
+            hasMore: result.hasMore,
+            nextBefore: result.nextBefore,
+            partnerLastReadAt: result.partnerLastReadAt,
+          },
+          200,
+          env.corsHeaders
+        );
+      }
+
+      if (method === 'POST') {
+        const body = await parseJsonObjectBody(request, env.corsHeaders);
+        if (body.ok === false) return body.response;
+        const result = await sendDirectMessage(
+          env.db,
+          conversationId,
+          body.data,
+          ctx
+        );
+        if (result.ok === false) {
+          const extra =
+            result.retryAfterSec !== undefined
+              ? { 'Retry-After': String(result.retryAfterSec) }
+              : undefined;
+          return buildSocialResponse(
+            { ok: false, code: result.code, message: result.message },
+            result.status,
+            env.corsHeaders,
+            extra
+          );
+        }
+        return buildSocialResponse(
+          {
+            ok: true,
+            message: result.message,
+            deduplicated: result.deduplicated,
+          },
+          result.status,
+          env.corsHeaders
+        );
+      }
+    }
+
+    // 21) POST /api/social/chat/conversations/:id/read — Mark conversation read
+    const chatReadMatch = pathname.match(
+      /^\/api\/social\/chat\/conversations\/(cnv_[a-zA-Z0-9_-]{8,64})\/read$/
+    );
+    if (chatReadMatch && method === 'POST') {
+      const body = await parseJsonObjectBody(request, env.corsHeaders);
+      if (body.ok === false) return body.response;
+      const result = await markConversationRead(
+        env.db,
+        chatReadMatch[1],
+        body.data,
+        ctx
+      );
+      if (result.ok === false) {
+        return buildSocialResponse(
+          { ok: false, code: result.code, message: result.message },
+          result.status,
+          env.corsHeaders
+        );
+      }
+      return buildSocialResponse(
+        {
+          ok: true,
+          conversationId: result.conversationId,
+          lastReadAt: result.lastReadAt,
+        },
+        200,
+        env.corsHeaders
+      );
+    }
+
+    // 22) GET /api/social/invites — List active incoming & outgoing real-room invites
+    if (pathname === '/api/social/invites' && method === 'GET') {
+      const invites = await listGameInvites(env.db, ctx);
+      return buildSocialResponse(
+        {
+          ok: true,
+          incoming: invites.incoming,
+          outgoing: invites.outgoing,
+          serverTime: now,
+        },
+        200,
+        env.corsHeaders
+      );
+    }
+
+    // 23) POST /api/social/invites — Send real-room game invite to an accepted friend
+    if (pathname === '/api/social/invites' && method === 'POST') {
+      const body = await parseJsonObjectBody(request, env.corsHeaders);
+      if (body.ok === false) return body.response;
+      const lookup: GameRoomLookupFn =
+        env.roomLookup ?? (async () => null);
+      const result = await createGameInvite(env.db, body.data, lookup, ctx);
+      if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
+        return buildSocialResponse(
+          { ok: false, code: result.code, message: result.message },
+          result.status,
+          env.corsHeaders,
+          extra
+        );
+      }
+      return buildSocialResponse(
+        {
+          ok: true,
+          invite: result.invite,
+          deduplicated: result.deduplicated,
+          message: result.message,
+        },
+        result.status,
+        env.corsHeaders
+      );
+    }
+
+    // 24) POST /api/social/invites/accept | /decline — Respond to incoming invite
+    if (
+      (pathname === '/api/social/invites/accept' ||
+        pathname === '/api/social/invites/decline') &&
+      method === 'POST'
+    ) {
+      const body = await parseJsonObjectBody(request, env.corsHeaders);
+      if (body.ok === false) return body.response;
+      const decision =
+        pathname === '/api/social/invites/accept' ? 'accept' : 'decline';
+      const lookup: GameRoomLookupFn =
+        env.roomLookup ?? (async () => null);
+      const result = await respondToGameInvite(
+        env.db,
+        body.data.inviteId,
+        decision,
+        lookup,
+        ctx
+      );
+      if (result.ok === false) {
+        return buildSocialResponse(
+          { ok: false, code: result.code, message: result.message },
+          result.status,
+          env.corsHeaders
+        );
+      }
+      return buildSocialResponse(
+        {
+          ok: true,
+          inviteId: result.inviteId,
+          decision: result.decision,
+          roomCode: result.roomCode,
+          gameId: result.gameId,
+          message: result.message,
+        },
+        200,
+        env.corsHeaders
+      );
+    }
+
+    // 25) POST /api/social/invites/cancel — Cancel an outgoing pending invite
+    if (pathname === '/api/social/invites/cancel' && method === 'POST') {
+      const body = await parseJsonObjectBody(request, env.corsHeaders);
+      if (body.ok === false) return body.response;
+      const result = await cancelGameInvite(env.db, body.data.inviteId, ctx);
+      if (result.ok === false) {
+        return buildSocialResponse(
+          { ok: false, code: result.code, message: result.message },
+          result.status,
+          env.corsHeaders
+        );
+      }
+      return buildSocialResponse(
+        {
+          ok: true,
+          inviteId: result.inviteId,
+          message: result.message,
+        },
         200,
         env.corsHeaders
       );

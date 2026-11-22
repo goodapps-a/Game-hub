@@ -40,11 +40,58 @@ export interface AuthEmailDeliveryStatus {
   readonly sent: boolean;
 }
 
+export type LinkedAuthProvider = 'password' | 'google';
+
+export interface ActiveAuthSessionItem {
+  readonly sessionId: string;
+  readonly createdAt: number;
+  readonly lastSeenAt: number;
+  readonly expiresAt: number;
+  readonly isCurrent: boolean;
+}
+
 export interface AuthMeResponse {
   readonly ok: boolean;
   readonly authenticated: boolean;
   readonly user: AuthUserSummary | null;
   readonly session: AuthSessionMeta | null;
+  readonly providers?: LinkedAuthProvider[];
+}
+
+export interface AuthSessionsListResponse {
+  readonly ok: boolean;
+  readonly sessions?: ActiveAuthSessionItem[];
+  readonly providers?: LinkedAuthProvider[];
+  readonly code?: string;
+  readonly message?: string;
+}
+
+export interface AuthRevokeSessionResponse {
+  readonly ok: boolean;
+  readonly revokedSessionId?: string;
+  readonly revokedCurrentSession?: boolean;
+  readonly code?: string;
+  readonly message?: string;
+}
+
+export interface GoogleOAuthConfigResponse {
+  readonly ok: boolean;
+  readonly configured: boolean;
+}
+
+export interface GoogleOAuthStartResponse {
+  readonly ok: boolean;
+  readonly url?: string;
+  readonly mode?: 'login' | 'link';
+  readonly code?: string;
+  readonly message?: string;
+}
+
+export interface GoogleOAuthPopupResult {
+  readonly ok: boolean;
+  readonly flowMode: 'login' | 'link';
+  readonly code: string | null;
+  readonly message: string;
 }
 
 export interface AuthMutationResponse {
@@ -53,6 +100,7 @@ export interface AuthMutationResponse {
   readonly verificationRequired?: boolean;
   readonly verified?: boolean;
   readonly passwordReset?: boolean;
+  readonly upgradedFromGuest?: boolean;
   readonly emailDelivery?: AuthEmailDeliveryStatus;
   readonly user?: AuthUserSummary;
   readonly session?: AuthSessionMeta;
@@ -329,4 +377,214 @@ export async function updateAccountProfileRequest(input: {
     'خطا در ذخیره تغییرات پروفایل روی سرور.'
   );
 }
+
+export async function fetchActiveAuthSessions(): Promise<AuthSessionsListResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/auth/sessions'), {
+    method: 'GET',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  });
+  return parseAuthJson<AuthSessionsListResponse>(
+    res,
+    'خطا در دریافت لیست نشست‌های فعال.'
+  );
+}
+
+export async function revokeAuthSessionByIdRequest(
+  sessionId: string
+): Promise<AuthRevokeSessionResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/auth/sessions/revoke'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'eyvan-client',
+    },
+    body: JSON.stringify({ sessionId }),
+  });
+  return parseAuthJson<AuthRevokeSessionResponse>(
+    res,
+    'خطا در لغو نشست انتخاب‌شده.'
+  );
+}
+
+export async function fetchGoogleOAuthConfig(): Promise<GoogleOAuthConfigResponse> {
+  try {
+    const res = await fetch(buildOnlineHttpUrl('/api/auth/google/config'), {
+      method: 'GET',
+      credentials: 'include',
+      headers: { Accept: 'application/json' },
+    });
+    return await parseAuthJson<GoogleOAuthConfigResponse>(
+      res,
+      'خطا در بررسی وضعیت ورود با گوگل.'
+    );
+  } catch {
+    return { ok: false, configured: false };
+  }
+}
+
+export async function startGoogleOAuthFlowRequest(
+  mode: 'login' | 'link' = 'login'
+): Promise<GoogleOAuthStartResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/auth/google/start'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'eyvan-client',
+    },
+    body: JSON.stringify({ mode }),
+  });
+  return parseAuthJson<GoogleOAuthStartResponse>(
+    res,
+    'خطا در شروع فرایند ورود با گوگل.'
+  );
+}
+
+function getAllowedOAuthPopupOrigins(): Set<string> {
+  const allowed = new Set<string>();
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    allowed.add(window.location.origin);
+  }
+  try {
+    const apiUrl = new URL(
+      buildOnlineHttpUrl('/api/auth/google/callback'),
+      typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000'
+    );
+    allowed.add(apiUrl.origin);
+  } catch {
+    // Ignore invalid URL fallback
+  }
+  return allowed;
+}
+
+/**
+ * Initiates the user-triggered Google OAuth popup flow (Authorization Code + PKCE S256).
+ * Opens the server-generated Google authorization URL in a popup window and resolves when
+ * the server callback posts `EYVAN_OAUTH_RESULT` back to `window.opener` or the popup closes.
+ */
+export async function openGoogleOAuthPopup(
+  mode: 'login' | 'link' = 'login'
+): Promise<GoogleOAuthPopupResult> {
+  if (typeof window === 'undefined') {
+    return {
+      ok: false,
+      flowMode: mode,
+      code: 'OAUTH_FAILED',
+      message: 'ورود با گوگل فقط در مرورگر پشتیبانی می‌شود.',
+    };
+  }
+
+  let startRes: GoogleOAuthStartResponse;
+  try {
+    startRes = await startGoogleOAuthFlowRequest(mode);
+  } catch (err) {
+    return {
+      ok: false,
+      flowMode: mode,
+      code: 'OAUTH_FAILED',
+      message:
+        err instanceof Error ? err.message : 'خطا در شروع فرایند ورود با گوگل.',
+    };
+  }
+
+  if (!startRes.ok || !startRes.url) {
+    return {
+      ok: false,
+      flowMode: mode,
+      code: startRes.code ?? 'OAUTH_FAILED',
+      message: startRes.message ?? 'امکان شروع ورود با گوگل وجود ندارد.',
+    };
+  }
+
+  const width = 500;
+  const height = 640;
+  const left = Math.max(0, Math.round(window.screenX + (window.outerWidth - width) / 2));
+  const top = Math.max(0, Math.round(window.screenY + (window.outerHeight - height) / 2));
+  const popup = window.open(
+    startRes.url,
+    'eyvan_google_oauth',
+    `width=${width},height=${height},left=${left},top=${top},popup=yes,noopener=no`
+  );
+
+  if (!popup) {
+    return {
+      ok: false,
+      flowMode: mode,
+      code: 'OAUTH_POPUP_BLOCKED',
+      message:
+        'پنجره ورود گوگل توسط مرورگر مسدود شد. لطفاً نمایش پنجره بازشو (Popup) را مجاز کنید.',
+    };
+  }
+
+  const allowedOrigins = getAllowedOAuthPopupOrigins();
+
+  return new Promise<GoogleOAuthPopupResult>((resolve) => {
+    let settled = false;
+
+    const cleanup = () => {
+      window.removeEventListener('message', onMessage);
+      window.clearInterval(closedPollTimer);
+      window.clearTimeout(timeoutTimer);
+    };
+
+    const finish = (result: GoogleOAuthPopupResult) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      try {
+        if (!popup.closed) popup.close();
+      } catch {
+        // Ignore cross-origin window close errors
+      }
+      resolve(result);
+    };
+
+    const onMessage = (event: MessageEvent) => {
+      if (!allowedOrigins.has(event.origin)) return;
+      const data = event.data as Record<string, unknown> | null;
+      if (!data || data.type !== 'EYVAN_OAUTH_RESULT') return;
+
+      finish({
+        ok: Boolean(data.ok),
+        flowMode: data.flowMode === 'link' ? 'link' : 'login',
+        code: typeof data.code === 'string' ? data.code : null,
+        message:
+          typeof data.message === 'string' && data.message.trim().length > 0
+            ? data.message
+            : data.ok
+              ? 'ورود با گوگل با موفقیت انجام شد.'
+              : 'ورود با گوگل انجام نشد.',
+      });
+    };
+
+    const closedPollTimer = window.setInterval(() => {
+      try {
+        if (popup.closed) {
+          finish({
+            ok: false,
+            flowMode: mode,
+            code: 'OAUTH_CANCELLED',
+            message: 'پنجره ورود با گوگل بسته شد.',
+          });
+        }
+      } catch {
+        // Cross-origin frame check ignored until accessible or closed
+      }
+    }, 500);
+
+    const timeoutTimer = window.setTimeout(() => {
+      finish({
+        ok: false,
+        flowMode: mode,
+        code: 'OAUTH_TIMEOUT',
+        message: 'زمان انتظار برای ورود با گوگل به پایان رسید. لطفاً دوباره تلاش کنید.',
+      });
+    }, 5 * 60 * 1000);
+
+    window.addEventListener('message', onMessage);
+  });
+}
+
 

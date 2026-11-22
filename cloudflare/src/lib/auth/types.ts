@@ -36,6 +36,16 @@ export interface PublicAuthSessionInfo {
   readonly expiresAt: number;
 }
 
+export interface ActiveAuthSessionItem {
+  readonly sessionId: string;
+  readonly createdAt: number;
+  readonly lastSeenAt: number;
+  readonly expiresAt: number;
+  readonly isCurrent: boolean;
+}
+
+export type LinkedAuthProvider = 'password' | 'google';
+
 export interface PublicEmailDeliveryInfo {
   readonly configured: boolean;
   readonly sent: boolean;
@@ -45,9 +55,14 @@ export type AuthErrorCode =
   | 'INVALID_INPUT'
   | 'INVALID_CREDENTIALS'
   | 'ACCOUNT_CONFLICT'
+  | 'ACCOUNT_LINK_REQUIRED'
   | 'ACCOUNT_DISABLED'
   | 'EMAIL_NOT_VERIFIED'
   | 'INVALID_OR_EXPIRED_TOKEN'
+  | 'OAUTH_NOT_CONFIGURED'
+  | 'OAUTH_CANCELLED'
+  | 'OAUTH_INVALID_STATE'
+  | 'OAUTH_FAILED'
   | 'UNAUTHORIZED'
   | 'CSRF_REJECTED'
   | 'FORBIDDEN_ORIGIN'

@@ -1461,3 +1461,410 @@ export async function updateSocialPrivacySettings(
     message: 'تنظیمات حریم خصوصی ذخیره شد.',
   };
 }
+
+// =============================================================================
+// STAGE 1.3 — COMPLETE BLOCK MANAGEMENT (BLOCK / UNBLOCK / LIST)
+// =============================================================================
+
+export type BlockMutationResult =
+  | {
+      readonly ok: true;
+      readonly status: number;
+      readonly targetUserId: string;
+      readonly blocked: boolean;
+      readonly message: string;
+    }
+  | SocialErrorResult;
+
+/**
+ * Blocks `targetUserId` for `ctx.actorUserId`:
+ * - Atomically inserts into `user_blocks` (idempotent), severs any active/pending
+ *   friendship between the pair, and cancels any pending game invites between them.
+ * - Strictly separate from `removeFriend` (removing a friend never creates a block).
+ */
+export async function blockUser(
+  db: D1DatabaseLike,
+  rawTargetUserId: unknown,
+  rawReason: unknown,
+  ctx: SocialRequestContext
+): Promise<BlockMutationResult> {
+  const now = ctx.now ?? Date.now();
+  const rl = await consumeRateLimitSlot(
+    db,
+    `social_friend_mut:user:${ctx.actorUserId}`,
+    SOCIAL_FRIEND_MUTATION_USER_RATE_LIMIT,
+    now
+  );
+  if (!rl.allowed) {
+    return {
+      ok: false,
+      status: 429,
+      code: 'RATE_LIMITED',
+      message: 'تعداد عملیات اجتماعی بیش از حد مجاز است. لطفاً کمی صبر کنید.',
+      retryAfterSec: rl.retryAfterSec,
+    };
+  }
+
+  const targetVal = validateUserId(rawTargetUserId);
+  if (targetVal.ok === false) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'INVALID_INPUT',
+      message: targetVal.message,
+    };
+  }
+
+  const targetUserId = targetVal.userId;
+  if (targetUserId === ctx.actorUserId) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'SELF_ACTION_FORBIDDEN',
+      message: 'امکان مسدود کردن حساب کاربری خودتان وجود ندارد.',
+    };
+  }
+
+  const targetUser = await db
+    .prepare(
+      `SELECT user_id, account_status
+       FROM users
+       WHERE user_id = ? AND account_status = 'active' AND email_verified = 1
+       LIMIT 1`
+    )
+    .bind(targetUserId)
+    .first<{ user_id: string; account_status: string }>();
+
+  if (!targetUser) {
+    return {
+      ok: false,
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'کاربر مورد نظر یافت نشد.',
+    };
+  }
+
+  const reason =
+    typeof rawReason === 'string' && rawReason.trim().length > 0
+      ? rawReason.trim().slice(0, 120)
+      : null;
+  const pairKey = buildCanonicalPairKey(ctx.actorUserId, targetUserId);
+
+  const stmts = [
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO user_blocks (blocker_id, blocked_id, reason, created_at)
+         VALUES (?, ?, ?, ?)`
+      )
+      .bind(ctx.actorUserId, targetUserId, reason, now),
+    db
+      .prepare(`DELETE FROM friendships WHERE pair_key = ?`)
+      .bind(pairKey),
+  ];
+
+  await db.batch(stmts);
+
+  // Best-effort cancel any pending game invites between the pair (0009 table)
+  try {
+    await db
+      .prepare(
+        `UPDATE game_invites
+         SET status = 'canceled', updated_at = ?, responded_at = ?
+         WHERE status = 'pending'
+           AND (
+             (inviter_id = ? AND invitee_id = ?)
+             OR (inviter_id = ? AND invitee_id = ?)
+           )`
+      )
+      .bind(
+        now,
+        now,
+        ctx.actorUserId,
+        targetUserId,
+        targetUserId,
+        ctx.actorUserId
+      )
+      .run();
+  } catch {
+    // Non-fatal on pre-0009 schemas
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    targetUserId,
+    blocked: true,
+    message: 'کاربر مورد نظر با موفقیت مسدود شد.',
+  };
+}
+
+/**
+ * Unblocks `targetUserId` strictly for `ctx.actorUserId`.
+ * Does not auto-restore prior friendship; users can cleanly send a fresh friend request if desired.
+ */
+export async function unblockUser(
+  db: D1DatabaseLike,
+  rawTargetUserId: unknown,
+  ctx: SocialRequestContext
+): Promise<BlockMutationResult> {
+  const now = ctx.now ?? Date.now();
+  const rl = await consumeRateLimitSlot(
+    db,
+    `social_friend_mut:user:${ctx.actorUserId}`,
+    SOCIAL_FRIEND_MUTATION_USER_RATE_LIMIT,
+    now
+  );
+  if (!rl.allowed) {
+    return {
+      ok: false,
+      status: 429,
+      code: 'RATE_LIMITED',
+      message: 'تعداد عملیات اجتماعی بیش از حد مجاز است. لطفاً کمی صبر کنید.',
+      retryAfterSec: rl.retryAfterSec,
+    };
+  }
+
+  const targetVal = validateUserId(rawTargetUserId);
+  if (targetVal.ok === false) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'INVALID_INPUT',
+      message: targetVal.message,
+    };
+  }
+
+  const targetUserId = targetVal.userId;
+  const delRes = await db
+    .prepare(
+      `DELETE FROM user_blocks
+       WHERE blocker_id = ? AND blocked_id = ?`
+    )
+    .bind(ctx.actorUserId, targetUserId)
+    .run();
+
+  if (Number(delRes.meta?.changes ?? 0) === 0) {
+    return {
+      ok: false,
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'این کاربر در فهرست مسدودشده‌های شما قرار ندارد.',
+    };
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    targetUserId,
+    blocked: false,
+    message: 'رفع مسدودیت کاربر با موفقیت انجام شد.',
+  };
+}
+
+export async function listBlockedUsers(
+  db: D1DatabaseLike,
+  ctx: SocialRequestContext
+): Promise<import('./types').BlockedUserItem[]> {
+  const res = await db
+    .prepare(
+      `SELECT
+         ub.blocked_id AS user_id,
+         ub.created_at AS blocked_at,
+         u.username,
+         u.display_name,
+         u.avatar_code,
+         u.avatar_url
+       FROM user_blocks ub
+       INNER JOIN users u ON u.user_id = ub.blocked_id
+       WHERE ub.blocker_id = ?
+         AND u.account_status != 'deleted'
+       ORDER BY ub.created_at DESC`
+    )
+    .bind(ctx.actorUserId)
+    .all<{
+      user_id: string;
+      blocked_at: number;
+      username: string;
+      display_name: string;
+      avatar_code: string;
+      avatar_url: string | null;
+    }>();
+
+  return (res.results ?? []).map((row) => ({
+    userId: row.user_id,
+    username: row.username,
+    displayName: row.display_name,
+    avatarCode: row.avatar_code,
+    avatarUrl: row.avatar_url,
+    blockedAt: row.blocked_at,
+  }));
+}
+
+// =============================================================================
+// STAGE 4 (C4) — SAFE PUBLIC PROFILE LOOKUP (ZERO PII)
+// =============================================================================
+
+export type PublicProfileResult =
+  | {
+      readonly ok: true;
+      readonly status: 200;
+      readonly profile: import('./types').PublicUserProfile;
+    }
+  | SocialErrorResult;
+
+async function isBlockedEitherWay(
+  db: D1DatabaseLike,
+  userA: string,
+  userB: string
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 AS blocked
+       FROM user_blocks
+       WHERE (blocker_id = ? AND blocked_id = ?)
+          OR (blocker_id = ? AND blocked_id = ?)
+       LIMIT 1`
+    )
+    .bind(userA, userB, userB, userA)
+    .first<{ blocked: number }>();
+  return Boolean(row);
+}
+
+export async function getPublicSocialProfile(
+  db: D1DatabaseLike,
+  rawTargetUserId: unknown,
+  ctx: SocialRequestContext
+): Promise<PublicProfileResult> {
+  const now = ctx.now ?? Date.now();
+  const targetVal = validateUserId(rawTargetUserId);
+  if (targetVal.ok === false) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'INVALID_INPUT',
+      message: targetVal.message,
+    };
+  }
+
+  const targetUserId = targetVal.userId;
+  if (targetUserId !== ctx.actorUserId) {
+    const blocked = await isBlockedEitherWay(db, ctx.actorUserId, targetUserId);
+    if (blocked) {
+      return {
+        ok: false,
+        status: 404,
+        code: 'NOT_FOUND',
+        message: 'کاربر مورد نظر یافت نشد.',
+      };
+    }
+  }
+
+  const userRow = await db
+    .prepare(
+      `SELECT
+         u.user_id,
+         u.username,
+         u.display_name,
+         u.avatar_code,
+         u.avatar_url,
+         u.privacy_show_online,
+         u.presence_preference,
+         COALESCE(ugs.matches_played, 0) AS matches_played,
+         COALESCE(ugs.wins, 0) AS wins,
+         COALESCE(ugs.losses, 0) AS losses,
+         CASE
+           WHEN EXISTS (
+             SELECT 1
+             FROM user_presence_sessions ups
+             WHERE ups.user_id = u.user_id AND ups.expires_at > ?
+           ) THEN 1
+           ELSE 0
+         END AS has_active_presence
+       FROM users u
+       LEFT JOIN user_game_stats ugs ON ugs.user_id = u.user_id
+       WHERE u.user_id = ?
+         AND u.account_status = 'active'
+         AND u.email_verified = 1
+       LIMIT 1`
+    )
+    .bind(now, targetUserId)
+    .first<{
+      user_id: string;
+      username: string;
+      display_name: string;
+      avatar_code: string;
+      avatar_url: string | null;
+      privacy_show_online: number;
+      presence_preference: string;
+      matches_played: number;
+      wins: number;
+      losses: number;
+      has_active_presence: number;
+    }>();
+
+  if (!userRow) {
+    return {
+      ok: false,
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'کاربر مورد نظر یافت نشد.',
+    };
+  }
+
+  let relationshipStatus: RelationshipStatus = 'none';
+  let friendshipId: string | null = null;
+  if (targetUserId !== ctx.actorUserId) {
+    const pairKey = buildCanonicalPairKey(ctx.actorUserId, targetUserId);
+    const fr = await db
+      .prepare(
+        `SELECT friendship_id, requester_id, status
+         FROM friendships
+         WHERE pair_key = ?
+         LIMIT 1`
+      )
+      .bind(pairKey)
+      .first<{ friendship_id: string; requester_id: string; status: string }>();
+
+    if (fr) {
+      if (fr.status === 'accepted') {
+        relationshipStatus = 'friend';
+        friendshipId = fr.friendship_id;
+      } else if (fr.status === 'pending') {
+        relationshipStatus =
+          fr.requester_id === ctx.actorUserId
+            ? 'outgoing_pending'
+            : 'incoming_pending';
+        friendshipId = fr.friendship_id;
+      }
+    }
+  }
+
+  const canSeeOnline =
+    targetUserId === ctx.actorUserId || relationshipStatus === 'friend';
+
+  return {
+    ok: true,
+    status: 200,
+    profile: {
+      userId: userRow.user_id,
+      username: userRow.username,
+      displayName: userRow.display_name,
+      avatarCode: userRow.avatar_code,
+      avatarUrl: userRow.avatar_url,
+      onlineStatus: canSeeOnline
+        ? resolveVisiblePresence(
+            userRow.has_active_presence === 1,
+            userRow.privacy_show_online,
+            userRow.presence_preference
+          )
+        : 'offline',
+      relationshipStatus,
+      friendshipId,
+      stats: {
+        matchesPlayed: Number(userRow.matches_played ?? 0),
+        wins: Number(userRow.wins ?? 0),
+        losses: Number(userRow.losses ?? 0),
+      },
+    },
+  };
+}

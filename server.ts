@@ -54,6 +54,9 @@ async function startServer() {
       emailProvider: process.env.EMAIL_PROVIDER,
       resendApiKey: process.env.RESEND_API_KEY,
       emailFrom: process.env.EMAIL_FROM,
+      googleOAuthClientId: process.env.GOOGLE_OAUTH_CLIENT_ID,
+      googleOAuthClientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+      googleOAuthRedirectUri: process.env.GOOGLE_OAUTH_REDIRECT_URI,
     },
   });
 

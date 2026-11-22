@@ -80,6 +80,11 @@ export function constantTimeBytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return diff === 0;
 }
 
+export function constantTimeEqualHex(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return constantTimeBytesEqual(TEXT_ENCODER.encode(a), TEXT_ENCODER.encode(b));
+}
+
 export function generateOpaqueToken(byteLength = 32): string {
   const bytes = new Uint8Array(byteLength);
   crypto.getRandomValues(bytes);

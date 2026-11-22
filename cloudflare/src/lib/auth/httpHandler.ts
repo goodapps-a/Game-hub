@@ -26,11 +26,15 @@ import {
 } from './authCookie';
 import {
   checkUsernameAvailability,
+  listActiveAuthSessions,
+  listLinkedAuthProviders,
   loginWithCredentials,
   registerManualAccount,
   revokeAllAuthSessionsForUser,
+  revokeAuthSessionById,
   revokeAuthSessionByToken,
   updateAuthenticatedProfile,
+  upgradeGuestAccountToRegistered,
   verifyAuthSession,
 } from './authService';
 import {
@@ -40,6 +44,18 @@ import {
   verifyEmailWithToken,
 } from './c2Service';
 import { EmailSender, createEmailSender } from './emailService';
+import {
+  GoogleOAuthConfig,
+  completeGoogleOAuthCallback,
+  isGoogleOAuthConfigured,
+  resolveGoogleCallbackRedirectUri,
+  startGoogleOAuthFlow,
+} from './googleOAuthService';
+import {
+  buildClearGuestCookieHeader,
+  parseGuestCookieFromHeader,
+  verifyGuestSession,
+} from './guestSession';
 
 const MAX_AUTH_BODY_BYTES = 8 * 1024; // 8KB strict cap for auth payloads
 export const CSRF_CLIENT_HEADER_NAME = 'X-Requested-With';
@@ -58,6 +74,87 @@ export interface AuthHttpEnv {
   readonly publicAppBaseUrl?: string;
   readonly isProduction?: boolean;
   readonly emailSender?: EmailSender;
+  readonly googleOAuth?: GoogleOAuthConfig;
+}
+
+function escapeHtmlText(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function buildOAuthPopupHtmlResponse(
+  payload: {
+    readonly ok: boolean;
+    readonly flowMode: 'login' | 'link';
+    readonly code?: string;
+    readonly message: string;
+  },
+  status: number,
+  setCookies: string[]
+): Response {
+  const safeJson = JSON.stringify({
+    type: 'EYVAN_OAUTH_RESULT',
+    ok: payload.ok,
+    flowMode: payload.flowMode,
+    code: payload.code ?? null,
+    message: payload.message,
+  }).replace(/</g, '\\u003c');
+
+  const safeTitle = payload.ok
+    ? 'احراز هویت با گوگل انجام شد'
+    : 'خطا در احراز هویت با گوگل';
+  const safeMsg = escapeHtmlText(payload.message);
+
+  const html = `<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>${safeTitle}</title>
+  <style>
+    body { margin:0; font-family: system-ui, sans-serif; background:#091124; color:#F8FAFC; display:flex; align-items:center; justify-content:center; min-height:100vh; padding:24px; text-align:center; }
+    .card { max-width:360px; background:#111E3A; border:1px solid rgba(212,174,88,0.35); border-radius:16px; padding:24px; }
+    h1 { font-size:16px; margin:0 0 10px; color:#F3D179; }
+    p { font-size:13px; line-height:1.7; margin:0; color:#CBD5E1; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>${safeTitle}</h1>
+    <p>${safeMsg}</p>
+  </div>
+  <script>
+    (function () {
+      var data = ${safeJson};
+      try {
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage(data, '*');
+          window.close();
+          return;
+        }
+      } catch (e) {}
+      setTimeout(function () { window.location.replace('/'); }, 1200);
+    })();
+  </script>
+</body>
+</html>`;
+
+  const headers = new Headers({
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store, private',
+    Pragma: 'no-cache',
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+  });
+  for (const cookie of setCookies) {
+    headers.append('Set-Cookie', cookie);
+  }
+  return new Response(html, { status, headers });
 }
 
 function buildAuthResponse(
@@ -258,12 +355,17 @@ export async function handleAuthHttpRequest(
         );
       }
 
+      const providers = verified.user
+        ? await listLinkedAuthProviders(env.db, verified.user.userId)
+        : [];
+
       return buildAuthResponse(
         {
           ok: true,
           authenticated: true,
           user: verified.user,
           session: verified.session,
+          providers,
         },
         200,
         env.corsHeaders
@@ -294,19 +396,36 @@ export async function handleAuthHttpRequest(
     if (parsedBody.ok === false) return parsedBody.response;
 
     try {
-      const result = await registerManualAccount(
-        env.db,
-        parsedBody.data,
-        {
-          clientIp: env.clientIp,
-          userAgent: env.userAgent,
-          now,
-          sessionTtlSec: ttlSec,
-          publicAppBaseUrl: env.publicAppBaseUrl,
-          isProduction: env.isProduction,
-        },
-        emailSender
+      const rawGuestToken = parseGuestCookieFromHeader(
+        request.headers.get('Cookie')
       );
+      const verifiedGuest = rawGuestToken
+        ? await verifyGuestSession(env.db, rawGuestToken, now)
+        : null;
+
+      const reqCtx = {
+        clientIp: env.clientIp,
+        userAgent: env.userAgent,
+        now,
+        sessionTtlSec: ttlSec,
+        publicAppBaseUrl: env.publicAppBaseUrl,
+        isProduction: env.isProduction,
+      };
+
+      const result = verifiedGuest
+        ? await upgradeGuestAccountToRegistered(
+            env.db,
+            verifiedGuest.guestUserId,
+            parsedBody.data,
+            reqCtx,
+            emailSender
+          )
+        : await registerManualAccount(
+            env.db,
+            parsedBody.data,
+            reqCtx,
+            emailSender
+          );
 
       if (result.ok === false) {
         const extra =
@@ -325,18 +444,29 @@ export async function handleAuthHttpRequest(
         );
       }
 
+      const extra = verifiedGuest
+        ? {
+            'Set-Cookie': buildClearGuestCookieHeader(
+              env.secureCookie,
+              env.cookieOptions
+            ),
+          }
+        : undefined;
+
       // No privileged eyvan_auth_sess cookie until email is verified
       return buildAuthResponse(
         {
           ok: true,
           authenticated: false,
           verificationRequired: true,
+          upgradedFromGuest: Boolean(verifiedGuest),
           emailDelivery: result.emailDelivery,
           message: result.message,
           user: result.user,
         },
         result.status,
-        env.corsHeaders
+        env.corsHeaders,
+        extra
       );
     } catch (err) {
       console.error(
@@ -913,6 +1043,442 @@ export async function handleAuthHttpRequest(
         },
         500,
         env.corsHeaders
+      );
+    }
+  }
+
+  // 12) GET /api/auth/sessions — List active sessions for the currently authenticated user
+  if (pathname === '/api/auth/sessions' && method === 'GET') {
+    try {
+      const rawToken = parseAuthCookieFromHeader(request.headers.get('Cookie'));
+      const verified = rawToken
+        ? await verifyAuthSession(env.db, rawToken, now)
+        : null;
+      if (!verified || !verified.authenticated || !verified.user || !verified.session) {
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: 'UNAUTHORIZED',
+            message: 'برای مشاهده نشست‌های فعال ابتدا وارد شوید.',
+          },
+          401,
+          env.corsHeaders
+        );
+      }
+
+      const [sessions, providers] = await Promise.all([
+        listActiveAuthSessions(
+          env.db,
+          verified.user.userId,
+          verified.session.sessionId,
+          now
+        ),
+        listLinkedAuthProviders(env.db, verified.user.userId),
+      ]);
+
+      return buildAuthResponse(
+        {
+          ok: true,
+          sessions,
+          providers,
+        },
+        200,
+        env.corsHeaders
+      );
+    } catch (err) {
+      console.error(
+        '[Auth] /api/auth/sessions error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      return buildAuthResponse(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'خطا در خواندن فهرست نشست‌های فعال.',
+        },
+        503,
+        env.corsHeaders
+      );
+    }
+  }
+
+  // 13) POST /api/auth/sessions/revoke — Revoke a specific session strictly owned by current user
+  if (pathname === '/api/auth/sessions/revoke' && method === 'POST') {
+    const csrfErr = verifyMutatingCsrf(request, env, true);
+    if (csrfErr) return csrfErr;
+
+    const parsedBody = await parseJsonObjectBody(request, env.corsHeaders);
+    if (parsedBody.ok === false) return parsedBody.response;
+
+    try {
+      const rawToken = parseAuthCookieFromHeader(request.headers.get('Cookie'));
+      const verified = rawToken
+        ? await verifyAuthSession(env.db, rawToken, now)
+        : null;
+      if (!verified || !verified.authenticated || !verified.user || !verified.session) {
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: 'UNAUTHORIZED',
+            message: 'برای لغو نشست ابتدا باید وارد حساب کاربری شوید.',
+          },
+          401,
+          env.corsHeaders
+        );
+      }
+
+      const targetSessionId =
+        typeof parsedBody.data.sessionId === 'string'
+          ? parsedBody.data.sessionId.trim()
+          : '';
+      if (!targetSessionId || !/^ses_[a-zA-Z0-9_-]{8,64}$/.test(targetSessionId)) {
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: 'INVALID_INPUT',
+            message: 'شناسه نشست نامعتبر است.',
+          },
+          400,
+          env.corsHeaders
+        );
+      }
+
+      const revoked = await revokeAuthSessionById(
+        env.db,
+        verified.user.userId,
+        targetSessionId,
+        now
+      );
+      if (!revoked) {
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: 'INVALID_OR_EXPIRED_TOKEN',
+            message: 'نشست مورد نظر یافت نشد یا قبلاً لغو شده است.',
+          },
+          404,
+          env.corsHeaders
+        );
+      }
+
+      const isCurrent = targetSessionId === verified.session.sessionId;
+      const extra = isCurrent
+        ? {
+            'Set-Cookie': buildClearAuthCookieHeader(
+              env.secureCookie,
+              env.cookieOptions
+            ),
+          }
+        : undefined;
+
+      return buildAuthResponse(
+        {
+          ok: true,
+          revokedSessionId: targetSessionId,
+          revokedCurrentSession: isCurrent,
+          message: 'نشست انتخاب‌شده با موفقیت لغو شد.',
+        },
+        200,
+        env.corsHeaders,
+        extra
+      );
+    } catch (err) {
+      console.error(
+        '[Auth] /api/auth/sessions/revoke error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      return buildAuthResponse(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'خطای داخلی در لغو نشست رخ داد.',
+        },
+        500,
+        env.corsHeaders
+      );
+    }
+  }
+
+  // 14) GET /api/auth/google/config — Public capability probe (never exposes secrets)
+  if (pathname === '/api/auth/google/config' && method === 'GET') {
+    return buildAuthResponse(
+      {
+        ok: true,
+        configured: isGoogleOAuthConfigured(env.googleOAuth),
+      },
+      200,
+      env.corsHeaders
+    );
+  }
+
+  // 15) POST /api/auth/google/start — Initiate Authorization Code + PKCE + state + nonce flow
+  if (pathname === '/api/auth/google/start' && method === 'POST') {
+    const csrfErr = verifyMutatingCsrf(request, env, false);
+    if (csrfErr) return csrfErr;
+
+    let mode: 'login' | 'link' = 'login';
+    const contentType = (request.headers.get('Content-Type') ?? '').toLowerCase();
+    if (contentType.includes('application/json')) {
+      const parsedBody = await parseJsonObjectBody(request, env.corsHeaders);
+      if (parsedBody.ok === false) return parsedBody.response;
+      if (parsedBody.data.mode === 'link') {
+        mode = 'link';
+      } else if (
+        parsedBody.data.mode !== undefined &&
+        parsedBody.data.mode !== 'login'
+      ) {
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: 'INVALID_INPUT',
+            message: 'حالت احراز هویت گوگل نامعتبر است.',
+          },
+          400,
+          env.corsHeaders
+        );
+      }
+    }
+
+    try {
+      const rawCookieHeader = request.headers.get('Cookie');
+      let initiatorUserId: string | null = null;
+      let guestUserId: string | null = null;
+
+      if (mode === 'link') {
+        const rawAuthToken = parseAuthCookieFromHeader(rawCookieHeader);
+        const verified = rawAuthToken
+          ? await verifyAuthSession(env.db, rawAuthToken, now)
+          : null;
+        if (!verified || !verified.authenticated || !verified.user) {
+          return buildAuthResponse(
+            {
+              ok: false,
+              code: 'UNAUTHORIZED',
+              message: 'برای اتصال حساب گوگل ابتدا باید وارد حساب کاربری خود شوید.',
+            },
+            401,
+            env.corsHeaders
+          );
+        }
+        initiatorUserId = verified.user.userId;
+      } else {
+        const rawGuestToken = parseGuestCookieFromHeader(rawCookieHeader);
+        const verifiedGuest = rawGuestToken
+          ? await verifyGuestSession(env.db, rawGuestToken, now)
+          : null;
+        guestUserId = verifiedGuest?.guestUserId ?? null;
+      }
+
+      const redirectUri = resolveGoogleCallbackRedirectUri(
+        request.url,
+        env.googleOAuth,
+        env.publicAppBaseUrl
+      );
+      if (!redirectUri) {
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: 'OAUTH_NOT_CONFIGURED',
+            message: 'آدرس بازگشت Google OAuth روی سرور معتبر نیست.',
+          },
+          503,
+          env.corsHeaders
+        );
+      }
+
+      const started = await startGoogleOAuthFlow(
+        env.db,
+        env.googleOAuth ?? {},
+        {
+          mode,
+          redirectUri,
+          initiatorUserId,
+          guestUserId,
+          now,
+        }
+      );
+
+      if (started.ok === false) {
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: started.code,
+            message: started.message,
+          },
+          started.status,
+          env.corsHeaders
+        );
+      }
+
+      return buildAuthResponse(
+        {
+          ok: true,
+          url: started.url,
+          mode,
+          stateExpiresAt: started.stateExpiresAt,
+        },
+        200,
+        env.corsHeaders
+      );
+    } catch (err) {
+      console.error(
+        '[Auth] /api/auth/google/start error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      return buildAuthResponse(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'خطای داخلی در آغاز ورود با گوگل رخ داد.',
+        },
+        500,
+        env.corsHeaders
+      );
+    }
+  }
+
+  // 16) GET /api/auth/google/callback (and trailing slash) — Complete OAuth popup callback
+  if (
+    (pathname === '/api/auth/google/callback' ||
+      pathname === '/api/auth/google/callback/') &&
+    method === 'GET'
+  ) {
+    const reqUrl = new URL(request.url);
+    const code = reqUrl.searchParams.get('code');
+    const state = reqUrl.searchParams.get('state');
+    const oauthError = reqUrl.searchParams.get('error');
+    const wantsJson = (request.headers.get('Accept') ?? '')
+      .toLowerCase()
+      .includes('application/json');
+
+    try {
+      const rawAuthToken = parseAuthCookieFromHeader(
+        request.headers.get('Cookie')
+      );
+      const currentAuth = rawAuthToken
+        ? await verifyAuthSession(env.db, rawAuthToken, now)
+        : null;
+      const currentUserId =
+        currentAuth && currentAuth.authenticated && currentAuth.user
+          ? currentAuth.user.userId
+          : null;
+
+      const result = await completeGoogleOAuthCallback(
+        env.db,
+        env.googleOAuth ?? {},
+        {
+          code,
+          state,
+          error: oauthError,
+          currentAuthenticatedUserId: currentUserId,
+          clientIp: env.clientIp,
+          userAgent: env.userAgent,
+          sessionTtlSec: ttlSec,
+          now,
+        }
+      );
+
+      if (result.ok === false) {
+        if (wantsJson) {
+          return buildAuthResponse(
+            {
+              ok: false,
+              code: result.code,
+              message: result.message,
+            },
+            result.status,
+            env.corsHeaders
+          );
+        }
+        return buildOAuthPopupHtmlResponse(
+          {
+            ok: false,
+            flowMode: 'login',
+            code: result.code,
+            message: result.message,
+          },
+          result.status,
+          []
+        );
+      }
+
+      const setCookies: string[] = [];
+      if (result.rawSessionToken) {
+        setCookies.push(
+          buildSetAuthCookieHeader(
+            result.rawSessionToken,
+            env.secureCookie,
+            result.sessionTtlSec,
+            env.cookieOptions
+          )
+        );
+      }
+      if (result.clearedGuestCookie) {
+        setCookies.push(
+          buildClearGuestCookieHeader(env.secureCookie, env.cookieOptions)
+        );
+      }
+
+      if (wantsJson) {
+        const headers = new Headers({
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store, private',
+          Pragma: 'no-cache',
+          'Referrer-Policy': 'no-referrer',
+          'X-Content-Type-Options': 'nosniff',
+          ...env.corsHeaders,
+        });
+        for (const cookie of setCookies) {
+          headers.append('Set-Cookie', cookie);
+        }
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            authenticated: true,
+            flowMode: result.flowMode,
+            alreadyLinked: result.alreadyLinked ?? false,
+            user: result.user,
+            session: result.session ?? null,
+            message: result.message,
+          }),
+          { status: result.status, headers }
+        );
+      }
+
+      return buildOAuthPopupHtmlResponse(
+        {
+          ok: true,
+          flowMode: result.flowMode,
+          message: result.message,
+        },
+        result.status,
+        setCookies
+      );
+    } catch (err) {
+      console.error(
+        '[Auth] /api/auth/google/callback error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      if (wantsJson) {
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: 'DATABASE_ERROR',
+            message: 'خطای داخلی در تکمیل احراز هویت گوگل رخ داد.',
+          },
+          500,
+          env.corsHeaders
+        );
+      }
+      return buildOAuthPopupHtmlResponse(
+        {
+          ok: false,
+          flowMode: 'login',
+          code: 'DATABASE_ERROR',
+          message: 'خطای داخلی در تکمیل احراز هویت گوگل رخ داد.',
+        },
+        500,
+        []
       );
     }
   }
