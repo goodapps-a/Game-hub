@@ -219,7 +219,7 @@ const TeamTrickPile: React.FC<{
         {Array.from({ length: visiblePackets }).map((_, idx) => (
           <div
             key={idx}
-            className="absolute inset-0 rounded-[5px] bg-white p-[1.5px] border border-[#C9C4BA] shadow-[0_2px_6px_rgba(0,0,0,0.5)]"
+            className="absolute inset-0 rounded-[5px] card-back-frame p-[1.5px] border shadow-[0_2px_6px_rgba(0,0,0,0.5)]"
             style={{
               transform: `translate(${idx * 2}px, ${-idx * 2.2}px) rotate(${
                 idx % 2 === 0 ? -4 + idx : 5 - idx
@@ -268,7 +268,7 @@ const HiddenHandFan: React.FC<{
           Array.from({ length: displayCount }).map((_, idx) => (
             <div
               key={idx}
-              className="w-[34px] h-[48px] sm:w-[42px] sm:h-[60px] rounded-[5px] bg-white p-[1.5px] overflow-hidden shadow-md border border-[#D4CFC5] shrink-0"
+              className="w-[34px] h-[48px] sm:w-[42px] sm:h-[60px] rounded-[5px] card-back-frame p-[1.5px] overflow-hidden shadow-md border shrink-0"
               style={{
                 marginLeft: idx === 0 ? 0 : displayCount > 9 ? -21 : -15,
                 zIndex: idx,
@@ -293,7 +293,7 @@ const HiddenHandFan: React.FC<{
         Array.from({ length: visibleStack }).map((_, idx) => (
           <div
             key={idx}
-            className="w-[46px] h-[32px] sm:w-[56px] sm:h-[38px] rounded-[5px] bg-white p-[1.5px] overflow-hidden shadow-md border border-[#D4CFC5] shrink-0"
+            className="w-[46px] h-[32px] sm:w-[56px] sm:h-[38px] rounded-[5px] card-back-frame p-[1.5px] overflow-hidden shadow-md border shrink-0"
             style={{
               marginTop: idx === 0 ? 0 : -20,
               zIndex: idx,
@@ -1030,7 +1030,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                               }
                             : { duration: 0.22 }
                         }
-                        className="absolute inset-0 rounded-[8px] bg-white p-[2px] border border-[#D4CFC5] shadow-lg overflow-hidden"
+                        className="absolute inset-0 rounded-[8px] card-back-frame p-[2px] border shadow-lg overflow-hidden"
                       >
                         <div className="w-full h-full rounded-[6px] overflow-hidden">
                           <CardBackSvg />
@@ -1063,7 +1063,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                         duration: reducedMotion ? 0.05 : 0.29,
                         ease: [0.22, 1, 0.36, 1],
                       }}
-                      className="absolute w-[54px] h-[76px] rounded-[7px] bg-white p-[1.5px] border border-[#D4CFC5] shadow-lg overflow-hidden"
+                      className="absolute w-[54px] h-[76px] rounded-[7px] card-back-frame p-[1.5px] border shadow-lg overflow-hidden"
                     >
                       <div className="w-full h-full rounded-[5px] overflow-hidden">
                         <CardBackSvg />
