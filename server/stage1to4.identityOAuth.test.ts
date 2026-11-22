@@ -9,7 +9,10 @@ import path from 'node:path';
 import worker from '../cloudflare/src/index';
 import { AUTH_COOKIE_NAME } from '../cloudflare/src/lib/auth/authCookie';
 import { EmailSender } from '../cloudflare/src/lib/auth/emailService';
-import { clearGoogleJwksCacheForTests } from '../cloudflare/src/lib/auth/googleOAuthService';
+import {
+  OAUTH_BIND_COOKIE_NAME,
+  clearGoogleJwksCacheForTests,
+} from '../cloudflare/src/lib/auth/googleOAuthService';
 import { GUEST_COOKIE_NAME } from '../cloudflare/src/lib/auth/guestSession';
 import { CfWorkerEnv } from '../cloudflare/src/lib/types';
 import { CompletedMatchRecord } from '../src/games/hokm/online/protocol';
@@ -812,16 +815,18 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
         body: JSON.stringify({ mode: 'login' }),
       });
       assert.equal(start1.status, 200);
+      const bind1 = extractCookieFromResponse(start1, OAUTH_BIND_COOKIE_NAME);
+      assert.ok(bind1, 'OAuth /start must issue HttpOnly eyvan_oauth_bind cookie');
       const start1Json = (await start1.json()) as { ok: boolean; url: string };
       const params1 = google.captureFromAuthUrl(start1Json.url);
       assert.equal(params1.codeChallengeMethod, 'S256');
       assert.ok(params1.state.length >= 20);
       assert.ok(params1.nonce.length >= 20);
 
-      // Callback with trailing slash `/api/auth/google/callback/` + JSON mode
+      // Callback with trailing slash `/api/auth/google/callback/` + JSON mode + browser bind cookie
       const cb1 = await fetch(
         `${h.baseUrl}/api/auth/google/callback/?code=mock_code_1&state=${encodeURIComponent(params1.state)}`,
-        { headers: { Accept: 'application/json' } }
+        { headers: { Accept: 'application/json', Cookie: bind1 } }
       );
       assert.equal(cb1.status, 201);
       const saraCookie = extractCookieFromResponse(cb1, AUTH_COOKIE_NAME);
@@ -836,10 +841,10 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
       assert.equal(cb1Json.user.authProvider, 'google');
       assert.equal(cb1Json.user.emailVerified, true);
 
-      // 2. State replay MUST be rejected
+      // 2. State replay MUST be rejected (even with original bind cookie)
       const replay = await fetch(
         `${h.baseUrl}/api/auth/google/callback?code=mock_code_1&state=${encodeURIComponent(params1.state)}`,
-        { headers: { Accept: 'application/json' } }
+        { headers: { Accept: 'application/json', Cookie: bind1 } }
       );
       assert.equal(replay.status, 400);
       const replayJson = (await replay.json()) as { code: string };
@@ -851,21 +856,21 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
         email: 'sara.new.email@example.com',
         email_verified: true,
       });
-      const start2 = (await (
-        await fetch(`${h.baseUrl}/api/auth/google/start`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Requested-With': 'eyvan-client',
-            Origin: h.baseUrl,
-          },
-          body: JSON.stringify({ mode: 'login' }),
-        })
-      ).json()) as { url: string };
+      const start2Res = await fetch(`${h.baseUrl}/api/auth/google/start`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'eyvan-client',
+          Origin: h.baseUrl,
+        },
+        body: JSON.stringify({ mode: 'login' }),
+      });
+      const bind2 = extractCookieFromResponse(start2Res, OAUTH_BIND_COOKIE_NAME)!;
+      const start2 = (await start2Res.json()) as { url: string };
       const params2 = google.captureFromAuthUrl(start2.url);
       const cb2 = await fetch(
         `${h.baseUrl}/api/auth/google/callback?code=mock_code_2&state=${encodeURIComponent(params2.state)}`,
-        { headers: { Accept: 'application/json' } }
+        { headers: { Accept: 'application/json', Cookie: bind2 } }
       );
       assert.equal(cb2.status, 200);
       const cb2Json = (await cb2.json()) as { user: { userId: string } };
@@ -887,21 +892,21 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
           email: `${badCase.label}@example.com`,
           ...badCase,
         });
-        const sBad = (await (
-          await fetch(`${h.baseUrl}/api/auth/google/start`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Requested-With': 'eyvan-client',
-              Origin: h.baseUrl,
-            },
-            body: JSON.stringify({ mode: 'login' }),
-          })
-        ).json()) as { url: string };
+        const sBadRes = await fetch(`${h.baseUrl}/api/auth/google/start`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'eyvan-client',
+            Origin: h.baseUrl,
+          },
+          body: JSON.stringify({ mode: 'login' }),
+        });
+        const bindBad = extractCookieFromResponse(sBadRes, OAUTH_BIND_COOKIE_NAME)!;
+        const sBad = (await sBadRes.json()) as { url: string };
         const pBad = google.captureFromAuthUrl(sBad.url);
         const cbBad = await fetch(
           `${h.baseUrl}/api/auth/google/callback?code=bad_code&state=${encodeURIComponent(pBad.state)}`,
-          { headers: { Accept: 'application/json' } }
+          { headers: { Accept: 'application/json', Cookie: bindBad } }
         );
         assert.equal(cbBad.status, 401, `${badCase.label} must be rejected with 401`);
       }
@@ -913,65 +918,65 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
         email: 'manual@example.com',
         email_verified: true,
       });
-      const sTakeover = (await (
-        await fetch(`${h.baseUrl}/api/auth/google/start`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Requested-With': 'eyvan-client',
-            Origin: h.baseUrl,
-          },
-          body: JSON.stringify({ mode: 'login' }),
-        })
-      ).json()) as { url: string };
+      const sTakeoverRes = await fetch(`${h.baseUrl}/api/auth/google/start`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'eyvan-client',
+          Origin: h.baseUrl,
+        },
+        body: JSON.stringify({ mode: 'login' }),
+      });
+      const bindTakeover = extractCookieFromResponse(sTakeoverRes, OAUTH_BIND_COOKIE_NAME)!;
+      const sTakeover = (await sTakeoverRes.json()) as { url: string };
       const pTakeover = google.captureFromAuthUrl(sTakeover.url);
       const cbTakeover = await fetch(
         `${h.baseUrl}/api/auth/google/callback?code=takeover_code&state=${encodeURIComponent(pTakeover.state)}`,
-        { headers: { Accept: 'application/json' } }
+        { headers: { Accept: 'application/json', Cookie: bindTakeover } }
       );
       assert.equal(cbTakeover.status, 409);
       const takeoverJson = (await cbTakeover.json()) as { code: string };
       assert.equal(takeoverJson.code, 'ACCOUNT_LINK_REQUIRED');
 
       // 6. Explicit authenticated account linking (`mode: 'link'`) + anti-login-CSRF check
-      const sLink = (await (
-        await fetch(`${h.baseUrl}/api/auth/google/start`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Requested-With': 'eyvan-client',
-            Origin: h.baseUrl,
-            Cookie: manualUser.cookie,
-          },
-          body: JSON.stringify({ mode: 'link' }),
-        })
-      ).json()) as { url: string };
+      const sLinkRes = await fetch(`${h.baseUrl}/api/auth/google/start`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'eyvan-client',
+          Origin: h.baseUrl,
+          Cookie: manualUser.cookie,
+        },
+        body: JSON.stringify({ mode: 'link' }),
+      });
+      const bindLink = extractCookieFromResponse(sLinkRes, OAUTH_BIND_COOKIE_NAME)!;
+      const sLink = (await sLinkRes.json()) as { url: string };
       const pLink = google.captureFromAuthUrl(sLink.url);
 
-      // Linking callback with WRONG user cookie must fail (401)
+      // Linking callback with WRONG user cookie (even with matching browser bind) must fail (401)
       const cbLinkCsrf = await fetch(
         `${h.baseUrl}/api/auth/google/callback?code=link_code&state=${encodeURIComponent(pLink.state)}`,
-        { headers: { Accept: 'application/json', Cookie: saraCookie } }
+        { headers: { Accept: 'application/json', Cookie: `${saraCookie}; ${bindLink}` } }
       );
       assert.equal(cbLinkCsrf.status, 401);
 
-      // Retry fresh link with the rightful owner's cookie -> succeeds & becomes hybrid!
-      const sLinkOk = (await (
-        await fetch(`${h.baseUrl}/api/auth/google/start`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Requested-With': 'eyvan-client',
-            Origin: h.baseUrl,
-            Cookie: manualUser.cookie,
-          },
-          body: JSON.stringify({ mode: 'link' }),
-        })
-      ).json()) as { url: string };
+      // Retry fresh link with the rightful owner's cookie + bind cookie -> succeeds & becomes hybrid!
+      const sLinkOkRes = await fetch(`${h.baseUrl}/api/auth/google/start`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'eyvan-client',
+          Origin: h.baseUrl,
+          Cookie: manualUser.cookie,
+        },
+        body: JSON.stringify({ mode: 'link' }),
+      });
+      const bindLinkOk = extractCookieFromResponse(sLinkOkRes, OAUTH_BIND_COOKIE_NAME)!;
+      const sLinkOk = (await sLinkOkRes.json()) as { url: string };
       const pLinkOk = google.captureFromAuthUrl(sLinkOk.url);
       const cbLinkOk = await fetch(
         `${h.baseUrl}/api/auth/google/callback?code=link_ok_code&state=${encodeURIComponent(pLinkOk.state)}`,
-        { headers: { Accept: 'application/json', Cookie: manualUser.cookie } }
+        { headers: { Accept: 'application/json', Cookie: `${manualUser.cookie}; ${bindLinkOk}` } }
       );
       assert.equal(cbLinkOk.status, 200);
       const linkOkJson = (await cbLinkOk.json()) as {
@@ -1016,22 +1021,22 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
         email_verified: true,
         name: 'Upgraded Guest',
       });
-      const sGuest = (await (
-        await fetch(`${h.baseUrl}/api/auth/google/start`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Requested-With': 'eyvan-client',
-            Origin: h.baseUrl,
-            Cookie: guestCookie,
-          },
-          body: JSON.stringify({ mode: 'login' }),
-        })
-      ).json()) as { url: string };
+      const sGuestRes = await fetch(`${h.baseUrl}/api/auth/google/start`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'eyvan-client',
+          Origin: h.baseUrl,
+          Cookie: guestCookie,
+        },
+        body: JSON.stringify({ mode: 'login' }),
+      });
+      const bindGuest = extractCookieFromResponse(sGuestRes, OAUTH_BIND_COOKIE_NAME)!;
+      const sGuest = (await sGuestRes.json()) as { url: string };
       const pGuest = google.captureFromAuthUrl(sGuest.url);
       const cbGuest = await fetch(
         `${h.baseUrl}/api/auth/google/callback?code=guest_code&state=${encodeURIComponent(pGuest.state)}`,
-        { headers: { Accept: 'application/json', Cookie: guestCookie } }
+        { headers: { Accept: 'application/json', Cookie: `${guestCookie}; ${bindGuest}` } }
       );
       assert.equal(cbGuest.status, 200);
       const cbGuestJson = (await cbGuest.json()) as {
@@ -1047,32 +1052,34 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
         'Guest upgrade via Google OAuth must clear eyvan_guest_sess cookie'
       );
 
-      // 8. Browser popup HTML mode returns postMessage bridge with zero leaked token
+      // 8. Browser popup HTML mode returns postMessage bridge with exact targetOrigin (never '*')
       google.setNextUser({
         sub: 'google_sub_popup_html',
         email: 'popup.html@example.com',
         email_verified: true,
       });
-      const sHtml = (await (
-        await fetch(`${h.baseUrl}/api/auth/google/start`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Requested-With': 'eyvan-client',
-            Origin: h.baseUrl,
-          },
-          body: JSON.stringify({ mode: 'login' }),
-        })
-      ).json()) as { url: string };
+      const sHtmlRes = await fetch(`${h.baseUrl}/api/auth/google/start`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'eyvan-client',
+          Origin: h.baseUrl,
+        },
+        body: JSON.stringify({ mode: 'login' }),
+      });
+      const bindHtml = extractCookieFromResponse(sHtmlRes, OAUTH_BIND_COOKIE_NAME)!;
+      const sHtml = (await sHtmlRes.json()) as { url: string };
       const pHtml = google.captureFromAuthUrl(sHtml.url);
       const cbHtml = await fetch(
         `${h.baseUrl}/api/auth/google/callback?code=html_code&state=${encodeURIComponent(pHtml.state)}`,
-        { headers: { Accept: 'text/html' } }
+        { headers: { Accept: 'text/html', Cookie: bindHtml } }
       );
       assert.equal(cbHtml.status, 201);
       const htmlText = await cbHtml.text();
       assert.ok(htmlText.includes('EYVAN_OAUTH_RESULT'));
-      assert.ok(htmlText.includes('window.opener.postMessage'));
+      assert.ok(htmlText.includes('window.opener.postMessage(data, targetOrigin)'));
+      assert.ok(htmlText.includes(JSON.stringify(h.baseUrl)));
+      assert.equal(htmlText.includes("'*'"), false, 'Popup HTML must NEVER use wildcard postMessage targetOrigin');
 
       // 9. Cloudflare Worker fetch parity for Google OAuth start + callback
       const workerEnv = {
@@ -1103,6 +1110,8 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
         workerEnv
       );
       assert.equal(wStart.status, 200);
+      const wBind = extractCookieFromResponse(wStart, OAUTH_BIND_COOKIE_NAME)!;
+      assert.ok(wBind, 'Worker /start must issue eyvan_oauth_bind cookie');
       const wStartJson = (await wStart.json()) as { url: string };
       const wp = google.captureFromAuthUrl(wStartJson.url);
       const wCb = await worker.fetch(
@@ -1112,6 +1121,7 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
             method: 'GET',
             headers: {
               Accept: 'application/json',
+              Cookie: wBind,
               'CF-Connecting-IP': '198.51.100.77',
             },
           }

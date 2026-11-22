@@ -46,8 +46,11 @@ import {
 import { EmailSender, createEmailSender } from './emailService';
 import {
   GoogleOAuthConfig,
+  buildClearOAuthBindCookieHeader,
+  buildSetOAuthBindCookieHeader,
   completeGoogleOAuthCallback,
   isGoogleOAuthConfigured,
+  parseOAuthBindCookieFromHeader,
   resolveGoogleCallbackRedirectUri,
   startGoogleOAuthFlow,
 } from './googleOAuthService';
@@ -86,6 +89,19 @@ function escapeHtmlText(text: string): string {
     .replace(/'/g, '&#39;');
 }
 
+function resolveValidatedHttpOrigin(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw.trim());
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
 function buildOAuthPopupHtmlResponse(
   payload: {
     readonly ok: boolean;
@@ -93,9 +109,11 @@ function buildOAuthPopupHtmlResponse(
     readonly code?: string;
     readonly message: string;
   },
+  targetOrigin: string,
   status: number,
   setCookies: string[]
 ): Response {
+  const safeTargetOrigin = resolveValidatedHttpOrigin(targetOrigin);
   const safeJson = JSON.stringify({
     type: 'EYVAN_OAUTH_RESULT',
     ok: payload.ok,
@@ -103,6 +121,9 @@ function buildOAuthPopupHtmlResponse(
     code: payload.code ?? null,
     message: payload.message,
   }).replace(/</g, '\\u003c');
+  const safeTargetOriginJs = safeTargetOrigin
+    ? JSON.stringify(safeTargetOrigin).replace(/</g, '\\u003c')
+    : 'null';
 
   const safeTitle = payload.ok
     ? 'احراز هویت با گوگل انجام شد'
@@ -130,14 +151,15 @@ function buildOAuthPopupHtmlResponse(
   <script>
     (function () {
       var data = ${safeJson};
+      var targetOrigin = ${safeTargetOriginJs};
       try {
-        if (window.opener && !window.opener.closed) {
-          window.opener.postMessage(data, '*');
+        if (targetOrigin && window.opener && !window.opener.closed) {
+          window.opener.postMessage(data, targetOrigin);
           window.close();
           return;
         }
       } catch (e) {}
-      setTimeout(function () { window.location.replace('/'); }, 1200);
+      setTimeout(function () { window.location.replace(targetOrigin ? targetOrigin + '/' : '/'); }, 1200);
     })();
   </script>
 </body>
@@ -1286,12 +1308,18 @@ export async function handleAuthHttpRequest(
         );
       }
 
+      const openerOrigin =
+        resolveValidatedHttpOrigin(request.headers.get('Origin')) ??
+        resolveValidatedHttpOrigin(env.publicAppBaseUrl) ??
+        resolveValidatedHttpOrigin(request.url);
+
       const started = await startGoogleOAuthFlow(
         env.db,
         env.googleOAuth ?? {},
         {
           mode,
           redirectUri,
+          openerOrigin,
           initiatorUserId,
           guestUserId,
           now,
@@ -1310,6 +1338,12 @@ export async function handleAuthHttpRequest(
         );
       }
 
+      const bindCookie = buildSetOAuthBindCookieHeader(
+        started.rawBrowserBinding,
+        env.secureCookie,
+        env.cookieOptions
+      );
+
       return buildAuthResponse(
         {
           ok: true,
@@ -1318,7 +1352,8 @@ export async function handleAuthHttpRequest(
           stateExpiresAt: started.stateExpiresAt,
         },
         200,
-        env.corsHeaders
+        env.corsHeaders,
+        { 'Set-Cookie': bindCookie }
       );
     } catch (err) {
       console.error(
@@ -1351,10 +1386,19 @@ export async function handleAuthHttpRequest(
       .toLowerCase()
       .includes('application/json');
 
+    const fallbackTargetOrigin =
+      resolveValidatedHttpOrigin(env.publicAppBaseUrl) ??
+      resolveValidatedHttpOrigin(request.url) ??
+      reqUrl.origin;
+    const clearBindCookie = buildClearOAuthBindCookieHeader(
+      env.secureCookie,
+      env.cookieOptions
+    );
+
     try {
-      const rawAuthToken = parseAuthCookieFromHeader(
-        request.headers.get('Cookie')
-      );
+      const rawCookieHeader = request.headers.get('Cookie');
+      const rawAuthToken = parseAuthCookieFromHeader(rawCookieHeader);
+      const rawBrowserBinding = parseOAuthBindCookieFromHeader(rawCookieHeader);
       const currentAuth = rawAuthToken
         ? await verifyAuthSession(env.db, rawAuthToken, now)
         : null;
@@ -1370,6 +1414,7 @@ export async function handleAuthHttpRequest(
           code,
           state,
           error: oauthError,
+          rawBrowserBinding,
           currentAuthenticatedUserId: currentUserId,
           clientIp: env.clientIp,
           userAgent: env.userAgent,
@@ -1377,6 +1422,9 @@ export async function handleAuthHttpRequest(
           now,
         }
       );
+
+      const targetOrigin =
+        resolveValidatedHttpOrigin(result.openerOrigin) ?? fallbackTargetOrigin;
 
       if (result.ok === false) {
         if (wantsJson) {
@@ -1387,22 +1435,24 @@ export async function handleAuthHttpRequest(
               message: result.message,
             },
             result.status,
-            env.corsHeaders
+            env.corsHeaders,
+            { 'Set-Cookie': clearBindCookie }
           );
         }
         return buildOAuthPopupHtmlResponse(
           {
             ok: false,
-            flowMode: 'login',
+            flowMode: result.flowMode ?? 'login',
             code: result.code,
             message: result.message,
           },
+          targetOrigin,
           result.status,
-          []
+          [clearBindCookie]
         );
       }
 
-      const setCookies: string[] = [];
+      const setCookies: string[] = [clearBindCookie];
       if (result.rawSessionToken) {
         setCookies.push(
           buildSetAuthCookieHeader(
@@ -1451,6 +1501,7 @@ export async function handleAuthHttpRequest(
           flowMode: result.flowMode,
           message: result.message,
         },
+        targetOrigin,
         result.status,
         setCookies
       );
@@ -1467,7 +1518,8 @@ export async function handleAuthHttpRequest(
             message: 'خطای داخلی در تکمیل احراز هویت گوگل رخ داد.',
           },
           500,
-          env.corsHeaders
+          env.corsHeaders,
+          { 'Set-Cookie': clearBindCookie }
         );
       }
       return buildOAuthPopupHtmlResponse(
@@ -1477,8 +1529,9 @@ export async function handleAuthHttpRequest(
           code: 'DATABASE_ERROR',
           message: 'خطای داخلی در تکمیل احراز هویت گوگل رخ داد.',
         },
+        fallbackTargetOrigin,
         500,
-        []
+        [clearBindCookie]
       );
     }
   }

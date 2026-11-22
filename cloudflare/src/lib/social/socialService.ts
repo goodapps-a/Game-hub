@@ -792,7 +792,11 @@ export async function removeFriend(
     };
   }
 
-  let friendshipRow: { friendship_id: string } | null = null;
+  let friendshipRow: {
+    friendship_id: string;
+    requester_id: string;
+    addressee_id: string;
+  } | null = null;
 
   if (body.targetUserId !== undefined) {
     const targetVal = validateUserId(body.targetUserId, 'شناسه دوست');
@@ -815,13 +819,17 @@ export async function removeFriend(
     const pairKey = buildCanonicalPairKey(ctx.actorUserId, targetVal.userId);
     friendshipRow = await db
       .prepare(
-        `SELECT friendship_id
+        `SELECT friendship_id, requester_id, addressee_id
          FROM friendships
          WHERE pair_key = ? AND status = 'accepted'
          LIMIT 1`
       )
       .bind(pairKey)
-      .first<{ friendship_id: string }>();
+      .first<{
+        friendship_id: string;
+        requester_id: string;
+        addressee_id: string;
+      }>();
   } else if (body.friendshipId !== undefined) {
     const frVal = validateFriendshipId(body.friendshipId);
     if (frVal.ok === false) {
@@ -834,7 +842,7 @@ export async function removeFriend(
     }
     friendshipRow = await db
       .prepare(
-        `SELECT friendship_id
+        `SELECT friendship_id, requester_id, addressee_id
          FROM friendships
          WHERE friendship_id = ?
            AND status = 'accepted'
@@ -842,7 +850,11 @@ export async function removeFriend(
          LIMIT 1`
       )
       .bind(frVal.friendshipId, ctx.actorUserId, ctx.actorUserId)
-      .first<{ friendship_id: string }>();
+      .first<{
+        friendship_id: string;
+        requester_id: string;
+        addressee_id: string;
+      }>();
   } else {
     return {
       ok: false,
@@ -878,6 +890,33 @@ export async function removeFriend(
       code: 'NOT_FOUND',
       message: 'این کاربر در لیست دوستان شما نیست.',
     };
+  }
+
+  const otherUserId =
+    friendshipRow.requester_id === ctx.actorUserId
+      ? friendshipRow.addressee_id
+      : friendshipRow.requester_id;
+
+  // Best-effort cancel any pending game invites between the unfriended pair
+  try {
+    await db
+      .prepare(
+        `UPDATE game_invites
+         SET status = 'canceled', updated_at = ?, responded_at = ?
+         WHERE status = 'pending'
+           AND ((inviter_id = ? AND invitee_id = ?) OR (inviter_id = ? AND invitee_id = ?))`
+      )
+      .bind(
+        now,
+        now,
+        ctx.actorUserId,
+        otherUserId,
+        otherUserId,
+        ctx.actorUserId
+      )
+      .run();
+  } catch {
+    // Non-fatal on pre-0009 databases
   }
 
   return {

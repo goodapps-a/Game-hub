@@ -131,6 +131,20 @@ function verifyMutatingCsrf(
     );
   }
 
+  const secFetchSite = request.headers.get('Sec-Fetch-Site')?.toLowerCase();
+  const hasOrigin = Boolean(request.headers.get('Origin'));
+  if (secFetchSite === 'cross-site' && !hasOrigin) {
+    return buildSocialResponse(
+      {
+        ok: false,
+        code: 'CSRF_REJECTED',
+        message: 'درخواست بین‌سایتی بدون مبدا مجاز رد شد.',
+      },
+      403,
+      env.corsHeaders
+    );
+  }
+
   const contentType = (request.headers.get('Content-Type') ?? '').toLowerCase();
   if (!contentType.includes('application/json')) {
     return buildSocialResponse(

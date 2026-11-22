@@ -39,6 +39,11 @@ export const GAME_INVITE_USER_RATE_LIMIT: RateLimitPolicy = {
   blockMs: 5 * 60 * 1000,
 };
 
+function isUniqueConstraintError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return /UNIQUE constraint failed|SQLITE_CONSTRAINT_UNIQUE/i.test(msg);
+}
+
 async function isBlockedEitherWay(
   db: D1DatabaseLike,
   userA: string,
@@ -256,56 +261,62 @@ export async function createGameInvite(
     };
   }
 
-  // Expire stale pending invites first
+  const fetchExistingLivePending = async () =>
+    db
+      .prepare(
+        `SELECT invite_id, game_id, room_code, status, created_at, expires_at, responded_at
+         FROM game_invites
+         WHERE room_code = ?
+           AND inviter_id = ?
+           AND invitee_id = ?
+           AND status = 'pending'
+           AND expires_at > ?
+         LIMIT 1`
+      )
+      .bind(roomCode, ctx.actorUserId, targetUserId, now)
+      .first<{
+        invite_id: string;
+        game_id: 'hokm';
+        room_code: string;
+        status: GameInviteStatus;
+        created_at: number;
+        expires_at: number;
+        responded_at: number | null;
+      }>();
+
+  const buildDeduplicatedResponse = (
+    row: NonNullable<Awaited<ReturnType<typeof fetchExistingLivePending>>>
+  ): CreateGameInviteResult => ({
+    ok: true,
+    status: 200,
+    deduplicated: true,
+    invite: {
+      inviteId: row.invite_id,
+      gameId: row.game_id,
+      roomCode: row.room_code,
+      status: row.status,
+      direction: 'outgoing',
+      otherUser: {
+        userId: targetRow.user_id,
+        username: targetRow.username,
+        displayName: targetRow.display_name,
+        avatarCode: targetRow.avatar_code,
+        avatarUrl: targetRow.avatar_url,
+      },
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      respondedAt: row.responded_at,
+    },
+    message: 'دعوت فعال برای این اتاق از قبل ارسال شده است.',
+  });
+
+  // Expire stale pending invites first so partial UNIQUE index never blocks fresh re-invite
   await expireStaleInvitesForUser(db, ctx.actorUserId, now);
 
-  // Deduplicate existing live pending invite for the same room & pair
-  const existing = await db
-    .prepare(
-      `SELECT invite_id, game_id, room_code, status, created_at, expires_at, responded_at
-       FROM game_invites
-       WHERE room_code = ?
-         AND inviter_id = ?
-         AND invitee_id = ?
-         AND status = 'pending'
-         AND expires_at > ?
-       LIMIT 1`
-    )
-    .bind(roomCode, ctx.actorUserId, targetUserId, now)
-    .first<{
-      invite_id: string;
-      game_id: 'hokm';
-      room_code: string;
-      status: GameInviteStatus;
-      created_at: number;
-      expires_at: number;
-      responded_at: number | null;
-    }>();
-
+  // Fast-path deduplication for existing live pending invite for the same room & pair
+  const existing = await fetchExistingLivePending();
   if (existing) {
-    return {
-      ok: true,
-      status: 200,
-      deduplicated: true,
-      invite: {
-        inviteId: existing.invite_id,
-        gameId: existing.game_id,
-        roomCode: existing.room_code,
-        status: existing.status,
-        direction: 'outgoing',
-        otherUser: {
-          userId: targetRow.user_id,
-          username: targetRow.username,
-          displayName: targetRow.display_name,
-          avatarCode: targetRow.avatar_code,
-          avatarUrl: targetRow.avatar_url,
-        },
-        createdAt: existing.created_at,
-        expiresAt: existing.expires_at,
-        respondedAt: existing.responded_at,
-      },
-      message: 'دعوت فعال برای این اتاق از قبل ارسال شده است.',
-    };
+    return buildDeduplicatedResponse(existing);
   }
 
   const rl = await consumeRateLimitSlot(
@@ -327,46 +338,80 @@ export async function createGameInvite(
   const inviteId = generatePrefixedId('inv', 12);
   const expiresAt = now + DEFAULT_GAME_INVITE_TTL_MS;
 
-  await db
-    .prepare(
-      `INSERT INTO game_invites (
-         invite_id, game_id, room_code, inviter_id, invitee_id,
-         status, created_at, updated_at, expires_at, responded_at
-       ) VALUES (?, 'hokm', ?, ?, ?, 'pending', ?, ?, ?, NULL)`
-    )
-    .bind(
-      inviteId,
-      roomCode,
-      ctx.actorUserId,
-      targetUserId,
-      now,
-      now,
-      expiresAt
-    )
-    .run();
+  // Atomic DB-level uniqueness backed by `uq_game_invites_pending_pair_room`.
+  // On concurrent race (UNIQUE violation), cleanly return the winning live pending invite
+  // (deduplicated: true) or retry once if a stale row expired right before INSERT.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await db
+        .prepare(
+          `INSERT INTO game_invites (
+             invite_id, game_id, room_code, inviter_id, invitee_id,
+             status, created_at, updated_at, expires_at, responded_at
+           ) VALUES (?, 'hokm', ?, ?, ?, 'pending', ?, ?, ?, NULL)`
+        )
+        .bind(
+          inviteId,
+          roomCode,
+          ctx.actorUserId,
+          targetUserId,
+          now,
+          now,
+          expiresAt
+        )
+        .run();
+
+      return {
+        ok: true,
+        status: 201,
+        deduplicated: false,
+        invite: {
+          inviteId,
+          gameId: 'hokm',
+          roomCode,
+          status: 'pending',
+          direction: 'outgoing',
+          otherUser: {
+            userId: targetRow.user_id,
+            username: targetRow.username,
+            displayName: targetRow.display_name,
+            avatarCode: targetRow.avatar_code,
+            avatarUrl: targetRow.avatar_url,
+          },
+          createdAt: now,
+          expiresAt,
+          respondedAt: null,
+        },
+        message: `دعوت بازی به اتاق ${roomCode} برای ${targetRow.username} ارسال شد.`,
+      };
+    } catch (err) {
+      if (!isUniqueConstraintError(err)) {
+        throw err;
+      }
+
+      // Expire any stale pending rows that might have tripped the partial unique index
+      await expireStaleInvitesForUser(db, ctx.actorUserId, now);
+      const racedExisting = await fetchExistingLivePending();
+      if (racedExisting) {
+        return buildDeduplicatedResponse(racedExisting);
+      }
+
+      if (attempt === 1) {
+        return {
+          ok: false,
+          status: 409,
+          code: 'INVITE_NOT_PENDING',
+          message: 'درخواست دعوت هم‌زمان در حال پردازش است. لطفاً دوباره بررسی کنید.',
+        };
+      }
+    }
+  }
 
   return {
-    ok: true,
-    status: 201,
-    deduplicated: false,
-    invite: {
-      inviteId,
-      gameId: 'hokm',
-      roomCode,
-      status: 'pending',
-      direction: 'outgoing',
-      otherUser: {
-        userId: targetRow.user_id,
-        username: targetRow.username,
-        displayName: targetRow.display_name,
-        avatarCode: targetRow.avatar_code,
-        avatarUrl: targetRow.avatar_url,
-      },
-      createdAt: now,
-      expiresAt,
-      respondedAt: null,
-    },
-    message: `دعوت بازی به اتاق ${roomCode} برای ${targetRow.username} ارسال شد.`,
+    ok: false,
+    status: 409,
+    code: 'INVITE_NOT_PENDING',
+    message: 'درخواست دعوت هم‌زمان در حال پردازش است. لطفاً دوباره بررسی کنید.',
   };
 }
 
@@ -415,6 +460,13 @@ export async function listGameInvites(
            WHERE (ub.blocker_id = ? AND ub.blocked_id = u.user_id)
               OR (ub.blocker_id = u.user_id AND ub.blocked_id = ?)
          )
+         AND EXISTS (
+           SELECT 1
+           FROM friendships f
+           WHERE f.status = 'accepted'
+             AND ((f.requester_id = ? AND f.addressee_id = u.user_id)
+               OR (f.requester_id = u.user_id AND f.addressee_id = ?))
+         )
        ORDER BY gi.created_at DESC
        LIMIT 30`
     )
@@ -423,6 +475,8 @@ export async function listGameInvites(
       ctx.actorUserId,
       ctx.actorUserId,
       now,
+      ctx.actorUserId,
+      ctx.actorUserId,
       ctx.actorUserId,
       ctx.actorUserId
     )
@@ -580,6 +634,24 @@ export async function respondToGameInvite(
   }
 
   if (decision === 'accept') {
+    const friends = await areAcceptedFriends(db, ctx.actorUserId, row.inviter_id);
+    if (!friends) {
+      await db
+        .prepare(
+          `UPDATE game_invites
+           SET status = 'canceled', updated_at = ?, responded_at = ?
+           WHERE invite_id = ? AND status = 'pending'`
+        )
+        .bind(now, now, inviteId)
+        .run();
+      return {
+        ok: false,
+        status: 403,
+        code: 'NOT_FRIENDS',
+        message: 'پذیرش دعوت بازی فقط برای دوستان تأییدشده مجاز است.',
+      };
+    }
+
     const roomSummary = await roomLookup(row.room_code);
     if (!roomSummary || roomSummary.status !== 'WAITING') {
       await db

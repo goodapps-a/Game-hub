@@ -542,13 +542,26 @@ export async function openGoogleOAuthPopup(
     };
 
     const onMessage = (event: MessageEvent) => {
+      if (event.source !== popup) return;
       if (!allowedOrigins.has(event.origin)) return;
       const data = event.data as Record<string, unknown> | null;
-      if (!data || data.type !== 'EYVAN_OAUTH_RESULT') return;
+      if (!data || typeof data !== 'object' || data.type !== 'EYVAN_OAUTH_RESULT') {
+        return;
+      }
+      if (typeof data.ok !== 'boolean') return;
+      if (data.flowMode !== 'login' && data.flowMode !== 'link') return;
+      if (data.flowMode !== mode) return;
+      if (
+        data.code !== null &&
+        data.code !== undefined &&
+        typeof data.code !== 'string'
+      ) {
+        return;
+      }
 
       finish({
-        ok: Boolean(data.ok),
-        flowMode: data.flowMode === 'link' ? 'link' : 'login',
+        ok: data.ok,
+        flowMode: data.flowMode,
         code: typeof data.code === 'string' ? data.code : null,
         message:
           typeof data.message === 'string' && data.message.trim().length > 0

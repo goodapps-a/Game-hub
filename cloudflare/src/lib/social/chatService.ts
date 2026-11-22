@@ -43,6 +43,11 @@ export const CHAT_SEND_USER_RATE_LIMIT: RateLimitPolicy = {
   blockMs: 60 * 1000,
 };
 
+function isUniqueConstraintError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return /UNIQUE constraint failed|SQLITE_CONSTRAINT_UNIQUE/i.test(msg);
+}
+
 function sanitizeMessageBody(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
   // Strip NUL and non-printable control chars except newline & tab
@@ -372,6 +377,12 @@ export async function listDirectConversations(
          u.presence_preference,
          CASE
            WHEN EXISTS (
+             SELECT 1 FROM friendships f
+             WHERE f.status = 'accepted'
+               AND ((f.requester_id = ? AND f.addressee_id = u.user_id)
+                 OR (f.requester_id = u.user_id AND f.addressee_id = ?))
+           )
+           AND EXISTS (
              SELECT 1 FROM user_presence_sessions ups
              WHERE ups.user_id = u.user_id AND ups.expires_at > ?
            ) THEN 1 ELSE 0
@@ -409,6 +420,8 @@ export async function listDirectConversations(
        LIMIT 50`
     )
     .bind(
+      ctx.actorUserId,
+      ctx.actorUserId,
       now,
       ctx.actorUserId,
       ctx.actorUserId,
@@ -785,7 +798,7 @@ export async function sendDirectMessage(
     ]);
   } catch (err) {
     // Handle concurrent duplicate clientMsgId race cleanly
-    if (clientMsgId) {
+    if (clientMsgId && isUniqueConstraintError(err)) {
       const existing = await db
         .prepare(
           `SELECT message_id, conversation_id, sender_id, kind, body, client_msg_id, created_at
@@ -882,11 +895,33 @@ export async function markConversationRead(
     };
   }
 
+  if (membership.partnerUserId) {
+    const blocked = await isBlockedEitherWay(
+      db,
+      ctx.actorUserId,
+      membership.partnerUserId
+    );
+    if (blocked) {
+      return {
+        ok: false,
+        status: 403,
+        code: 'USER_BLOCKED',
+        message: 'دسترسی به این گفتگو به دلیل مسدودیت غیرفعال است.',
+      };
+    }
+  }
+
   let lastReadMessageId: string | null = null;
   let readTimestamp = now;
-  if (typeof payload.lastReadMessageId === 'string' && payload.lastReadMessageId.trim()) {
-    const candidate = payload.lastReadMessageId.trim();
-    if (!MESSAGE_ID_RE.test(candidate)) {
+  if (
+    payload.lastReadMessageId !== undefined &&
+    payload.lastReadMessageId !== null &&
+    payload.lastReadMessageId !== ''
+  ) {
+    if (
+      typeof payload.lastReadMessageId !== 'string' ||
+      !MESSAGE_ID_RE.test(payload.lastReadMessageId.trim())
+    ) {
       return {
         ok: false,
         status: 400,
@@ -894,19 +929,26 @@ export async function markConversationRead(
         message: 'شناسه پیام نامعتبر است.',
       };
     }
+    const candidate = payload.lastReadMessageId.trim();
     const msgRow = await db
       .prepare(
         `SELECT message_id, created_at
          FROM messages
-         WHERE message_id = ? AND conversation_id = ?
+         WHERE message_id = ? AND conversation_id = ? AND deleted_at IS NULL
          LIMIT 1`
       )
       .bind(candidate, conversationId)
       .first<{ message_id: string; created_at: number }>();
-    if (msgRow) {
-      lastReadMessageId = msgRow.message_id;
-      readTimestamp = Math.max(now, msgRow.created_at);
+    if (!msgRow) {
+      return {
+        ok: false,
+        status: 404,
+        code: 'NOT_FOUND',
+        message: 'پیام مورد نظر در این گفتگو یافت نشد.',
+      };
     }
+    lastReadMessageId = msgRow.message_id;
+    readTimestamp = Math.max(now, msgRow.created_at);
   }
 
   await db

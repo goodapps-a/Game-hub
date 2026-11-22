@@ -22,6 +22,7 @@
  *   registered account exists, the guest account upgrades IN-PLACE preserving `user_id` & match stats.
  */
 
+import { CookieHeaderOptions } from '../sessionCookie';
 import { D1DatabaseLike } from '../types';
 import { resolveAuthSessionTtlSec } from './authCookie';
 import {
@@ -30,7 +31,6 @@ import {
   generatePrefixedId,
   sha256Hex,
 } from './crypto';
-import { revokeGuestSessionsForUser } from './guestSession';
 import {
   AccountStatus,
   AuthErrorCode,
@@ -39,6 +39,115 @@ import {
   PublicAuthUser,
 } from './types';
 import { validateAuthUsername, validateEmail } from './validation';
+
+export const OAUTH_BIND_COOKIE_NAME = 'eyvan_oauth_bind';
+export const OAUTH_BIND_COOKIE_TTL_SEC = 10 * 60; // 10 minutes (matches OAUTH_STATE_TTL_MS)
+const OAUTH_BIND_COOKIE_PATH = '/api/auth/google';
+const OAUTH_BIND_TOKEN_RE = /^[A-Za-z0-9_-]{32,128}$/;
+const COOKIE_DOMAIN_RE =
+  /^\.?[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$/;
+
+function sanitizeOAuthCookieDomain(domain?: string): string | null {
+  if (!domain) return null;
+  const trimmed = domain.trim().toLowerCase();
+  if (!trimmed || !COOKIE_DOMAIN_RE.test(trimmed)) return null;
+  return trimmed;
+}
+
+export function parseOAuthBindCookieFromHeader(
+  cookieHeader: string | null | undefined
+): string | null {
+  if (!cookieHeader) return null;
+  const parts = cookieHeader.split(';');
+  for (const part of parts) {
+    const eqIdx = part.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = part.slice(0, eqIdx).trim();
+    if (key !== OAUTH_BIND_COOKIE_NAME) continue;
+    const rawVal = part.slice(eqIdx + 1).trim();
+    if (!rawVal) return null;
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(rawVal);
+    } catch {
+      return null;
+    }
+    if (!OAUTH_BIND_TOKEN_RE.test(decoded)) return null;
+    return decoded;
+  }
+  return null;
+}
+
+/**
+ * Sets the short-lived HttpOnly browser-binding cookie scoped strictly to `/api/auth/google`.
+ * Over HTTPS uses `Secure; SameSite=None` (intentionally unpartitioned so top-level popup
+ * redirects back from accounts.google.com reliably transmit the cookie across SPA/API origins).
+ * Over plain HTTP localhost uses `SameSite=Lax`.
+ */
+export function buildSetOAuthBindCookieHeader(
+  rawBindToken: string,
+  secure: boolean,
+  options?: CookieHeaderOptions
+): string {
+  const attrs = [
+    `${OAUTH_BIND_COOKIE_NAME}=${encodeURIComponent(rawBindToken)}`,
+    `Path=${OAUTH_BIND_COOKIE_PATH}`,
+    `Max-Age=${OAUTH_BIND_COOKIE_TTL_SEC}`,
+    'HttpOnly',
+  ];
+  const domain = sanitizeOAuthCookieDomain(options?.domain);
+  if (domain) {
+    attrs.push(`Domain=${domain}`);
+  }
+  if (secure) {
+    attrs.push('Secure', 'SameSite=None');
+  } else {
+    attrs.push('SameSite=Lax');
+  }
+  return attrs.join('; ');
+}
+
+export function buildClearOAuthBindCookieHeader(
+  secure: boolean,
+  options?: CookieHeaderOptions
+): string {
+  const attrs = [
+    `${OAUTH_BIND_COOKIE_NAME}=`,
+    `Path=${OAUTH_BIND_COOKIE_PATH}`,
+    'Max-Age=0',
+    'HttpOnly',
+  ];
+  const domain = sanitizeOAuthCookieDomain(options?.domain);
+  if (domain) {
+    attrs.push(`Domain=${domain}`);
+  }
+  if (secure) {
+    attrs.push('Secure', 'SameSite=None');
+  } else {
+    attrs.push('SameSite=Lax');
+  }
+  return attrs.join('; ');
+}
+
+function sanitizeHttpOrigin(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw.trim());
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function isConstraintConflictError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return /UNIQUE constraint failed|NOT NULL constraint failed|SQLITE_CONSTRAINT_UNIQUE|SQLITE_CONSTRAINT_NOTNULL/i.test(
+    msg
+  );
+}
 
 const GOOGLE_AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const DEFAULT_GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
@@ -64,6 +173,7 @@ export interface GoogleOAuthConfig {
 export interface GoogleOAuthStartInput {
   readonly mode: 'login' | 'link';
   readonly redirectUri: string;
+  readonly openerOrigin?: string | null;
   readonly initiatorUserId?: string | null;
   readonly guestUserId?: string | null;
   readonly now?: number;
@@ -74,6 +184,7 @@ export type GoogleOAuthStartResult =
       readonly ok: true;
       readonly url: string;
       readonly stateExpiresAt: number;
+      readonly rawBrowserBinding: string;
     }
   | {
       readonly ok: false;
@@ -86,6 +197,7 @@ export interface GoogleOAuthCallbackInput {
   readonly code: string | null;
   readonly state: string | null;
   readonly error: string | null;
+  readonly rawBrowserBinding: string | null;
   readonly currentAuthenticatedUserId: string | null;
   readonly clientIp: string;
   readonly userAgent: string;
@@ -98,6 +210,7 @@ export type GoogleOAuthCallbackResult =
       readonly ok: true;
       readonly status: number;
       readonly flowMode: 'login' | 'link';
+      readonly openerOrigin: string | null;
       readonly user: PublicAuthUser;
       readonly session?: PublicAuthSessionInfo;
       readonly rawSessionToken?: string;
@@ -110,6 +223,8 @@ export type GoogleOAuthCallbackResult =
       readonly ok: false;
       readonly status: number;
       readonly code: AuthErrorCode;
+      readonly flowMode?: 'login' | 'link';
+      readonly openerOrigin?: string | null;
       readonly message: string;
     };
 
@@ -123,6 +238,8 @@ interface OAuthStateRow {
   initiator_user_id: string | null;
   guest_user_id: string | null;
   redirect_uri: string | null;
+  browser_binding_hash: string | null;
+  opener_origin: string | null;
   created_at: number;
   expires_at: number;
   consumed_at: number | null;
@@ -576,23 +693,34 @@ export async function startGoogleOAuthFlow(
   const expiresAt = now + OAUTH_STATE_TTL_MS;
   const rawState = generateOpaqueToken(32);
   const rawNonce = generateOpaqueToken(32);
+  const rawBrowserBinding = generateOpaqueToken(32);
   const codeVerifier = generateOpaqueToken(48);
+  const openerOrigin =
+    sanitizeHttpOrigin(input.openerOrigin) ??
+    sanitizeHttpOrigin(input.redirectUri);
 
-  const [stateHash, nonceHash, codeChallenge, encryptedVerifier] =
-    await Promise.all([
-      sha256Hex(rawState),
-      sha256Hex(rawNonce),
-      computePkceS256Challenge(codeVerifier),
-      encryptCodeVerifier(codeVerifier, config.clientSecret!.trim()),
-    ]);
+  const [
+    stateHash,
+    nonceHash,
+    browserBindingHash,
+    codeChallenge,
+    encryptedVerifier,
+  ] = await Promise.all([
+    sha256Hex(rawState),
+    sha256Hex(rawNonce),
+    sha256Hex(rawBrowserBinding),
+    computePkceS256Challenge(codeVerifier),
+    encryptCodeVerifier(codeVerifier, config.clientSecret!.trim()),
+  ]);
 
   await db
     .prepare(
       `INSERT INTO oauth_states (
          state_hash, provider, code_verifier_encrypted, nonce_hash,
          redirect_path, flow_mode, initiator_user_id, guest_user_id, redirect_uri,
+         browser_binding_hash, opener_origin,
          created_at, expires_at, consumed_at
-       ) VALUES (?, 'google', ?, ?, '/', ?, ?, ?, ?, ?, ?, NULL)`
+       ) VALUES (?, 'google', ?, ?, '/', ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
     )
     .bind(
       stateHash,
@@ -602,6 +730,8 @@ export async function startGoogleOAuthFlow(
       input.mode === 'link' ? input.initiatorUserId ?? null : null,
       input.mode === 'login' ? input.guestUserId ?? null : null,
       input.redirectUri,
+      browserBindingHash,
+      openerOrigin,
       now,
       expiresAt
     )
@@ -622,6 +752,7 @@ export async function startGoogleOAuthFlow(
     ok: true,
     url: authUrl.toString(),
     stateExpiresAt: expiresAt,
+    rawBrowserBinding,
   };
 }
 
@@ -646,20 +777,80 @@ export async function completeGoogleOAuthCallback(
     };
   }
 
+  const now = input.now ?? Date.now();
+  const rawCode = input.code?.trim() ?? '';
+  const rawState = input.state?.trim() ?? '';
+  const rawBind = input.rawBrowserBinding?.trim() ?? '';
+
+  // Look up state row early when state is present so cancel/error paths can still
+  // bind exact openerOrigin and flowMode (never wildcard '*') after verifying browser binding.
+  let stateHash = '';
+  let stateRow: OAuthStateRow | null = null;
+  if (rawState) {
+    stateHash = await sha256Hex(rawState);
+    stateRow = await db
+      .prepare(
+        `SELECT
+           state_hash, provider, code_verifier_encrypted, nonce_hash,
+           redirect_path, flow_mode, initiator_user_id, guest_user_id, redirect_uri,
+           browser_binding_hash, opener_origin,
+           created_at, expires_at, consumed_at
+         FROM oauth_states
+         WHERE state_hash = ? AND provider = 'google'
+         LIMIT 1`
+      )
+      .bind(stateHash)
+      .first<OAuthStateRow>();
+  }
+
+  const verifyBrowserBindingForState = async (
+    row: OAuthStateRow | null
+  ): Promise<boolean> => {
+    if (!row || !row.browser_binding_hash || !rawBind) {
+      return false;
+    }
+    const actualBindHash = await sha256Hex(rawBind);
+    return constantTimeEqualHex(actualBindHash, row.browser_binding_hash);
+  };
+
   if (input.error) {
+    const bindingMatches = await verifyBrowserBindingForState(stateRow);
+    const resolvedFlowMode: 'login' | 'link' =
+      bindingMatches && stateRow?.flow_mode === 'link' ? 'link' : 'login';
+    const resolvedOpenerOrigin = bindingMatches
+      ? sanitizeHttpOrigin(stateRow?.opener_origin)
+      : null;
+
+    if (
+      bindingMatches &&
+      stateRow &&
+      stateRow.consumed_at === null &&
+      stateRow.expires_at > now
+    ) {
+      // Consume canceled state from the initiating browser so it cannot be replayed
+      await db
+        .prepare(
+          `UPDATE oauth_states
+           SET consumed_at = ?
+           WHERE state_hash = ? AND provider = 'google' AND consumed_at IS NULL`
+        )
+        .bind(now, stateHash)
+        .run();
+    }
+
     const isCancel = input.error === 'access_denied';
     return {
       ok: false,
       status: 400,
       code: isCancel ? 'OAUTH_CANCELLED' : 'OAUTH_FAILED',
+      flowMode: resolvedFlowMode,
+      openerOrigin: resolvedOpenerOrigin,
       message: isCancel
         ? 'فرآیند ورود با گوگل توسط کاربر لغو شد.'
         : 'احراز هویت با گوگل تکمیل نشد.',
     };
   }
 
-  const rawCode = input.code?.trim() ?? '';
-  const rawState = input.state?.trim() ?? '';
   if (!rawCode || !rawState) {
     return {
       ok: false,
@@ -669,22 +860,6 @@ export async function completeGoogleOAuthCallback(
     };
   }
 
-  const now = input.now ?? Date.now();
-  const stateHash = await sha256Hex(rawState);
-
-  const stateRow = await db
-    .prepare(
-      `SELECT
-         state_hash, provider, code_verifier_encrypted, nonce_hash,
-         redirect_path, flow_mode, initiator_user_id, guest_user_id, redirect_uri,
-         created_at, expires_at, consumed_at
-       FROM oauth_states
-       WHERE state_hash = ? AND provider = 'google'
-       LIMIT 1`
-    )
-    .bind(stateHash)
-    .first<OAuthStateRow>();
-
   if (!stateRow || stateRow.consumed_at !== null || stateRow.expires_at <= now) {
     return {
       ok: false,
@@ -693,6 +868,23 @@ export async function completeGoogleOAuthCallback(
       message: 'نشست ورود با گوگل منقضی شده یا قبلاً استفاده شده است. لطفاً دوباره تلاش کنید.',
     };
   }
+
+  // Strict browser-binding verification BEFORE consuming state or calling Google token endpoint.
+  // Blocks Login-CSRF where an attacker's callback URL is opened in another browser.
+  const browserBindingValid = await verifyBrowserBindingForState(stateRow);
+  if (!browserBindingValid) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'OAUTH_INVALID_STATE',
+      message:
+        'درخواست ورود با گوگل با مرورگر آغازکننده مطابقت ندارد. لطفاً ورود را مجدداً از همین مرورگر آغاز کنید.',
+    };
+  }
+
+  const flowMode: 'login' | 'link' =
+    stateRow.flow_mode === 'link' ? 'link' : 'login';
+  const openerOrigin = sanitizeHttpOrigin(stateRow.opener_origin);
 
   // Atomic one-time consumption to prevent concurrent replay
   const consumeRes = await db
@@ -709,12 +901,11 @@ export async function completeGoogleOAuthCallback(
       ok: false,
       status: 400,
       code: 'OAUTH_INVALID_STATE',
+      flowMode,
+      openerOrigin,
       message: 'نشست ورود با گوگل قبلاً مصرف شده است. لطفاً مجدداً اقدام کنید.',
     };
   }
-
-  const flowMode: 'login' | 'link' =
-    stateRow.flow_mode === 'link' ? 'link' : 'login';
 
   // Anti-login-CSRF check for explicit link mode: current active session MUST match initiator
   if (flowMode === 'link') {
@@ -727,6 +918,8 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 401,
         code: 'UNAUTHORIZED',
+        flowMode,
+        openerOrigin,
         message: 'برای اتصال حساب گوگل، نشست فعال شما با درخواست اولیه مطابقت ندارد.',
       };
     }
@@ -741,6 +934,8 @@ export async function completeGoogleOAuthCallback(
       ok: false,
       status: 400,
       code: 'OAUTH_INVALID_STATE',
+      flowMode,
+      openerOrigin,
       message: 'اطلاعات امنیتی درخواست گوگل معتبر نیست.',
     };
   }
@@ -771,6 +966,8 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 502,
         code: 'OAUTH_FAILED',
+        flowMode,
+        openerOrigin,
         message: 'تبادل کد احراز هویت با سرور گوگل ناموفق بود.',
       };
     }
@@ -780,6 +977,8 @@ export async function completeGoogleOAuthCallback(
       ok: false,
       status: 502,
       code: 'OAUTH_FAILED',
+      flowMode,
+      openerOrigin,
       message: 'خطا در برقراری ارتباط با سرویس گوگل.',
     };
   }
@@ -789,6 +988,8 @@ export async function completeGoogleOAuthCallback(
       ok: false,
       status: 401,
       code: 'OAUTH_FAILED',
+      flowMode,
+      openerOrigin,
       message: 'توکن هویت معتبر از گوگل دریافت نشد.',
     };
   }
@@ -806,6 +1007,8 @@ export async function completeGoogleOAuthCallback(
       ok: false,
       status: 401,
       code: 'OAUTH_FAILED',
+      flowMode,
+      openerOrigin,
       message: 'اعتبارسنجی امنیتی توکن گوگل ناموفق بود.',
     };
   }
@@ -847,6 +1050,8 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 403,
         code: 'ACCOUNT_DISABLED',
+        flowMode: 'link',
+        openerOrigin,
         message: 'حساب کاربری فعلی شما فعال نیست.',
       };
     }
@@ -857,6 +1062,7 @@ export async function completeGoogleOAuthCallback(
           ok: true,
           status: 200,
           flowMode: 'link',
+          openerOrigin,
           user: mapUserRowToPublic(targetUser),
           clearedGuestCookie: false,
           alreadyLinked: true,
@@ -867,6 +1073,8 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 409,
         code: 'ACCOUNT_CONFLICT',
+        flowMode: 'link',
+        openerOrigin,
         message: 'این حساب گوگل قبلاً به حساب کاربری دیگری متصل شده است.',
       };
     }
@@ -887,6 +1095,8 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 409,
         code: 'ACCOUNT_CONFLICT',
+        flowMode: 'link',
+        openerOrigin,
         message: 'حساب شما قبلاً به یک حساب گوگل دیگر متصل شده است.',
       };
     }
@@ -902,31 +1112,59 @@ export async function completeGoogleOAuthCallback(
     const nextAvatarUrl = targetUser.avatar_url ?? claims.picture;
     const identityId = generatePrefixedId('idn', 12);
 
-    await db.batch([
-      db
-        .prepare(
-          `INSERT INTO auth_identities (
-             identity_id, user_id, provider, provider_subject,
-             password_hash, password_salt, password_algo,
-             created_at, updated_at
-           ) VALUES (?, ?, 'google', ?, NULL, NULL, NULL, ?, ?)`
-        )
-        .bind(identityId, targetUserId, claims.sub, now, now),
-      db
-        .prepare(
-          `UPDATE users
-           SET auth_provider = ?,
-               avatar_url = COALESCE(avatar_url, ?),
-               updated_at = ?
-           WHERE user_id = ?`
-        )
-        .bind(nextProvider, nextAvatarUrl, now, targetUserId),
-    ]);
+    try {
+      await db.batch([
+        db
+          .prepare(
+            `INSERT INTO auth_identities (
+               identity_id, user_id, provider, provider_subject,
+               password_hash, password_salt, password_algo,
+               created_at, updated_at
+             ) VALUES (
+               ?,
+               (
+                 SELECT u.user_id
+                 FROM users u
+                 WHERE u.user_id = ?
+                   AND u.account_status = 'active'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM auth_identities ai
+                     WHERE ai.user_id = u.user_id AND ai.provider = 'google'
+                   )
+               ),
+               'google', ?, NULL, NULL, NULL, ?, ?
+             )`
+          )
+          .bind(identityId, targetUserId, claims.sub, now, now),
+        db
+          .prepare(
+            `UPDATE users
+             SET auth_provider = ?,
+                 avatar_url = COALESCE(avatar_url, ?),
+                 updated_at = ?
+             WHERE user_id = ?`
+          )
+          .bind(nextProvider, nextAvatarUrl, now, targetUserId),
+      ]);
+    } catch (err) {
+      if (isConstraintConflictError(err)) {
+        return {
+          ok: false,
+          status: 409,
+          code: 'ACCOUNT_CONFLICT',
+          flowMode: 'link',
+          openerOrigin,
+          message: 'امکان اتصال هم‌زمان این حساب گوگل وجود ندارد. لطفاً وضعیت حساب را بررسی کنید.',
+        };
+      }
+      throw err;
+    }
 
     return {
       ok: true,
       status: 200,
       flowMode: 'link',
+      openerOrigin,
       user: {
         ...mapUserRowToPublic(targetUser),
         authProvider: nextProvider,
@@ -971,6 +1209,8 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 404,
         code: 'ACCOUNT_DISABLED',
+        flowMode: 'login',
+        openerOrigin,
         message: 'حساب کاربری متصل به این شناسه گوگل یافت نشد.',
       };
     }
@@ -983,6 +1223,8 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 403,
         code: 'ACCOUNT_DISABLED',
+        flowMode: 'login',
+        openerOrigin,
         message: 'این حساب کاربری غیرفعال یا مسدود شده است.',
       };
     }
@@ -1020,6 +1262,7 @@ export async function completeGoogleOAuthCallback(
       ok: true,
       status: 200,
       flowMode: 'login',
+      openerOrigin,
       user: {
         ...mapUserRowToPublic(userRow),
         avatarUrl: userRow.avatar_url ?? claims.picture,
@@ -1053,13 +1296,17 @@ export async function completeGoogleOAuthCallback(
       ok: false,
       status: 409,
       code: 'ACCOUNT_LINK_REQUIRED',
+      flowMode: 'login',
+      openerOrigin,
       message:
         'حسابی با این ایمیل از قبل ثبت شده است. برای امنیت حساب، ابتدا با رمز عبور وارد شوید و سپس از بخش «پروفایل ← امنیت و حساب کاربری» اتصال گوگل را فعال کنید.',
     };
   }
 
-  // B3) Upgrade verified guest account in-place if this flow started from an active guest session
-  let upgradedGuest: UserRow | null = null;
+  const identityId = generatePrefixedId('idn', 12);
+
+  // B3) Upgrade verified guest account in-place if this flow started from an active guest session.
+  // Never silently fall through to creating a duplicate account if the guest was concurrently upgraded.
   if (stateRow.guest_user_id) {
     const candidateGuest = await db
       .prepare(
@@ -1069,98 +1316,157 @@ export async function completeGoogleOAuthCallback(
            avatar_code, avatar_url, auth_provider, account_status,
            created_at, last_seen_at
          FROM users
-         WHERE user_id = ? AND account_status = 'guest' AND auth_provider = 'guest'
+         WHERE user_id = ?
          LIMIT 1`
       )
       .bind(stateRow.guest_user_id)
       .first<UserRow>();
-    if (candidateGuest) {
-      upgradedGuest = candidateGuest;
+
+    if (
+      !candidateGuest ||
+      candidateGuest.account_status !== 'guest' ||
+      candidateGuest.auth_provider !== 'guest'
+    ) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'ACCOUNT_CONFLICT',
+        flowMode: 'login',
+        openerOrigin,
+        message:
+          'حساب مهمان قبلاً ارتقا یافته یا دیگر معتبر نیست. لطفاً دوباره وارد حساب کاربری خود شوید.',
+      };
     }
-  }
 
-  const identityId = generatePrefixedId('idn', 12);
-
-  if (upgradedGuest) {
     const allocated = await allocateUniqueUsernameForGoogle(
       db,
-      [upgradedGuest.username, claims.email, claims.name],
-      upgradedGuest.user_id
+      [candidateGuest.username, claims.email, claims.name],
+      candidateGuest.user_id
     );
 
-    await db.batch([
-      db
-        .prepare(
-          `UPDATE users
-           SET username = ?,
-               username_key = ?,
-               display_name = ?,
-               email = ?,
-               email_key = ?,
-               email_verified = 1,
-               avatar_url = COALESCE(avatar_url, ?),
-               auth_provider = 'google',
-               account_status = 'active',
-               last_seen_at = ?,
-               updated_at = ?
-           WHERE user_id = ? AND account_status = 'guest'`
-        )
-        .bind(
-          allocated.username,
-          allocated.usernameKey,
-          claims.name ?? allocated.username,
-          claims.email,
-          claims.emailKey,
-          claims.picture,
-          now,
-          now,
-          upgradedGuest.user_id
-        ),
-      db
-        .prepare(
-          `INSERT INTO auth_identities (
-             identity_id, user_id, provider, provider_subject,
-             password_hash, password_salt, password_algo,
-             created_at, updated_at
-           ) VALUES (?, ?, 'google', ?, NULL, NULL, NULL, ?, ?)`
-        )
-        .bind(identityId, upgradedGuest.user_id, claims.sub, now, now),
-      db
-        .prepare(
-          `INSERT INTO auth_sessions (
-             session_id, user_id, token_hash, ip_hash, user_agent_hash,
-             created_at, last_seen_at, expires_at, revoked_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`
-        )
-        .bind(
-          sessionId,
-          upgradedGuest.user_id,
-          sessionTokenHash,
-          ipHash,
-          uaHash,
-          now,
-          now,
-          sessionExpiresAt
-        ),
-    ]);
-
-    await revokeGuestSessionsForUser(db, upgradedGuest.user_id, now);
+    // Atomic single-transaction upgrade:
+    // 1) Conditional CAS UPDATE users (only if still guest/guest)
+    // 2) INSERT auth_identities guarded by NOT NULL subquery requiring the exact upgraded state
+    //    AND zero pre-existing identities (rolls back entire batch on any concurrent upgrade race!)
+    // 3) INSERT auth_sessions
+    // 4) Revoke all guest_sessions atomically inside the SAME batch transaction
+    try {
+      await db.batch([
+        db
+          .prepare(
+            `UPDATE users
+             SET username = ?,
+                 username_key = ?,
+                 display_name = ?,
+                 email = ?,
+                 email_key = ?,
+                 email_verified = 1,
+                 avatar_url = COALESCE(avatar_url, ?),
+                 auth_provider = 'google',
+                 account_status = 'active',
+                 last_seen_at = ?,
+                 updated_at = ?
+             WHERE user_id = ?
+               AND account_status = 'guest'
+               AND auth_provider = 'guest'`
+          )
+          .bind(
+            allocated.username,
+            allocated.usernameKey,
+            claims.name ?? allocated.username,
+            claims.email,
+            claims.emailKey,
+            claims.picture,
+            now,
+            now,
+            candidateGuest.user_id
+          ),
+        db
+          .prepare(
+            `INSERT INTO auth_identities (
+               identity_id, user_id, provider, provider_subject,
+               password_hash, password_salt, password_algo,
+               created_at, updated_at
+             ) VALUES (
+               ?,
+               (
+                 SELECT u.user_id
+                 FROM users u
+                 WHERE u.user_id = ?
+                   AND u.account_status = 'active'
+                   AND u.auth_provider = 'google'
+                   AND u.email_key = ?
+                   AND NOT EXISTS (
+                     SELECT 1 FROM auth_identities ai WHERE ai.user_id = u.user_id
+                   )
+               ),
+               'google', ?, NULL, NULL, NULL, ?, ?
+             )`
+          )
+          .bind(
+            identityId,
+            candidateGuest.user_id,
+            claims.emailKey,
+            claims.sub,
+            now,
+            now
+          ),
+        db
+          .prepare(
+            `INSERT INTO auth_sessions (
+               session_id, user_id, token_hash, ip_hash, user_agent_hash,
+               created_at, last_seen_at, expires_at, revoked_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+          )
+          .bind(
+            sessionId,
+            candidateGuest.user_id,
+            sessionTokenHash,
+            ipHash,
+            uaHash,
+            now,
+            now,
+            sessionExpiresAt
+          ),
+        db
+          .prepare(
+            `UPDATE guest_sessions
+             SET revoked_at = ?
+             WHERE guest_user_id = ? AND revoked_at IS NULL`
+          )
+          .bind(now, candidateGuest.user_id),
+      ]);
+    } catch (err) {
+      if (isConstraintConflictError(err)) {
+        return {
+          ok: false,
+          status: 409,
+          code: 'ACCOUNT_CONFLICT',
+          flowMode: 'login',
+          openerOrigin,
+          message:
+            'امکان تکمیل هم‌زمان ارتقای حساب مهمان وجود ندارد. لطفاً دوباره تلاش کنید.',
+        };
+      }
+      throw err;
+    }
 
     return {
       ok: true,
       status: 200,
       flowMode: 'login',
+      openerOrigin,
       user: {
-        userId: upgradedGuest.user_id,
+        userId: candidateGuest.user_id,
         username: allocated.username,
         displayName: claims.name ?? allocated.username,
         email: claims.email,
         emailVerified: true,
-        avatarCode: upgradedGuest.avatar_code,
-        avatarUrl: upgradedGuest.avatar_url ?? claims.picture,
+        avatarCode: candidateGuest.avatar_code,
+        avatarUrl: candidateGuest.avatar_url ?? claims.picture,
         authProvider: 'google',
         accountStatus: 'active',
-        createdAt: upgradedGuest.created_at,
+        createdAt: candidateGuest.created_at,
         lastSeenAt: now,
       },
       session: {
@@ -1182,60 +1488,75 @@ export async function completeGoogleOAuthCallback(
     claims.name,
   ]);
 
-  await db.batch([
-    db
-      .prepare(
-        `INSERT INTO users (
-           user_id, username, username_key, display_name,
-           email, email_key, email_verified,
-           avatar_code, avatar_url, auth_provider, account_status,
-           created_at, last_seen_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, 1, 'portrait', ?, 'google', 'active', ?, ?, ?)`
-      )
-      .bind(
-        newUserId,
-        allocated.username,
-        allocated.usernameKey,
-        claims.name ?? allocated.username,
-        claims.email,
-        claims.emailKey,
-        claims.picture,
-        now,
-        now,
-        now
-      ),
-    db
-      .prepare(
-        `INSERT INTO auth_identities (
-           identity_id, user_id, provider, provider_subject,
-           password_hash, password_salt, password_algo,
-           created_at, updated_at
-         ) VALUES (?, ?, 'google', ?, NULL, NULL, NULL, ?, ?)`
-      )
-      .bind(identityId, newUserId, claims.sub, now, now),
-    db
-      .prepare(
-        `INSERT INTO auth_sessions (
-           session_id, user_id, token_hash, ip_hash, user_agent_hash,
-           created_at, last_seen_at, expires_at, revoked_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`
-      )
-      .bind(
-        sessionId,
-        newUserId,
-        sessionTokenHash,
-        ipHash,
-        uaHash,
-        now,
-        now,
-        sessionExpiresAt
-      ),
-  ]);
+  try {
+    await db.batch([
+      db
+        .prepare(
+          `INSERT INTO users (
+             user_id, username, username_key, display_name,
+             email, email_key, email_verified,
+             avatar_code, avatar_url, auth_provider, account_status,
+             created_at, last_seen_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, 1, 'portrait', ?, 'google', 'active', ?, ?, ?)`
+        )
+        .bind(
+          newUserId,
+          allocated.username,
+          allocated.usernameKey,
+          claims.name ?? allocated.username,
+          claims.email,
+          claims.emailKey,
+          claims.picture,
+          now,
+          now,
+          now
+        ),
+      db
+        .prepare(
+          `INSERT INTO auth_identities (
+             identity_id, user_id, provider, provider_subject,
+             password_hash, password_salt, password_algo,
+             created_at, updated_at
+           ) VALUES (?, ?, 'google', ?, NULL, NULL, NULL, ?, ?)`
+        )
+        .bind(identityId, newUserId, claims.sub, now, now),
+      db
+        .prepare(
+          `INSERT INTO auth_sessions (
+             session_id, user_id, token_hash, ip_hash, user_agent_hash,
+             created_at, last_seen_at, expires_at, revoked_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+        )
+        .bind(
+          sessionId,
+          newUserId,
+          sessionTokenHash,
+          ipHash,
+          uaHash,
+          now,
+          now,
+          sessionExpiresAt
+        ),
+    ]);
+  } catch (err) {
+    if (isConstraintConflictError(err)) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'ACCOUNT_CONFLICT',
+        flowMode: 'login',
+        openerOrigin,
+        message: 'حساب کاربری با این مشخصات هم‌زمان ثبت شده است. لطفاً دوباره وارد شوید.',
+      };
+    }
+    throw err;
+  }
 
   return {
     ok: true,
     status: 201,
     flowMode: 'login',
+    openerOrigin,
     user: {
       userId: newUserId,
       username: allocated.username,

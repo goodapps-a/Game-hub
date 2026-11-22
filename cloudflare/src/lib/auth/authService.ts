@@ -24,7 +24,6 @@ import {
   PublicAuthUser,
   VerifySessionResult,
 } from './types';
-import { revokeGuestSessionsForUser } from './guestSession';
 import {
   EmailDeliveryResult,
   EmailSender,
@@ -117,7 +116,7 @@ function isAccountActiveAndVerified(
 
 function isUniqueConstraintError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? '');
-  return /UNIQUE constraint failed|SQLITE_CONSTRAINT_UNIQUE|SQLITE_CONSTRAINT/i.test(
+  return /UNIQUE constraint failed|NOT NULL constraint failed|SQLITE_CONSTRAINT_UNIQUE|SQLITE_CONSTRAINT_NOTNULL/i.test(
     msg
   );
 }
@@ -1046,6 +1045,26 @@ export async function upgradeGuestAccountToRegistered(
   const now = ctx.now ?? Date.now();
   const sender = emailSender ?? createEmailSender({ provider: 'disabled' });
 
+  // Enforce the exact same IP rate limit as manual registration so guest sessions cannot bypass it
+  const ipHash = await sha256Hex(`ip:${ctx.clientIp || 'unknown'}`);
+  const regRateKey = `register:ip:${ipHash}`;
+  const rlSlot = await consumeRateLimitSlot(
+    db,
+    regRateKey,
+    REGISTER_IP_RATE_LIMIT,
+    now
+  );
+  if (!rlSlot.allowed) {
+    return {
+      ok: false,
+      status: 429,
+      code: 'RATE_LIMITED',
+      message:
+        'تعداد تلاش‌های ثبت‌نام بیش از حد مجاز است. لطفاً کمی بعد دوباره تلاش کنید.',
+      retryAfterSec: rlSlot.retryAfterSec,
+    };
+  }
+
   const validated = validateRegisterPayload(body);
   if (validated.ok === false) {
     return {
@@ -1110,6 +1129,12 @@ export async function upgradeGuestAccountToRegistered(
   const verifyExpiresAt = now + EMAIL_VERIFICATION_TTL_MS;
   const pwdRecord = await hashPassword(validated.password);
 
+  // Atomic single-transaction upgrade:
+  // 1) Conditional CAS UPDATE users (only while still guest/guest)
+  // 2) INSERT auth_identities guarded by NOT NULL subquery requiring exact upgraded state
+  //    AND zero existing identities (rolls back entire batch on concurrent manual or Google race!)
+  // 3) INSERT email_verification_tokens
+  // 4) Revoke all guest_sessions inside the SAME atomic batch transaction
   try {
     await db.batch([
       db
@@ -1125,7 +1150,9 @@ export async function upgradeGuestAccountToRegistered(
                account_status = 'pending_verification',
                last_seen_at = ?,
                updated_at = ?
-           WHERE user_id = ? AND account_status = 'guest'`
+           WHERE user_id = ?
+             AND account_status = 'guest'
+             AND auth_provider = 'guest'`
         )
         .bind(
           validated.username,
@@ -1143,11 +1170,26 @@ export async function upgradeGuestAccountToRegistered(
              identity_id, user_id, provider, provider_subject,
              password_hash, password_salt, password_algo,
              created_at, updated_at
-           ) VALUES (?, ?, 'password', ?, ?, ?, ?, ?, ?)`
+           ) VALUES (
+             ?,
+             (
+               SELECT u.user_id
+               FROM users u
+               WHERE u.user_id = ?
+                 AND u.account_status = 'pending_verification'
+                 AND u.auth_provider = 'password'
+                 AND u.email_key = ?
+                 AND NOT EXISTS (
+                   SELECT 1 FROM auth_identities ai WHERE ai.user_id = u.user_id
+                 )
+             ),
+             'password', ?, ?, ?, ?, ?, ?
+           )`
         )
         .bind(
           identityId,
           guestUserId,
+          validated.emailKey,
           guestUserId,
           pwdRecord.hash,
           pwdRecord.salt,
@@ -1168,6 +1210,13 @@ export async function upgradeGuestAccountToRegistered(
           now,
           verifyExpiresAt
         ),
+      db
+        .prepare(
+          `UPDATE guest_sessions
+           SET revoked_at = ?
+           WHERE guest_user_id = ? AND revoked_at IS NULL`
+        )
+        .bind(now, guestUserId),
     ]);
   } catch (err) {
     if (isUniqueConstraintError(err)) {
@@ -1181,8 +1230,6 @@ export async function upgradeGuestAccountToRegistered(
     }
     throw err;
   }
-
-  await revokeGuestSessionsForUser(db, guestUserId, now);
 
   let delivery: EmailDeliveryResult;
   if (ctx.isProduction && !ctx.publicAppBaseUrl) {

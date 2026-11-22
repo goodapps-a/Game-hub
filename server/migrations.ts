@@ -154,6 +154,19 @@ function detectLegacyBaselineMigrations(
     detected.push('0009_guest_identity_and_game_invites.sql');
   }
 
+  const has0010 =
+    has0009 &&
+    columnExists(db, 'oauth_states', 'browser_binding_hash') &&
+    columnExists(db, 'oauth_states', 'opener_origin') &&
+    indexExists(db, 'uq_game_invites_pending_pair_room');
+
+  if (
+    has0010 &&
+    availableFiles.includes('0010_hardening_oauth_and_invites.sql')
+  ) {
+    detected.push('0010_hardening_oauth_and_invites.sql');
+  }
+
   return detected;
 }
 
