@@ -42,12 +42,36 @@ export interface EmailSender {
   ): Promise<EmailDeliveryResult>;
 }
 
+export const DEFAULT_EMAIL_REQUEST_TIMEOUT_MS = 8_000;
+const MIN_EMAIL_REQUEST_TIMEOUT_MS = 50;
+const MAX_EMAIL_REQUEST_TIMEOUT_MS = 30_000;
+
 export interface EmailProviderConfig {
   readonly provider?: string;
   readonly resendApiKey?: string;
   readonly emailFrom?: string;
   readonly isProduction?: boolean;
+  readonly timeoutMs?: number;
   readonly fetchImpl?: typeof fetch;
+}
+
+/**
+ * Defensively invokes an email delivery callback so that even an unexpected exception
+ * from a custom/runtime `EmailSender` never crashes an auth route or leaks internal details.
+ */
+export async function deliverEmailSafely(
+  deliver: () => Promise<EmailDeliveryResult>
+): Promise<EmailDeliveryResult> {
+  try {
+    return await deliver();
+  } catch {
+    return {
+      configured: true,
+      sent: false,
+      provider: 'unknown',
+      errorCode: 'PROVIDER_UNEXPECTED_ERROR',
+    };
+  }
 }
 
 export interface ResolvePublicBaseUrlOptions {
@@ -315,6 +339,13 @@ export function createEmailSender(config: EmailProviderConfig): EmailSender {
   const fromAddress = (config.emailFrom ?? '').trim();
   const isProduction = config.isProduction === true;
   const fetchFn = config.fetchImpl ?? fetch;
+  const rawTimeout = config.timeoutMs ?? DEFAULT_EMAIL_REQUEST_TIMEOUT_MS;
+  const timeoutMs = Number.isFinite(rawTimeout)
+    ? Math.max(
+        MIN_EMAIL_REQUEST_TIMEOUT_MS,
+        Math.min(MAX_EMAIL_REQUEST_TIMEOUT_MS, Math.floor(rawTimeout))
+      )
+    : DEFAULT_EMAIL_REQUEST_TIMEOUT_MS;
 
   function evaluateConfiguration():
     | { ok: true }
@@ -367,6 +398,13 @@ export function createEmailSender(config: EmailProviderConfig): EmailSender {
       };
     }
 
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
     try {
       const response = await fetchFn('https://api.resend.com/emails', {
         method: 'POST',
@@ -381,6 +419,7 @@ export function createEmailSender(config: EmailProviderConfig): EmailSender {
           html,
           text,
         }),
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -402,14 +441,23 @@ export function createEmailSender(config: EmailProviderConfig): EmailSender {
         sent: true,
         provider: 'resend',
       };
-    } catch {
-      console.error('[AuthEmail] Resend delivery failed code=PROVIDER_NETWORK_ERROR');
+    } catch (err) {
+      const isAbortOrTimeout =
+        timedOut ||
+        (err instanceof Error &&
+          (err.name === 'AbortError' || err.name === 'TimeoutError'));
+      const errorCode = isAbortOrTimeout
+        ? 'PROVIDER_TIMEOUT'
+        : 'PROVIDER_NETWORK_ERROR';
+      console.error(`[AuthEmail] Resend delivery failed code=${errorCode}`);
       return {
         configured: true,
         sent: false,
         provider: 'resend',
-        errorCode: 'PROVIDER_NETWORK_ERROR',
+        errorCode,
       };
+    } finally {
+      clearTimeout(timer);
     }
   }
 

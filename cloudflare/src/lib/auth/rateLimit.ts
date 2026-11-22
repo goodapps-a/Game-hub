@@ -86,6 +86,20 @@ export const VERIFY_EMAIL_IP_RATE_LIMIT: RateLimitPolicy = {
   blockMs: 15 * 60 * 1000,
 };
 
+export const USERNAME_CHECK_IP_RATE_LIMIT: RateLimitPolicy = {
+  action: 'username_check_ip',
+  maxAttempts: 45,
+  windowMs: 15 * 60 * 1000,
+  blockMs: 5 * 60 * 1000,
+};
+
+export const PROFILE_UPDATE_USER_RATE_LIMIT: RateLimitPolicy = {
+  action: 'profile_update_user',
+  maxAttempts: 20,
+  windowMs: 15 * 60 * 1000,
+  blockMs: 15 * 60 * 1000,
+};
+
 const MAX_ACTIVE_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 export const DEFAULT_RATE_LIMIT_RETENTION_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -238,8 +252,30 @@ export async function clearRateLimit(
     .run();
 }
 
+export const DEFAULT_RATE_LIMIT_PRUNE_BATCH_SIZE = 500;
+export const MAX_RATE_LIMIT_PRUNE_BATCH_SIZE = 5000;
+export const DEFAULT_RATE_LIMIT_PRUNE_MAX_BATCHES = 5;
+export const MAX_RATE_LIMIT_PRUNE_MAX_BATCHES = 20;
+
+export interface RateLimitPruneBatchOptions {
+  readonly now?: number;
+  readonly retentionMs?: number;
+  readonly batchSize?: number;
+  readonly maxBatches?: number;
+}
+
+export interface RateLimitPruneBatchResult {
+  readonly deleted: number;
+  readonly batchesRun: number;
+  readonly reachedBatchCap: boolean;
+}
+
 /**
- * Safely prunes expired, unblocked rate-limit rows to prevent unbounded table growth.
+ * Safely prunes up to `batchLimit` expired, unblocked rate-limit rows in a single
+ * bounded query to prevent unbounded table growth and heavy D1 locks.
+ *
+ * Uses standard SQLite/D1 subquery `WHERE rate_key IN (SELECT ... ORDER BY updated_at ASC LIMIT ?)`
+ * backed by `idx_auth_rate_limits_updated_at` (works without `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`).
  *
  * Safety invariant:
  * - Enforces a minimum retention floor >= `MAX_ACTIVE_RATE_LIMIT_WINDOW_MS` (15m) so active
@@ -250,18 +286,78 @@ export async function clearRateLimit(
 export async function pruneExpiredRateLimits(
   db: D1DatabaseLike,
   now = Date.now(),
-  retentionMs = DEFAULT_RATE_LIMIT_RETENTION_MS
+  retentionMs = DEFAULT_RATE_LIMIT_RETENTION_MS,
+  batchLimit = DEFAULT_RATE_LIMIT_PRUNE_BATCH_SIZE
 ): Promise<number> {
   const safeRetentionMs = Math.max(retentionMs, MAX_ACTIVE_RATE_LIMIT_WINDOW_MS);
+  const safeBatchLimit = Math.max(
+    1,
+    Math.min(MAX_RATE_LIMIT_PRUNE_BATCH_SIZE, Math.floor(batchLimit))
+  );
   const cutoff = now - safeRetentionMs;
   const res = await db
     .prepare(
       `DELETE FROM auth_rate_limits
-       WHERE updated_at < ?
-         AND window_started_at < ?
-         AND (blocked_until IS NULL OR blocked_until <= ?)`
+       WHERE rate_key IN (
+         SELECT rate_key
+         FROM auth_rate_limits
+         WHERE updated_at < ?
+           AND window_started_at < ?
+           AND (blocked_until IS NULL OR blocked_until <= ?)
+         ORDER BY updated_at ASC
+         LIMIT ?
+       )`
     )
-    .bind(cutoff, cutoff, now)
+    .bind(cutoff, cutoff, now, safeBatchLimit)
     .run();
   return Number(res.meta?.changes ?? 0);
+}
+
+/**
+ * Runs up to `maxBatches` bounded delete chunks (default: up to 5 x 500 = 2,500 rows per scheduled tick)
+ * and stops immediately once a batch deletes fewer than `batchSize` rows.
+ * Designed for Cloudflare Workers Cron Triggers (`scheduled`) and periodic server maintenance.
+ */
+export async function pruneExpiredRateLimitsBatched(
+  db: D1DatabaseLike,
+  options?: RateLimitPruneBatchOptions
+): Promise<RateLimitPruneBatchResult> {
+  const now = options?.now ?? Date.now();
+  const retentionMs = options?.retentionMs ?? DEFAULT_RATE_LIMIT_RETENTION_MS;
+  const batchSize = Math.max(
+    1,
+    Math.min(
+      MAX_RATE_LIMIT_PRUNE_BATCH_SIZE,
+      Math.floor(options?.batchSize ?? DEFAULT_RATE_LIMIT_PRUNE_BATCH_SIZE)
+    )
+  );
+  const maxBatches = Math.max(
+    1,
+    Math.min(
+      MAX_RATE_LIMIT_PRUNE_MAX_BATCHES,
+      Math.floor(options?.maxBatches ?? DEFAULT_RATE_LIMIT_PRUNE_MAX_BATCHES)
+    )
+  );
+
+  let totalDeleted = 0;
+  let batchesRun = 0;
+  let reachedBatchCap = false;
+
+  for (let i = 0; i < maxBatches; i += 1) {
+    const deleted = await pruneExpiredRateLimits(db, now, retentionMs, batchSize);
+    batchesRun += 1;
+    totalDeleted += deleted;
+    if (deleted < batchSize) {
+      break;
+    }
+    if (i === maxBatches - 1) {
+      reachedBatchCap = true;
+    }
+  }
+
+  return {
+    deleted: totalDeleted,
+    batchesRun,
+    reachedBatchCap,
+  };
 }

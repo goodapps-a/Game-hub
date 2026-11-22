@@ -25,10 +25,12 @@ import {
   parseAuthCookieFromHeader,
 } from './authCookie';
 import {
+  checkUsernameAvailability,
   loginWithCredentials,
   registerManualAccount,
   revokeAllAuthSessionsForUser,
   revokeAuthSessionByToken,
+  updateAuthenticatedProfile,
   verifyAuthSession,
 } from './authService';
 import {
@@ -768,6 +770,146 @@ export async function handleAuthHttpRequest(
           ok: false,
           code: 'DATABASE_ERROR',
           message: 'خطای داخلی در تغییر رمز عبور رخ داد.',
+        },
+        500,
+        env.corsHeaders
+      );
+    }
+  }
+
+  // 10) GET /api/auth/username-availability — Server DB uniqueness check for username editing
+  if (pathname === '/api/auth/username-availability' && method === 'GET') {
+    try {
+      const reqUrl = new URL(request.url);
+      const rawUsername = reqUrl.searchParams.get('username') ?? '';
+      const rawToken = parseAuthCookieFromHeader(request.headers.get('Cookie'));
+      const verified = rawToken
+        ? await verifyAuthSession(env.db, rawToken, now)
+        : null;
+      const currentUserId =
+        verified && verified.authenticated && verified.user
+          ? verified.user.userId
+          : null;
+
+      const result = await checkUsernameAvailability(
+        env.db,
+        rawUsername,
+        currentUserId,
+        {
+          clientIp: env.clientIp,
+          userAgent: env.userAgent,
+          now,
+        }
+      );
+
+      if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: result.code,
+            message: result.message,
+          },
+          result.status,
+          env.corsHeaders,
+          extra
+        );
+      }
+
+      return buildAuthResponse(
+        {
+          ok: true,
+          valid: result.valid,
+          available: result.available,
+          reason: result.reason,
+          message: result.message,
+        },
+        result.status,
+        env.corsHeaders
+      );
+    } catch (err) {
+      console.error(
+        '[Auth] /api/auth/username-availability error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      return buildAuthResponse(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'خطا در بررسی نام کاربری روی سرور.',
+        },
+        503,
+        env.corsHeaders
+      );
+    }
+  }
+
+  // 11) POST /api/auth/profile — Persist username/avatar changes for authenticated central user
+  if (pathname === '/api/auth/profile' && method === 'POST') {
+    const csrfErr = verifyMutatingCsrf(request, env, true);
+    if (csrfErr) return csrfErr;
+
+    const parsedBody = await parseJsonObjectBody(request, env.corsHeaders);
+    if (parsedBody.ok === false) return parsedBody.response;
+
+    try {
+      const rawToken = parseAuthCookieFromHeader(request.headers.get('Cookie'));
+      const result = await updateAuthenticatedProfile(
+        env.db,
+        rawToken,
+        parsedBody.data,
+        {
+          clientIp: env.clientIp,
+          userAgent: env.userAgent,
+          now,
+        }
+      );
+
+      if (result.ok === false) {
+        const extra: Record<string, string> = {};
+        if (result.retryAfterSec !== undefined) {
+          extra['Retry-After'] = String(result.retryAfterSec);
+        }
+        if (result.shouldClearCookie) {
+          extra['Set-Cookie'] = buildClearAuthCookieHeader(
+            env.secureCookie,
+            env.cookieOptions
+          );
+        }
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: result.code,
+            message: result.message,
+          },
+          result.status,
+          env.corsHeaders,
+          Object.keys(extra).length > 0 ? extra : undefined
+        );
+      }
+
+      return buildAuthResponse(
+        {
+          ok: true,
+          user: result.user,
+          message: result.message,
+        },
+        result.status,
+        env.corsHeaders
+      );
+    } catch (err) {
+      console.error(
+        '[Auth] /api/auth/profile error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      return buildAuthResponse(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'خطای داخلی در ذخیره تغییرات پروفایل رخ داد.',
         },
         500,
         env.corsHeaders

@@ -16,7 +16,11 @@ import {
   sanitizeRoomCode,
   sanitizeUsername,
 } from '../../src/games/hokm/online/protocol';
-import { CfWorkerEnv } from './lib/types';
+import {
+  CfWorkerEnv,
+  ExecutionContextLike,
+  ScheduledControllerLike,
+} from './lib/types';
 import { HokmRoomDO, INTERNAL_SESSION_TOKEN_HEADER } from './HokmRoomDO';
 import {
   fetchPlayerStatsFromD1,
@@ -36,6 +40,7 @@ import {
   createEmailSender,
   resolvePublicAppBaseUrl,
 } from './lib/auth/emailService';
+import { pruneExpiredRateLimitsBatched } from './lib/auth/rateLimit';
 import {
   evaluateOriginPolicy,
   resolveClientIp,
@@ -619,5 +624,38 @@ export default {
     }
 
     return new Response('Not Found', { status: 404, headers: cors });
+  },
+
+  /**
+   * Cloudflare Cron Trigger handler (`[triggers] crons = ["0 *\/6 * * *"]`).
+   * Periodically prunes expired, unblocked `auth_rate_limits` rows in bounded batches
+   * without adding any cleanup overhead to user-facing HTTP requests.
+   */
+  async scheduled(
+    controller: ScheduledControllerLike,
+    env: CfWorkerEnv,
+    ctx?: ExecutionContextLike
+  ): Promise<void> {
+    const task = (async () => {
+      try {
+        const now =
+          typeof controller?.scheduledTime === 'number' &&
+          Number.isFinite(controller.scheduledTime) &&
+          controller.scheduledTime > 0
+            ? controller.scheduledTime
+            : Date.now();
+        await pruneExpiredRateLimitsBatched(env.EYVAN_DB, { now });
+      } catch (err) {
+        console.error(
+          '[Worker] Scheduled rate-limit cleanup failed:',
+          err instanceof Error ? err.message : 'unknown'
+        );
+      }
+    })();
+
+    if (ctx && typeof ctx.waitUntil === 'function') {
+      ctx.waitUntil(task);
+    }
+    await task;
   },
 };

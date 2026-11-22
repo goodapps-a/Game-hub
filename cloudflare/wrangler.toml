@@ -42,3 +42,7 @@ migrations_dir = "migrations"
 [[r2_buckets]]
 binding = "EYVAN_ASSETS"
 bucket_name = "eyvan-assets"
+
+# Periodic low-cost cleanup for expired, unblocked `auth_rate_limits` rows (runs every 6 hours, bounded batches)
+[triggers]
+crons = ["0 */6 * * *"]

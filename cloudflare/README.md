@@ -7,7 +7,8 @@
   - **Official WebSocket Hibernation API**: Verifies the `HttpOnly` session cookie at WebSocket upgrade before accepting connections, then uses `ctx.acceptWebSocket`, `ws.serializeAttachment` / `ws.deserializeAttachment`, `ctx.getWebSockets()`, and `webSocketMessage` / `webSocketClose` / `webSocketError` handlers with per-connection `connectionId` race protection.
   - **Safe Peek-Execute-Ack Alarm Scheduler (`src/lib/alarmScheduler.ts`)**: Never deletes a task before successful execution; failed tasks retry with bounded exponential backoff.
   - **Lossless D1 Match Persistence Queue**: Keeps completed matches in a durable FIFO queue (`pendingMatchPersistences`) that survives rematches, DO restarts, room closures, and prolonged D1 outages with capped exponential retry.
-- **Cloudflare D1 (`migrations/0001_init.sql`, `0002_indexes.sql`, `0003_username_canonical_key.sql`)**: Persists completed matches, participants, and aggregate stats strictly ONCE using canonical lowercase username keys with preserved `display_username`.
+- **Cloudflare D1 (`migrations/0001_init.sql` .. `0004_accounts_auth.sql`)**: Persists completed matches, participants, aggregate stats, central accounts, sessions, C2 verification/reset tokens, and atomic rate limits (`auth_rate_limits`).
+- **Cloudflare Cron Trigger (`0 */6 * * *`)**: Invokes `scheduled()` in `src/index.ts` every 6 hours to prune expired, unblocked `auth_rate_limits` rows in bounded batches (zero per-request latency impact).
 - **Cloudflare R2 (`EYVAN_ASSETS`)**: Serves card artwork, avatars, and studio MP3 audio files with immutable edge caching.
 
 ## Manual Production Configuration Checklist
@@ -17,17 +18,28 @@
    wrangler r2 bucket create eyvan-assets
    ```
 2. Paste the real `database_id` returned by Wrangler into `cloudflare/wrangler.toml` (replacing `REPLACE_WITH_YOUR_D1_DATABASE_ID`).
-3. Apply all three D1 migrations:
+3. Apply all D1 migrations (`0001` through `0004`):
    ```bash
    wrangler d1 migrations apply eyvan-hokm-db --remote
    ```
-4. Set `ALLOWED_ORIGINS` in `cloudflare/wrangler.toml` to your exact frontend domain(s), e.g. `"https://play.yourdomain.com"` (never `*`). Keep local dev separate from production (e.g. via `[env.production]` or Cloudflare Dashboard Environment Variables).
-5. Bind a **Custom Domain** (TLS 443) to the Worker on the **same root site** as your frontend (e.g. `https://api.yourdomain.com` alongside `https://play.yourdomain.com`, or Worker routes `yourdomain.com/api/*` and `yourdomain.com/ws/*`). Because BOTH `/api/session/resume` AND WebSocket (`/ws/rooms/:code`) rely on the `HttpOnly` cookie, same-site hosting guarantees browsers (including Safari/iOS) attach the cookie reliably on both `fetch` and `WebSocket` upgrades, and avoids `*.workers.dev` disruptions for Iranian users.
-6. Deploy the Worker & Durable Object:
+4. Configure Production environment variables in `cloudflare/wrangler.toml` (or Cloudflare Dashboard -> Worker -> Settings -> Variables and Secrets):
+   - `ENVIRONMENT = "production"`
+   - `ALLOWED_ORIGINS = "https://play.yourdomain.com"` (exact HTTPS origin(s), never `*` or `*.run.app`)
+   - `PUBLIC_APP_URL = "https://play.yourdomain.com"` (exact HTTPS frontend origin used in verification & password reset links)
+   - `EMAIL_PROVIDER = "resend"`
+   - `EMAIL_FROM = "Eyvan <no-reply@yourdomain.com>"` (must be on a Resend-verified domain with valid SPF/DKIM DNS records)
+   - Optional: `COOKIE_DOMAIN = ".yourdomain.com"` if frontend & API use sibling subdomains
+5. Add the Resend API key as a Cloudflare Worker **Secret** (never commit in `wrangler.toml`):
+   ```bash
+   wrangler secret put RESEND_API_KEY
+   ```
+6. Bind a **Custom Domain** (TLS 443) to the Worker on the **same root site** as your frontend (e.g. `https://api.yourdomain.com` alongside `https://play.yourdomain.com`, or Worker routes `yourdomain.com/api/*` and `yourdomain.com/ws/*`). Because `/api/auth/*`, `/api/session/resume`, and WebSocket (`/ws/rooms/:code`) rely on `HttpOnly` cookies, same-site hosting guarantees browsers (including Safari/iOS) attach cookies reliably and avoids `*.workers.dev` disruptions.
+7. Deploy the Worker, Durable Object, and Cron Trigger (`0 */6 * * *`):
    ```bash
    wrangler deploy
    ```
-7. Set `VITE_ONLINE_API_BASE=https://api.yourdomain.com` (or leave empty if mounted on the exact same origin via Worker routes) in your Cloudflare Pages build environment.
+   After deploy, verify in **Cloudflare Dashboard -> Workers & Pages -> eyvan-hokm-online -> Triggers -> Cron Triggers** that `0 */6 * * *` is active.
+8. Set `VITE_ONLINE_API_BASE=https://api.yourdomain.com` (or leave empty if mounted on the exact same origin via Worker routes) in your Cloudflare Pages build environment.
 
 ## Operational Field-Testing Checklist (Iran ISPs: همراه اول، ایرانسل، مخابرات)
 Real-network testing from Iranian ISPs must be executed after deploying to your Custom Domain:

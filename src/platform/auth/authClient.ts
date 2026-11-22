@@ -282,3 +282,51 @@ export async function resetPasswordRequest(input: {
     'خطا در ارتباط با سرور هنگام تغییر رمز عبور.'
   );
 }
+
+export interface UsernameAvailabilityResponse {
+  readonly ok: boolean;
+  readonly valid?: boolean;
+  readonly available?: boolean;
+  readonly reason?: 'invalid' | 'available' | 'current_user' | 'taken';
+  readonly code?: string;
+  readonly message: string;
+}
+
+export async function checkUsernameAvailabilityRequest(
+  username: string,
+  signal?: AbortSignal
+): Promise<UsernameAvailabilityResponse> {
+  const url = buildOnlineHttpUrl(
+    `/api/auth/username-availability?username=${encodeURIComponent(username)}`
+  );
+  const res = await fetch(url, {
+    method: 'GET',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+  return parseAuthJson<UsernameAvailabilityResponse>(
+    res,
+    'خطا در بررسی نام کاربری روی سرور.'
+  );
+}
+
+export async function updateAccountProfileRequest(input: {
+  username: string;
+  avatarCode: string;
+}): Promise<AuthMutationResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/auth/profile'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'eyvan-client',
+    },
+    body: JSON.stringify(input),
+  });
+  return parseAuthJson<AuthMutationResponse>(
+    res,
+    'خطا در ذخیره تغییرات پروفایل روی سرور.'
+  );
+}
+

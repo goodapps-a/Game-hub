@@ -270,3 +270,51 @@ export function validateResetPasswordPayload(
   };
 }
 
+export const ALLOWED_AVATAR_CODES = [
+  'portrait',
+  'shamsa',
+  'turquoise',
+  'lapis',
+  'jade',
+] as const;
+
+export type ValidAvatarCode = (typeof ALLOWED_AVATAR_CODES)[number];
+
+const AVATAR_CODE_SET = new Set<string>(ALLOWED_AVATAR_CODES);
+
+export function validateAvatarCode(
+  raw: unknown
+): { ok: true; avatarCode: ValidAvatarCode } | ValidationFailure {
+  if (typeof raw !== 'string') {
+    return { ok: false, message: 'نشان پروفایل نامعتبر است.' };
+  }
+  const cleaned = raw.trim();
+  if (!AVATAR_CODE_SET.has(cleaned)) {
+    return { ok: false, message: 'نشان پروفایل انتخاب‌شده معتبر نیست.' };
+  }
+  return { ok: true, avatarCode: cleaned as ValidAvatarCode };
+}
+
+export interface ValidatedProfileUpdatePayload {
+  readonly ok: true;
+  readonly username: string;
+  readonly usernameKey: string;
+  readonly avatarCode: ValidAvatarCode;
+}
+
+export function validateProfileUpdatePayload(
+  body: Record<string, unknown>
+): ValidatedProfileUpdatePayload | ValidationFailure {
+  const userRes = validateAuthUsername(body.username);
+  if (userRes.ok === false) return userRes;
+
+  const avatarRes = validateAvatarCode(body.avatarCode ?? 'portrait');
+  if (avatarRes.ok === false) return avatarRes;
+
+  return {
+    ok: true,
+    username: userRes.username,
+    usernameKey: userRes.usernameKey,
+    avatarCode: avatarRes.avatarCode,
+  };
+}

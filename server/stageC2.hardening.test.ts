@@ -29,7 +29,13 @@ import {
   resetPasswordWithToken,
   verifyEmailWithToken,
 } from '../cloudflare/src/lib/auth/c2Service';
-import { sha256Hex } from '../cloudflare/src/lib/auth/crypto';
+import {
+  CURRENT_PASSWORD_ALGO,
+  constantTimeBytesEqual,
+  hashPassword,
+  sha256Hex,
+  verifyPassword,
+} from '../cloudflare/src/lib/auth/crypto';
 import {
   EmailSender,
   createEmailSender,
@@ -39,6 +45,7 @@ import {
   LOGIN_ID_RATE_LIMIT,
   consumeRateLimitSlot,
   pruneExpiredRateLimits,
+  pruneExpiredRateLimitsBatched,
 } from '../cloudflare/src/lib/auth/rateLimit';
 import {
   parseTrustedProxyIps,
@@ -937,6 +944,515 @@ describe('Stage C1 & C2 Final Hardening — Atomicity, Email Delivery, Rate Limi
       await new Promise<void>((resolve) => server.close(() => resolve()));
       db.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('8. Bounded rate-limit pruning (LIMIT + maxBatches) and Cloudflare Worker scheduled() Cron Trigger execution', async () => {
+    const h = createTempDbHarness();
+    try {
+      const now = 1_750_000_500_000;
+      const twoDaysAgo = now - 48 * 60 * 60 * 1000;
+      const fiveMinutesAgo = now - 5 * 60 * 1000;
+
+      // Insert 12 expired unblocked rows + 1 active window + 1 active future block
+      const insertStmt = h.rawDb.prepare(
+        `INSERT INTO auth_rate_limits (rate_key, action, attempts, window_started_at, blocked_until, updated_at)
+         VALUES (?, 'login_ip', ?, ?, ?, ?)`
+      );
+      for (let i = 0; i < 12; i += 1) {
+        insertStmt.run(`expired:row:${i}`, 2, twoDaysAgo + i * 1000, null, twoDaysAgo + i * 1000);
+      }
+      insertStmt.run('protected:active:window', 2, fiveMinutesAgo, null, fiveMinutesAgo);
+      insertStmt.run('protected:active:block', 6, twoDaysAgo, now + 120_000, twoDaysAgo);
+
+      // Single bounded prune with batchLimit=4 deletes strictly 4 oldest rows
+      const firstBatchDeleted = await pruneExpiredRateLimits(h.faultDb, now, 24 * 60 * 60 * 1000, 4);
+      assert.equal(firstBatchDeleted, 4);
+
+      // Batched prune with batchSize=3, maxBatches=2 deletes strictly 6 more (leaving 2 expired + 2 protected)
+      const batchedRes = await pruneExpiredRateLimitsBatched(h.faultDb, {
+        now,
+        retentionMs: 24 * 60 * 60 * 1000,
+        batchSize: 3,
+        maxBatches: 2,
+      });
+      assert.equal(batchedRes.deleted, 6);
+      assert.equal(batchedRes.batchesRun, 2);
+      assert.equal(batchedRes.reachedBatchCap, true);
+
+      // Worker scheduled() handler runs bounded cleanup end-to-end and clears the final 2 expired rows
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const workerEnv: CfWorkerEnv = {
+        EYVAN_DB: h.eyvanDb.getD1Adapter(),
+        EYVAN_ASSETS: { get: async () => null },
+        ENVIRONMENT: 'production',
+        HOKM_ROOM: {
+          idFromName: (n) => n,
+          get: () => ({ fetch: async () => new Response('{}') }),
+        },
+      };
+
+      assert.equal(typeof worker.scheduled, 'function');
+      await worker.scheduled(
+        { scheduledTime: now, cron: '0 */6 * * *' },
+        workerEnv,
+        {
+          waitUntil(p: Promise<unknown>) {
+            waitUntilPromises.push(p);
+          },
+        }
+      );
+      await Promise.all(waitUntilPromises);
+
+      const remaining = (
+        h.rawDb.prepare(`SELECT rate_key FROM auth_rate_limits ORDER BY rate_key ASC`).all() as Array<{
+          rate_key: string;
+        }>
+      ).map((r) => r.rate_key);
+      assert.deepEqual(remaining, ['protected:active:block', 'protected:active:window']);
+
+      // Verify scheduled() handles DB failures gracefully without throwing unhandled errors
+      const origError = console.error;
+      const cronErrors: string[] = [];
+      console.error = (...args: unknown[]) => cronErrors.push(args.map(String).join(' '));
+      try {
+        const brokenEnv: CfWorkerEnv = {
+          ...workerEnv,
+          EYVAN_DB: {
+            prepare() {
+              throw new Error('D1_TEMP_UNAVAILABLE');
+            },
+            async batch() {
+              throw new Error('D1_TEMP_UNAVAILABLE');
+            },
+          },
+        };
+        await worker.scheduled({ scheduledTime: now, cron: '0 */6 * * *' }, brokenEnv);
+        assert.ok(cronErrors.some((line) => line.includes('Scheduled rate-limit cleanup failed')));
+      } finally {
+        console.error = origError;
+      }
+
+      // Verify wrangler.toml declares the [triggers] cron schedule
+      const wranglerRaw = fs.readFileSync(
+        path.resolve(process.cwd(), 'cloudflare/wrangler.toml'),
+        'utf8'
+      );
+      assert.match(wranglerRaw, /\[triggers\]/);
+      assert.match(wranglerRaw, /crons\s*=\s*\[\s*"0 \*\/6 \* \* \*"\s*\]/);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it('9. Resend Timeout (AbortController) & unexpected EmailSender throw: predictable failure, account stays unverified, zero leaks', async () => {
+    const h = createTempDbHarness();
+    const secretApiKey = 're_live_TIMEOUT_SECRET_KEY_554433';
+    const sensitiveEmail = 'timeout.user@eyvan-audit.test';
+    const capturedLogs: string[] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => capturedLogs.push(args.map(String).join(' '));
+
+    try {
+      const now = 1_750_000_600_000;
+      let sawAbortSignal = false;
+
+      // Simulate a hung Resend API that only terminates when AbortSignal fires
+      const slowTimeoutSender = createEmailSender({
+        provider: 'resend',
+        resendApiKey: secretApiKey,
+        emailFrom: 'Eyvan <no-reply@eyvan.test>',
+        isProduction: true,
+        timeoutMs: 60,
+        fetchImpl: (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            const sig = init?.signal;
+            if (sig) {
+              sig.addEventListener('abort', () => {
+                sawAbortSignal = true;
+                const abortErr = new Error('The operation was aborted');
+                abortErr.name = 'AbortError';
+                reject(abortErr);
+              });
+            }
+          }),
+      });
+
+      // 9a) Registration during Resend timeout -> 201 pending_verification, sent=false, account NOT activated
+      const reg = await registerManualAccount(
+        h.faultDb,
+        {
+          email: sensitiveEmail,
+          username: 'TimeoutUser1',
+          password: 'ValidPassword123',
+          confirmPassword: 'ValidPassword123',
+        },
+        {
+          clientIp: '198.51.100.140',
+          userAgent: 'Test',
+          now,
+          isProduction: true,
+          publicAppBaseUrl: 'https://eyvan.test',
+        },
+        slowTimeoutSender
+      );
+      assert.equal(sawAbortSignal, true, 'Resend fetch must receive and obey AbortController signal');
+      assert.equal(reg.ok, true);
+      if (!reg.ok) return;
+      assert.equal(reg.user.emailVerified, false);
+      assert.equal(reg.user.accountStatus, 'pending_verification');
+      assert.equal(reg.emailDelivery.configured, true);
+      assert.equal(reg.emailDelivery.sent, false);
+      assert.equal(reg.internalDelivery?.errorCode, 'PROVIDER_TIMEOUT');
+
+      // Login MUST still be blocked (403 EMAIL_NOT_VERIFIED) — timeout NEVER activates account!
+      const blockedLogin = await loginWithCredentials(
+        h.faultDb,
+        { identifier: sensitiveEmail, password: 'ValidPassword123' },
+        { clientIp: '198.51.100.141', userAgent: 'Test', now: now + 100 }
+      );
+      assert.equal(blockedLogin.ok, false);
+      if (!blockedLogin.ok) {
+        assert.equal(blockedLogin.status, 403);
+        assert.equal(blockedLogin.code, 'EMAIL_NOT_VERIFIED');
+      }
+
+      // 9b) Unexpected synchronous/async throw from EmailSender -> graceful degradation via deliverEmailSafely
+      const throwingSender: EmailSender = {
+        async sendVerificationEmail() {
+          throw new Error(`CRASH_INTERNAL_SECRET_${secretApiKey}_${sensitiveEmail}`);
+        },
+        async sendPasswordResetEmail() {
+          throw new Error(`CRASH_INTERNAL_SECRET_${secretApiKey}_${sensitiveEmail}`);
+        },
+      };
+
+      const workerEnv: CfWorkerEnv = {
+        EYVAN_DB: h.eyvanDb.getD1Adapter(),
+        EYVAN_ASSETS: { get: async () => null },
+        ALLOWED_ORIGINS: 'https://eyvan.test',
+        PUBLIC_APP_URL: 'https://eyvan.test',
+        ENVIRONMENT: 'production',
+        EMAIL_SENDER: throwingSender,
+        HOKM_ROOM: {
+          idFromName: (n) => n,
+          get: () => ({ fetch: async () => new Response('{}') }),
+        },
+      };
+
+      const resendHttp = await worker.fetch(
+        new Request('https://api.eyvan.test/api/auth/resend-verification', {
+          method: 'POST',
+          headers: {
+            Origin: 'https://eyvan.test',
+            'X-Requested-With': 'eyvan-client',
+            'Content-Type': 'application/json',
+            'CF-Connecting-IP': '198.51.100.142',
+          },
+          body: JSON.stringify({ email: sensitiveEmail }),
+        }),
+        workerEnv
+      );
+      assert.equal(resendHttp.status, 200);
+      const resendBodyText = await resendHttp.text();
+      assert.equal(resendBodyText.includes('CRASH_INTERNAL_SECRET'), false);
+      assert.equal(resendBodyText.includes('PROVIDER_'), false);
+      assert.equal(resendBodyText.includes(secretApiKey), false);
+      assert.equal(resendBodyText.includes('#verify-email='), false);
+
+      const forgotHttp = await worker.fetch(
+        new Request('https://api.eyvan.test/api/auth/forgot-password', {
+          method: 'POST',
+          headers: {
+            Origin: 'https://eyvan.test',
+            'X-Requested-With': 'eyvan-client',
+            'Content-Type': 'application/json',
+            'CF-Connecting-IP': '198.51.100.143',
+          },
+          body: JSON.stringify({ email: sensitiveEmail }),
+        }),
+        workerEnv
+      );
+      assert.equal(forgotHttp.status, 200);
+      const forgotBodyText = await forgotHttp.text();
+      assert.equal(forgotBodyText.includes('CRASH_INTERNAL_SECRET'), false);
+      assert.equal(forgotBodyText.includes('PROVIDER_'), false);
+      assert.equal(forgotBodyText.includes('#reset-password='), false);
+
+      // Verify zero PII, API keys, or tokens entered console.error logs
+      const logs = capturedLogs.join('\n');
+      assert.ok(logs.includes('code=PROVIDER_TIMEOUT'));
+      assert.ok(logs.includes('code=PROVIDER_UNEXPECTED_ERROR'));
+      assert.equal(logs.includes(secretApiKey), false);
+      assert.equal(logs.includes(sensitiveEmail), false);
+      assert.equal(logs.includes('CRASH_INTERNAL_SECRET'), false);
+    } finally {
+      console.error = origError;
+      h.cleanup();
+    }
+  });
+
+  it('10. Repeated sequential & concurrent email requests for one user: atomic rate limit (3 ok, rest 429) & strictly 1 latest token active', async () => {
+    const h = createTempDbHarness();
+    const origError = console.error;
+    console.error = () => {};
+    try {
+      const now = 1_750_000_700_000;
+      const reg = await registerManualAccount(
+        h.faultDb,
+        {
+          email: 'burst_email@example.com',
+          username: 'BurstEmail1',
+          password: 'ValidPassword123',
+          confirmPassword: 'ValidPassword123',
+        },
+        {
+          clientIp: '198.51.100.150',
+          userAgent: 'Test',
+          now,
+          isProduction: true,
+          publicAppBaseUrl: 'https://eyvan.test',
+        },
+        h.mockSender
+      );
+      assert.equal(reg.ok, true);
+      if (!reg.ok) return;
+
+      // 10a) 6 CONCURRENT resend-verification requests for the SAME user (even with provider HTTP 503 failure!)
+      const failingResend = createEmailSender({
+        provider: 'resend',
+        resendApiKey: 're_test_concurrent_key',
+        emailFrom: 'Eyvan <no-reply@eyvan.test>',
+        isProduction: true,
+        fetchImpl: async () => new Response('down', { status: 503 }),
+      });
+
+      const concurrentResend = await Promise.all(
+        Array.from({ length: 6 }, (_, i) =>
+          resendVerificationEmail(
+            h.faultDb,
+            { email: 'burst_email@example.com' },
+            {
+              clientIp: `198.51.100.${160 + i}`,
+              userAgent: 'Test',
+              now: now + 500,
+              isProduction: true,
+              publicAppBaseUrl: 'https://eyvan.test',
+            },
+            failingResend
+          )
+        )
+      );
+
+      assert.equal(
+        concurrentResend.filter((r) => r.ok).length,
+        3,
+        'Strictly 3 concurrent resend requests per email must pass'
+      );
+      assert.equal(
+        concurrentResend.filter((r) => !r.ok && r.status === 429).length,
+        3,
+        'Remaining 3 concurrent resend requests must hit 429 rate limit'
+      );
+
+      // Account MUST still be unverified, and strictly ONE unconsumed verification token exists in DB
+      const userRow = h.rawDb
+        .prepare(`SELECT email_verified, account_status FROM users WHERE user_id = ?`)
+        .get(reg.user.userId) as { email_verified: number; account_status: string };
+      assert.equal(userRow.email_verified, 0);
+      assert.equal(userRow.account_status, 'pending_verification');
+
+      const activeVerifyTokens = h.rawDb
+        .prepare(
+          `SELECT COUNT(*) AS c FROM email_verification_tokens WHERE user_id = ? AND consumed_at IS NULL`
+        )
+        .get(reg.user.userId) as { c: number };
+      assert.equal(
+        activeVerifyTokens.c,
+        1,
+        'Previous tokens must be invalidated so strictly 1 latest token remains unconsumed'
+      );
+
+      // 10b) Repeated sequential forgot-password requests: 3 succeed, older tokens invalidated, 4th gets 429
+      const forgotSeq = [];
+      for (let i = 0; i < 4; i += 1) {
+        forgotSeq.push(
+          await requestPasswordReset(
+            h.faultDb,
+            { email: 'burst_email@example.com' },
+            {
+              clientIp: `198.51.100.${170 + i}`,
+              userAgent: 'Test',
+              now: now + 2000 + i * 100,
+              isProduction: true,
+              publicAppBaseUrl: 'https://eyvan.test',
+            },
+            h.mockSender
+          )
+        );
+      }
+      assert.equal(forgotSeq[0].ok, true);
+      assert.equal(forgotSeq[1].ok, true);
+      assert.equal(forgotSeq[2].ok, true);
+      assert.equal(forgotSeq[3].ok, false);
+      if (!forgotSeq[3].ok) {
+        assert.equal(forgotSeq[3].status, 429);
+      }
+
+      // Only the 3rd reset token works; the 1st and 2nd are invalidated
+      const resetTokens = h.capturedTokens.filter((t) => t.kind === 'reset').map((t) => t.token);
+      assert.equal(resetTokens.length, 3);
+
+      const activeResetTokens = h.rawDb
+        .prepare(
+          `SELECT COUNT(*) AS c FROM password_reset_tokens WHERE user_id = ? AND consumed_at IS NULL`
+        )
+        .get(reg.user.userId) as { c: number };
+      assert.equal(activeResetTokens.c, 1);
+
+      const oldResetAttempt = await resetPasswordWithToken(
+        h.faultDb,
+        {
+          token: resetTokens[0],
+          password: 'NewValidPassword9',
+          confirmPassword: 'NewValidPassword9',
+        },
+        { clientIp: '198.51.100.180', userAgent: 'Test', now: now + 3000 }
+      );
+      assert.equal(oldResetAttempt.ok, false);
+    } finally {
+      console.error = origError;
+      h.cleanup();
+    }
+  });
+
+  it('11. Cryptography & Session invariants: PBKDF2 parameter consistency, constant-time compare, zero plaintext in DB', async () => {
+    const h = createTempDbHarness();
+    try {
+      const now = 1_750_000_800_000;
+      const initialPassword = 'AuditSecret_Pass_111';
+      const resetPassword = 'AuditSecret_Pass_222';
+
+      // Constant-time byte comparison sanity checks
+      assert.equal(
+        constantTimeBytesEqual(new Uint8Array([1, 2, 3, 4]), new Uint8Array([1, 2, 3, 4])),
+        true
+      );
+      assert.equal(
+        constantTimeBytesEqual(new Uint8Array([1, 2, 3, 4]), new Uint8Array([1, 2, 3, 5])),
+        false
+      );
+      assert.equal(
+        constantTimeBytesEqual(new Uint8Array([1, 2, 3]), new Uint8Array([1, 2, 3, 4])),
+        false
+      );
+
+      // Unique random salt on identical password hashes
+      const h1 = await hashPassword(initialPassword);
+      const h2 = await hashPassword(initialPassword);
+      assert.equal(h1.algo, CURRENT_PASSWORD_ALGO);
+      assert.equal(h2.algo, CURRENT_PASSWORD_ALGO);
+      assert.notEqual(h1.salt, h2.salt);
+      assert.notEqual(h1.hash, h2.hash);
+      assert.equal((await verifyPassword(initialPassword, h1)).valid, true);
+      assert.equal((await verifyPassword(initialPassword, h2)).valid, true);
+      assert.equal((await verifyPassword('WrongPass123', h1)).valid, false);
+
+      // Register -> Verify -> Login -> Reset -> Check DB consistency & zero plaintext leakage
+      const reg = await registerManualAccount(
+        h.faultDb,
+        {
+          email: 'crypto_audit@example.com',
+          username: 'CryptoAudit1',
+          password: initialPassword,
+          confirmPassword: initialPassword,
+        },
+        {
+          clientIp: '198.51.100.190',
+          userAgent: 'Test',
+          now,
+          isProduction: true,
+          publicAppBaseUrl: 'https://eyvan.test',
+        },
+        h.mockSender
+      );
+      assert.equal(reg.ok, true);
+      if (!reg.ok) return;
+
+      const regIdentity = h.rawDb
+        .prepare(`SELECT password_hash, password_salt, password_algo FROM auth_identities WHERE user_id = ?`)
+        .get(reg.user.userId) as { password_hash: string; password_salt: string; password_algo: string };
+      assert.equal(regIdentity.password_algo, 'pbkdf2_sha256:v1:100000');
+
+      await verifyEmailWithToken(
+        h.faultDb,
+        { token: h.capturedTokens[0].token },
+        { clientIp: '198.51.100.191', userAgent: 'Test', now: now + 100 }
+      );
+
+      const login1 = await loginWithCredentials(
+        h.faultDb,
+        { identifier: 'crypto_audit@example.com', password: initialPassword },
+        { clientIp: '198.51.100.192', userAgent: 'Dev1', now: now + 200 }
+      );
+      assert.equal(login1.ok, true);
+      if (!login1.ok) return;
+
+      await requestPasswordReset(
+        h.faultDb,
+        { email: 'crypto_audit@example.com' },
+        {
+          clientIp: '198.51.100.193',
+          userAgent: 'Test',
+          now: now + 300,
+          isProduction: true,
+          publicAppBaseUrl: 'https://eyvan.test',
+        },
+        h.mockSender
+      );
+      const resetTok = h.capturedTokens.find((t) => t.kind === 'reset')!.token;
+
+      const resetRes = await resetPasswordWithToken(
+        h.faultDb,
+        { token: resetTok, password: resetPassword, confirmPassword: resetPassword },
+        { clientIp: '198.51.100.194', userAgent: 'Test', now: now + 400 }
+      );
+      assert.equal(resetRes.ok, true);
+
+      // Verify password reset used identical PBKDF2 algo with fresh salt and revoked prior session
+      const resetIdentity = h.rawDb
+        .prepare(`SELECT password_hash, password_salt, password_algo FROM auth_identities WHERE user_id = ?`)
+        .get(reg.user.userId) as { password_hash: string; password_salt: string; password_algo: string };
+      assert.equal(resetIdentity.password_algo, 'pbkdf2_sha256:v1:100000');
+      assert.notEqual(resetIdentity.password_salt, regIdentity.password_salt);
+      assert.notEqual(resetIdentity.password_hash, regIdentity.password_hash);
+
+      const priorSessionAfterReset = await verifyAuthSession(
+        h.faultDb,
+        login1.rawSessionToken,
+        now + 500
+      );
+      assert.equal(priorSessionAfterReset.authenticated, false);
+
+      // Scan EVERY auth table in SQLite to guarantee zero plaintext passwords or raw tokens exist at rest
+      const tables = [
+        'users',
+        'auth_identities',
+        'auth_sessions',
+        'email_verification_tokens',
+        'password_reset_tokens',
+        'auth_rate_limits',
+      ];
+      const allRowsText = tables
+        .map((t) => JSON.stringify(h.rawDb.prepare(`SELECT * FROM ${t}`).all()))
+        .join('\n');
+      assert.equal(allRowsText.includes(initialPassword), false);
+      assert.equal(allRowsText.includes(resetPassword), false);
+      assert.equal(allRowsText.includes(login1.rawSessionToken), false);
+      assert.equal(allRowsText.includes(h.capturedTokens[0].token), false);
+      assert.equal(allRowsText.includes(resetTok), false);
+    } finally {
+      h.cleanup();
     }
   });
 });

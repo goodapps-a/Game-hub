@@ -27,6 +27,7 @@ import {
   EmailSender,
   buildVerificationLink,
   createEmailSender,
+  deliverEmailSafely,
 } from './emailService';
 import { EMAIL_VERIFICATION_TTL_MS } from './c2Service';
 import {
@@ -41,12 +42,19 @@ import { resolveAuthSessionTtlSec } from './authCookie';
 import {
   LOGIN_ID_RATE_LIMIT,
   LOGIN_IP_RATE_LIMIT,
+  PROFILE_UPDATE_USER_RATE_LIMIT,
   REGISTER_IP_RATE_LIMIT,
+  USERNAME_CHECK_IP_RATE_LIMIT,
   clearRateLimit,
   consumeRateLimitSlot,
   releaseRateLimitSlot,
 } from './rateLimit';
-import { validateLoginPayload, validateRegisterPayload } from './validation';
+import {
+  validateAuthUsername,
+  validateLoginPayload,
+  validateProfileUpdatePayload,
+  validateRegisterPayload,
+} from './validation';
 
 const SESSION_LAST_SEEN_TOUCH_MS = 5 * 60 * 1000; // Throttle D1 writes to once per 5 min
 
@@ -264,12 +272,14 @@ export async function registerManualAccount(
   } else {
     const baseUrl = ctx.publicAppBaseUrl ?? 'http://localhost:3000';
     const verifyUrl = buildVerificationLink(baseUrl, rawVerifyToken);
-    delivery = await sender.sendVerificationEmail({
-      to: validated.email,
-      username: validated.username,
-      verifyUrl,
-      expiresInHours: Math.round(EMAIL_VERIFICATION_TTL_MS / (60 * 60 * 1000)),
-    });
+    delivery = await deliverEmailSafely(() =>
+      sender.sendVerificationEmail({
+        to: validated.email,
+        username: validated.username,
+        verifyUrl,
+        expiresInHours: Math.round(EMAIL_VERIFICATION_TTL_MS / (60 * 60 * 1000)),
+      })
+    );
   }
 
   if (!delivery.sent) {
@@ -649,3 +659,256 @@ export async function revokeAuthSessionById(
     .run();
   return Number(res.meta?.changes ?? 0) > 0;
 }
+
+export interface UsernameAvailabilityResult {
+  readonly ok: true;
+  readonly status: number;
+  readonly valid: boolean;
+  readonly available: boolean;
+  readonly reason: 'invalid' | 'available' | 'current_user' | 'taken';
+  readonly message: string;
+}
+
+export type UsernameAvailabilityResponseResult =
+  | UsernameAvailabilityResult
+  | {
+      readonly ok: false;
+      readonly status: number;
+      readonly code: 'RATE_LIMITED';
+      readonly message: string;
+      readonly retryAfterSec?: number;
+    };
+
+/**
+ * Checks case-insensitive username uniqueness against `users.username_key` on the server.
+ * If `currentUserId` owns the matching row, returns `available: true` (`current_user`).
+ */
+export async function checkUsernameAvailability(
+  db: D1DatabaseLike,
+  rawUsername: unknown,
+  currentUserId: string | null,
+  ctx: AuthRequestContext
+): Promise<UsernameAvailabilityResponseResult> {
+  const now = ctx.now ?? Date.now();
+  const ipHash = await sha256Hex(`ip:${ctx.clientIp || 'unknown'}`);
+  const rl = await consumeRateLimitSlot(
+    db,
+    `username_check:ip:${ipHash}`,
+    USERNAME_CHECK_IP_RATE_LIMIT,
+    now
+  );
+  if (!rl.allowed) {
+    return {
+      ok: false,
+      status: 429,
+      code: 'RATE_LIMITED',
+      message: 'تعداد بررسی نام کاربری بیش از حد مجاز است. لطفاً کمی صبر کنید.',
+      retryAfterSec: rl.retryAfterSec,
+    };
+  }
+
+  const validated = validateAuthUsername(rawUsername);
+  if (validated.ok === false) {
+    return {
+      ok: true,
+      status: 200,
+      valid: false,
+      available: false,
+      reason: 'invalid',
+      message: validated.message,
+    };
+  }
+
+  const existing = await db
+    .prepare(
+      `SELECT user_id
+       FROM users
+       WHERE username_key = ?
+       LIMIT 1`
+    )
+    .bind(validated.usernameKey)
+    .first<{ user_id: string }>();
+
+  if (!existing) {
+    return {
+      ok: true,
+      status: 200,
+      valid: true,
+      available: true,
+      reason: 'available',
+      message: 'تایید سرور: این نام کاربری آزاد و قابل انتخاب است.',
+    };
+  }
+
+  if (currentUserId && existing.user_id === currentUserId) {
+    return {
+      ok: true,
+      status: 200,
+      valid: true,
+      available: true,
+      reason: 'current_user',
+      message: 'این نام کاربری فعلی حساب شماست.',
+    };
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    valid: true,
+    available: false,
+    reason: 'taken',
+    message: 'این نام کاربری قبلاً در سرور ثبت شده است.',
+  };
+}
+
+export type ProfileUpdateResult =
+  | {
+      readonly ok: true;
+      readonly status: number;
+      readonly user: PublicAuthUser;
+      readonly message: string;
+    }
+  | {
+      readonly ok: false;
+      readonly status: number;
+      readonly code:
+        | 'UNAUTHORIZED'
+        | 'INVALID_INPUT'
+        | 'ACCOUNT_CONFLICT'
+        | 'RATE_LIMITED';
+      readonly message: string;
+      readonly shouldClearCookie?: boolean;
+      readonly retryAfterSec?: number;
+    };
+
+/**
+ * Updates `username`, `username_key`, `display_name`, and `avatar_code` for an
+ * authenticated central user (`eyvan_auth_sess`). Permanent `user_id` is strictly immutable.
+ */
+export async function updateAuthenticatedProfile(
+  db: D1DatabaseLike,
+  rawSessionToken: string | null,
+  body: Record<string, unknown>,
+  ctx: AuthRequestContext
+): Promise<ProfileUpdateResult> {
+  const now = ctx.now ?? Date.now();
+  const verified = await verifyAuthSession(db, rawSessionToken, now);
+  if (!verified.authenticated || !verified.user) {
+    return {
+      ok: false,
+      status: 401,
+      code: 'UNAUTHORIZED',
+      message: 'برای ذخیره پروفایل مرکزی باید وارد حساب کاربری شوید.',
+      shouldClearCookie: verified.shouldClearCookie,
+    };
+  }
+
+  const rl = await consumeRateLimitSlot(
+    db,
+    `profile_update:user:${verified.user.userId}`,
+    PROFILE_UPDATE_USER_RATE_LIMIT,
+    now
+  );
+  if (!rl.allowed) {
+    return {
+      ok: false,
+      status: 429,
+      code: 'RATE_LIMITED',
+      message: 'تعداد تغییرات پروفایل بیش از حد مجاز است. لطفاً کمی بعد دوباره تلاش کنید.',
+      retryAfterSec: rl.retryAfterSec,
+    };
+  }
+
+  const validated = validateProfileUpdatePayload(body);
+  if (validated.ok === false) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'INVALID_INPUT',
+      message: validated.message,
+    };
+  }
+
+  const conflict = await db
+    .prepare(
+      `SELECT 1 AS hit
+       FROM users
+       WHERE username_key = ? AND user_id != ?
+       LIMIT 1`
+    )
+    .bind(validated.usernameKey, verified.user.userId)
+    .first<{ hit: number }>();
+
+  if (conflict) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'ACCOUNT_CONFLICT',
+      message: 'این نام کاربری قبلاً توسط کاربر دیگری ثبت شده است.',
+    };
+  }
+
+  try {
+    await db
+      .prepare(
+        `UPDATE users
+         SET username = ?,
+             username_key = ?,
+             display_name = ?,
+             avatar_code = ?,
+             updated_at = ?
+         WHERE user_id = ?`
+      )
+      .bind(
+        validated.username,
+        validated.usernameKey,
+        validated.username,
+        validated.avatarCode,
+        now,
+        verified.user.userId
+      )
+      .run();
+  } catch (err) {
+    if (isUniqueConstraintError(err)) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'ACCOUNT_CONFLICT',
+        message: 'این نام کاربری قبلاً توسط کاربر دیگری ثبت شده است.',
+      };
+    }
+    throw err;
+  }
+
+  const updatedRow = await db
+    .prepare(
+      `SELECT
+         user_id, username, username_key, display_name,
+         email, email_key, email_verified,
+         avatar_code, avatar_url, auth_provider, account_status,
+         created_at, last_seen_at
+       FROM users
+       WHERE user_id = ?
+       LIMIT 1`
+    )
+    .bind(verified.user.userId)
+    .first<UserDbRow>();
+
+  if (!updatedRow) {
+    return {
+      ok: false,
+      status: 401,
+      code: 'UNAUTHORIZED',
+      message: 'حساب کاربری یافت نشد.',
+      shouldClearCookie: true,
+    };
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    user: mapUserRowToPublic(updatedRow),
+    message: 'تغییرات پروفایل با موفقیت ذخیره شد.',
+  };
+}
+

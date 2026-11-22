@@ -11,6 +11,7 @@ import { PlatformTabId, ThemeMode, UserProfile } from '../types/platform';
 import { PLATFORM_ASSETS } from '../data/assets';
 import { EyvanLogo } from '../theme/PersianPatterns';
 import { toPersianDigits } from '../theme/tokens';
+import { computeXpProgress } from '../utils/profileMetrics';
 
 /**
  * Exact 3 clean platform navigation tabs (visually ordered Left-to-Right):
@@ -128,10 +129,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   isProfileOpen,
   onToggleProfile,
 }) => {
-  const xpPct = Math.min(
-    100,
-    Math.round((profile.xp / profile.xpToNextLevel) * 100)
-  );
+  const xpPct = computeXpProgress(profile.xp, profile.xpToNextLevel).percent;
   const isLight = themeMode === 'light';
 
   return (

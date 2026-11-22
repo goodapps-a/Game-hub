@@ -66,6 +66,17 @@ export interface DurableObjectNamespaceLike {
   get(id: unknown): { fetch(req: Request): Promise<Response> };
 }
 
+export interface ScheduledControllerLike {
+  readonly scheduledTime: number;
+  readonly cron: string;
+  noRetry?: () => void;
+}
+
+export interface ExecutionContextLike {
+  waitUntil(promise: Promise<unknown>): void;
+  passThroughOnException?: () => void;
+}
+
 export interface CfWorkerEnv {
   HOKM_ROOM: DurableObjectNamespaceLike;
   EYVAN_DB: D1DatabaseLike;

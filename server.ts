@@ -9,6 +9,7 @@ import {
   MAX_WS_PAYLOAD_BYTES,
 } from './src/games/hokm/online/protocol';
 import { parseSessionCookieFromHeader } from './cloudflare/src/lib/sessionCookie';
+import { pruneExpiredRateLimitsBatched } from './cloudflare/src/lib/auth/rateLimit';
 import { validateProductionAuthConfig } from './cloudflare/src/lib/auth/securityPolicy';
 import { createEyvanExpressApp } from './server/createExpressApp';
 import { EyvanDatabase } from './server/database';
@@ -155,6 +156,18 @@ async function startServer() {
     });
   });
 
+  // Low-cost periodic cleanup of expired, unblocked auth_rate_limits rows (mirrors Worker Cron Trigger)
+  const RATE_LIMIT_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+  const rateLimitCleanupTimer = setInterval(() => {
+    void pruneExpiredRateLimitsBatched(db.getD1Adapter()).catch((err) => {
+      console.error(
+        '[Eyvan Auth Cleanup] Rate-limit cleanup failed:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+    });
+  }, RATE_LIMIT_CLEANUP_INTERVAL_MS);
+  rateLimitCleanupTimer.unref?.();
+
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(
       `[Eyvan Hokm Server] Listening on http://0.0.0.0:${PORT} (${IS_PROD ? 'production' : 'development'})`
@@ -162,6 +175,7 @@ async function startServer() {
   });
 
   const shutdown = () => {
+    clearInterval(rateLimitCleanupTimer);
     roomManager.dispose();
     db.close();
     httpServer.close(() => process.exit(0));

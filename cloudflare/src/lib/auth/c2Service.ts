@@ -21,6 +21,7 @@ import {
   EmailSender,
   buildPasswordResetLink,
   buildVerificationLink,
+  deliverEmailSafely,
 } from './emailService';
 import {
   FORGOT_PASSWORD_EMAIL_RATE_LIMIT,
@@ -372,12 +373,14 @@ export async function resendVerificationEmail(
   } else {
     const baseUrl = ctx.publicAppBaseUrl ?? 'http://localhost:3000';
     const verifyUrl = buildVerificationLink(baseUrl, rawToken);
-    delivery = await emailSender.sendVerificationEmail({
-      to: user.email,
-      username: user.username,
-      verifyUrl,
-      expiresInHours: Math.round(EMAIL_VERIFICATION_TTL_MS / (60 * 60 * 1000)),
-    });
+    delivery = await deliverEmailSafely(() =>
+      emailSender.sendVerificationEmail({
+        to: user.email,
+        username: user.username,
+        verifyUrl,
+        expiresInHours: Math.round(EMAIL_VERIFICATION_TTL_MS / (60 * 60 * 1000)),
+      })
+    );
   }
 
   logDeliveryFailure('resend_verification', delivery);
@@ -511,12 +514,14 @@ export async function requestPasswordReset(
   } else {
     const baseUrl = ctx.publicAppBaseUrl ?? 'http://localhost:3000';
     const resetUrl = buildPasswordResetLink(baseUrl, rawToken);
-    delivery = await emailSender.sendPasswordResetEmail({
-      to: user.email,
-      username: user.username,
-      resetUrl,
-      expiresInMinutes: Math.round(PASSWORD_RESET_TTL_MS / (60 * 1000)),
-    });
+    delivery = await deliverEmailSafely(() =>
+      emailSender.sendPasswordResetEmail({
+        to: user.email,
+        username: user.username,
+        resetUrl,
+        expiresInMinutes: Math.round(PASSWORD_RESET_TTL_MS / (60 * 1000)),
+      })
+    );
   }
 
   logDeliveryFailure('forgot_password', delivery);

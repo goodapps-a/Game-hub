@@ -16,12 +16,21 @@ const ENGLISH_USERNAME_RE = /^[a-zA-Z0-9_.]{3,20}$/;
  */
 export function validateUsernameFormat(rawInput: string): UsernameValidationResult {
   const cleaned = rawInput.trim();
-  if (!ENGLISH_USERNAME_RE.test(cleaned) || !/[a-zA-Z]/.test(cleaned)) {
+  if (
+    !ENGLISH_USERNAME_RE.test(cleaned) ||
+    !/[a-zA-Z]/.test(cleaned) ||
+    cleaned.startsWith('.') ||
+    cleaned.endsWith('.') ||
+    cleaned.startsWith('_') ||
+    cleaned.endsWith('_') ||
+    cleaned.includes('..') ||
+    cleaned.includes('__')
+  ) {
     return {
       valid: false,
       reason: 'format',
       message:
-        'نام کاربری باید فقط با حروف انگلیسی، عدد، زیرخط (_) یا نقطه (.) و بین ۳ تا ۲۰ کاراکتر باشد.',
+        'نام کاربری باید بین ۳ تا ۲۰ کاراکتر انگلیسی (حروف، عدد، زیرخط یا نقطه) باشد، با نقطه یا زیرخط شروع/ختم نشود و حداقل یک حرف انگلیسی داشته باشد.',
       suggestions: [],
     };
   }
