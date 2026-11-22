@@ -21,8 +21,14 @@ import { GamesPage } from './platform/pages/GamesPage';
 import { FriendsPage } from './platform/pages/FriendsPage';
 import { HokmGame } from './games/hokm/HokmGame';
 import { OnlineHokmGame } from './games/hokm/OnlineHokmGame';
+import { fetchMyOnlineStats } from './games/hokm/online/client';
 import { hokmSound } from './games/hokm/audio/soundEffects';
 import { preloadCardArtwork } from './games/hokm/components/PlayingCard';
+import {
+  getOrCreateTabDeviceId,
+  sendPresenceHeartbeat,
+  sendPresenceOffline,
+} from './platform/social/socialClient';
 
 type ActiveGameView = 'hokm-online' | 'hokm-offline' | null;
 
@@ -88,7 +94,6 @@ export default function App() {
   const [pendingAuthAction, setPendingAuthAction] =
     useState<PendingAuthUrlAction | null>(null);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
-  const [isInChatRoom, setIsInChatRoom] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
 
   const themeMode = profile.appSettings.themeMode;
@@ -140,6 +145,76 @@ export default function App() {
       active = false;
     };
   }, []);
+
+  // Hydrate real permanent game stats bound strictly to `user_id` (`/api/stats/me`)
+  useEffect(() => {
+    if (!authUser || activeGame !== null) return;
+    let active = true;
+    fetchMyOnlineStats()
+      .then((stats) => {
+        if (!active || !stats) return;
+        setProfile((prev) => ({
+          ...prev,
+          stats: {
+            ...prev.stats,
+            gamesPlayed: stats.matchesPlayed,
+            wins: stats.wins,
+            losses: stats.losses,
+          },
+        }));
+      })
+      .catch(() => {
+        // Non-fatal: retain current stats snapshot
+      });
+    return () => {
+      active = false;
+    };
+  }, [authUser?.userId, authUser?.username, activeGame]);
+
+  // Real multi-device online presence lifecycle (30s heartbeat, 75s server lease TTL, instant offline on tab close)
+  useEffect(() => {
+    if (!authUser) return;
+    const deviceId = getOrCreateTabDeviceId();
+    const HEARTBEAT_INTERVAL_MS = 30_000;
+
+    const ping = () => {
+      const state =
+        typeof document !== 'undefined' && document.visibilityState === 'hidden'
+          ? 'away'
+          : 'online';
+      void sendPresenceHeartbeat(deviceId, state).catch(() => {
+        // Ignore transient network errors; lease expires safely on server if offline
+      });
+    };
+
+    ping();
+    const intervalId = window.setInterval(ping, HEARTBEAT_INTERVAL_MS);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        ping();
+      }
+    };
+    const handleOnline = () => {
+      ping();
+    };
+    const handlePageHide = () => {
+      void sendPresenceOffline(deviceId);
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('beforeunload', handlePageHide);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('beforeunload', handlePageHide);
+    };
+  }, [authUser?.userId]);
 
   // Capture & immediately scrub `#verify-email=` / `#reset-password=` tokens from URL
   useEffect(() => {
@@ -243,7 +318,6 @@ export default function App() {
 
   const handleSelectTab = (tab: PlatformTabId) => {
     if (tab !== activeTab) {
-      setIsInChatRoom(false);
       setActiveTab(tab);
     }
   };
@@ -251,7 +325,6 @@ export default function App() {
   const handleLaunchGame = (gameId: GameId) => {
     if (gameId === 'hokm') {
       setIsProfileOpen(false);
-      setIsInChatRoom(false);
       setActiveGame('hokm-online');
     }
   };
@@ -327,7 +400,7 @@ export default function App() {
     );
   }
 
-  const hideBottomNav = isTyping || isInChatRoom;
+  const hideBottomNav = isTyping;
 
   return (
     <div className="min-h-[100dvh] flex flex-col bg-[var(--eyvan-bg)] text-[var(--eyvan-text)] relative overflow-x-hidden transition-colors duration-200">
@@ -378,9 +451,9 @@ export default function App() {
           )}
           {activeTab === 'friends' && (
             <FriendsPage
-              currentUsername={profile.username}
-              onInviteToHokm={() => handleLaunchGame('hokm')}
-              onChatModeChange={setIsInChatRoom}
+              authUser={authUser}
+              authLoading={authLoading}
+              onOpenAccount={() => setIsProfileOpen(true)}
             />
           )}
         </main>

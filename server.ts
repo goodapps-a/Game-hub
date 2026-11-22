@@ -10,6 +10,7 @@ import {
 } from './src/games/hokm/online/protocol';
 import { parseSessionCookieFromHeader } from './cloudflare/src/lib/sessionCookie';
 import { pruneExpiredRateLimitsBatched } from './cloudflare/src/lib/auth/rateLimit';
+import { pruneExpiredPresenceSessionsBatched } from './cloudflare/src/lib/social/socialService';
 import { validateProductionAuthConfig } from './cloudflare/src/lib/auth/securityPolicy';
 import { createEyvanExpressApp } from './server/createExpressApp';
 import { EyvanDatabase } from './server/database';
@@ -156,17 +157,24 @@ async function startServer() {
     });
   });
 
-  // Low-cost periodic cleanup of expired, unblocked auth_rate_limits rows (mirrors Worker Cron Trigger)
-  const RATE_LIMIT_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
-  const rateLimitCleanupTimer = setInterval(() => {
-    void pruneExpiredRateLimitsBatched(db.getD1Adapter()).catch((err) => {
+  // Low-cost periodic cleanup of expired auth_rate_limits & user_presence_sessions (mirrors Worker Cron Trigger)
+  const MAINTENANCE_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+  const maintenanceCleanupTimer = setInterval(() => {
+    const d1Adapter = db.getD1Adapter();
+    void pruneExpiredRateLimitsBatched(d1Adapter).catch((err) => {
       console.error(
-        '[Eyvan Auth Cleanup] Rate-limit cleanup failed:',
+        '[Eyvan Cleanup] Rate-limit cleanup failed:',
         err instanceof Error ? err.message : 'unknown'
       );
     });
-  }, RATE_LIMIT_CLEANUP_INTERVAL_MS);
-  rateLimitCleanupTimer.unref?.();
+    void pruneExpiredPresenceSessionsBatched(d1Adapter).catch((err) => {
+      console.error(
+        '[Eyvan Cleanup] Presence cleanup failed:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+    });
+  }, MAINTENANCE_CLEANUP_INTERVAL_MS);
+  maintenanceCleanupTimer.unref?.();
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(
@@ -175,7 +183,7 @@ async function startServer() {
   });
 
   const shutdown = () => {
-    clearInterval(rateLimitCleanupTimer);
+    clearInterval(maintenanceCleanupTimer);
     roomManager.dispose();
     db.close();
     httpServer.close(() => process.exit(0));

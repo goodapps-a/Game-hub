@@ -40,6 +40,7 @@ import {
 
 export interface SeatMember {
   playerId: string;
+  userId?: string | null;
   username: string;
   avatarCode: string;
   canonicalSeat: Seat;
@@ -411,6 +412,7 @@ export class HokmRoomController {
 
   public joinPlayer(input: {
     username: string;
+    userId?: string | null;
     avatarCode?: string;
     preferredSeat?: Seat;
     playerId?: string;
@@ -482,6 +484,7 @@ export class HokmRoomController {
     const playerId = input.playerId ?? `p_${this.generateId()}`;
     const member: SeatMember = {
       playerId,
+      ...(input.userId ? { userId: input.userId } : {}),
       username: cleanName,
       avatarCode: sanitizeAvatarCode(input.avatarCode),
       canonicalSeat: targetSeat,
@@ -1224,6 +1227,7 @@ export class HokmRoomController {
         const team = getTeamForSeat(m.canonicalSeat);
         return {
           playerId: m.playerId,
+          ...(m.userId ? { userId: m.userId } : {}),
           username: m.username,
           canonicalSeat: m.canonicalSeat,
           team,

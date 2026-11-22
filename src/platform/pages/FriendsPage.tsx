@@ -1,547 +1,1022 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowRight,
+  AlertCircle,
   Check,
-  CheckCheck,
-  Copy,
-  Gamepad2,
-  Link2,
-  Plus,
-  Send,
-  User,
+  Clock,
+  Eye,
+  EyeOff,
+  Loader2,
+  RefreshCw,
+  Search,
+  Shield,
+  UserCheck,
+  UserMinus,
+  UserPlus,
   Users,
+  UserX,
   X,
 } from 'lucide-react';
-import {
-  ChatGroupDemo,
-  ChatMessage,
-  FriendDemo,
-} from '../types/platform';
+import { AuthUserSummary } from '../auth/authClient';
+import { ProfileAvatar } from '../components/TopBar';
 import { toPersianDigits } from '../theme/tokens';
+import { UserProfile } from '../types/platform';
+import {
+  FriendListItem,
+  FriendRequestItem,
+  SocialPrivacySettings,
+  SocialUserSummary,
+  acceptFriendRequestApi,
+  cancelFriendRequestApi,
+  fetchFriendRequestsRequest,
+  fetchFriendsPresenceRequest,
+  fetchFriendsRequest,
+  fetchSocialPrivacyRequest,
+  rejectFriendRequestApi,
+  removeFriendApi,
+  searchSocialUsersRequest,
+  sendFriendRequestApi,
+  updateSocialPrivacyRequest,
+} from '../social/socialClient';
 
 interface FriendsPageProps {
-  currentUsername: string;
-  onInviteToHokm: () => void;
-  onChatModeChange?: (inChat: boolean) => void;
+  authUser: AuthUserSummary | null;
+  authLoading: boolean;
+  onOpenAccount: () => void;
 }
 
-type FriendsTab = 'people' | 'groups';
+type SocialSubTab = 'friends' | 'incoming' | 'outgoing';
 
-type ActiveChatTarget =
-  | { type: 'direct'; id: string }
-  | { type: 'group'; id: string }
-  | null;
+const PRESENCE_POLL_INTERVAL_MS = 20_000;
+const SEARCH_PAGE_SIZE = 15;
 
-function formatCurrentTimeFa(): string {
-  const now = new Date();
-  const hh = String(now.getHours()).padStart(2, '0');
-  const mm = String(now.getMinutes()).padStart(2, '0');
-  return toPersianDigits(`${hh}:${mm}`);
+function toValidAvatarCode(code: string): UserProfile['avatarCode'] {
+  if (
+    code === 'portrait' ||
+    code === 'shamsa' ||
+    code === 'turquoise' ||
+    code === 'jade' ||
+    code === 'lapis'
+  ) {
+    return code;
+  }
+  return 'portrait';
 }
 
 export const FriendsPage: React.FC<FriendsPageProps> = ({
-  currentUsername,
-  onInviteToHokm,
-  onChatModeChange,
+  authUser,
+  authLoading,
+  onOpenAccount,
 }) => {
-  const [activeSubTab, setActiveSubTab] = useState<FriendsTab>('people');
-  const [friends, setFriends] = useState<FriendDemo[]>([]);
-  const [groups, setGroups] = useState<ChatGroupDemo[]>([]);
-  const [directChats, setDirectChats] = useState<Record<string, ChatMessage[]>>(
-    {}
+  const [activeTab, setActiveTab] = useState<SocialSubTab>('friends');
+
+  // Server-backed social data
+  const [friends, setFriends] = useState<FriendListItem[]>([]);
+  const [incoming, setIncoming] = useState<FriendRequestItem[]>([]);
+  const [outgoing, setOutgoing] = useState<FriendRequestItem[]>([]);
+  const [privacy, setPrivacy] = useState<SocialPrivacySettings | null>(null);
+  const [initialLoading, setInitialLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Privacy panel toggle
+  const [showPrivacyPanel, setShowPrivacyPanel] = useState(false);
+  const [privacySaving, setPrivacySaving] = useState(false);
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SocialUserSummary[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchHasMore, setSearchHasMore] = useState(false);
+  const [searchOffset, setSearchOffset] = useState(0);
+  const [searchExecutedQuery, setSearchExecutedQuery] = useState('');
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  // Action feedback & pending states
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [confirmRemoveUserId, setConfirmRemoveUserId] = useState<string | null>(
+    null
   );
-  const [groupChats, setGroupChats] = useState<Record<string, ChatMessage[]>>(
-    {}
-  );
-  const [activeChat, setActiveChat] = useState<ActiveChatTarget>(null);
-  const [draftMessage, setDraftMessage] = useState('');
-  const [copiedInvite, setCopiedInvite] = useState(false);
+  const [feedback, setFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
 
-  // Local create-group modal state
-  const [isCreatingGroup, setIsCreatingGroup] = useState(false);
-  const [newGroupName, setNewGroupName] = useState('');
-  const [selectedMembers, setSelectedMembers] = useState<string[]>([]);
+  const feedbackTimerRef = useRef<number | null>(null);
+  const searchAbortRef = useRef<AbortController | null>(null);
 
-  const chatEndRef = useRef<HTMLDivElement | null>(null);
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  const inviteLink = `${origin}/?invite=${encodeURIComponent(currentUsername)}`;
-
-  // Inform App when entering/leaving chat room so mobile BottomNav hides inside chat
-  useEffect(() => {
-    onChatModeChange?.(Boolean(activeChat));
-  }, [activeChat, onChatModeChange]);
+  const showToast = useCallback((type: 'success' | 'error', text: string) => {
+    setFeedback({ type, text });
+    if (feedbackTimerRef.current) {
+      window.clearTimeout(feedbackTimerRef.current);
+    }
+    feedbackTimerRef.current = window.setTimeout(() => {
+      setFeedback(null);
+    }, 3600);
+  }, []);
 
   useEffect(() => {
     return () => {
-      onChatModeChange?.(false);
+      if (feedbackTimerRef.current) {
+        window.clearTimeout(feedbackTimerRef.current);
+      }
+      searchAbortRef.current?.abort();
     };
-  }, [onChatModeChange]);
+  }, []);
 
-  const handleCopyInviteLink = async () => {
+  const loadSocialSnapshot = useCallback(async (silent = false) => {
+    if (!silent) setInitialLoading(true);
+    else setRefreshing(true);
+
     try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(inviteLink);
-      } else {
-        const ta = document.createElement('textarea');
-        ta.value = inviteLink;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
+      const [friendsRes, requestsRes, privacyRes] = await Promise.all([
+        fetchFriendsRequest(),
+        fetchFriendRequestsRequest(),
+        fetchSocialPrivacyRequest(),
+      ]);
+
+      if (friendsRes.ok && Array.isArray(friendsRes.friends)) {
+        setFriends(friendsRes.friends);
+      }
+      if (requestsRes.ok) {
+        setIncoming(Array.isArray(requestsRes.incoming) ? requestsRes.incoming : []);
+        setOutgoing(Array.isArray(requestsRes.outgoing) ? requestsRes.outgoing : []);
+      }
+      if (privacyRes.ok && privacyRes.privacy) {
+        setPrivacy(privacyRes.privacy);
       }
     } catch {
-      // Visual confirmation still shown for local prototype
+      if (!silent) {
+        showToast('error', 'خطا در دریافت اطلاعات بخش دوستان از سرور.');
+      }
+    } finally {
+      setInitialLoading(false);
+      setRefreshing(false);
     }
-    setCopiedInvite(true);
-    window.setTimeout(() => setCopiedInvite(false), 2200);
-  };
+  }, [showToast]);
 
-  const handleOpenDirectChat = (friendId: string) => {
-    setFriends((prev) =>
-      prev.map((f) => (f.id === friendId ? { ...f, unreadCount: 0 } : f))
-    );
-    setActiveChat({ type: 'direct', id: friendId });
-  };
+  // Reset and load whenever authenticated user changes
+  useEffect(() => {
+    if (!authUser) {
+      setFriends([]);
+      setIncoming([]);
+      setOutgoing([]);
+      setPrivacy(null);
+      setSearchQuery('');
+      setSearchResults([]);
+      setSearchExecutedQuery('');
+      setSearchError(null);
+      setConfirmRemoveUserId(null);
+      return;
+    }
+    void loadSocialSnapshot(false);
+  }, [authUser, loadSocialSnapshot]);
 
-  const handleOpenGroupChat = (groupId: string) => {
-    setGroups((prev) =>
-      prev.map((g) => (g.id === groupId ? { ...g, unreadCount: 0 } : g))
-    );
-    setActiveChat({ type: 'group', id: groupId });
-  };
+  // Lightweight live presence polling while viewing Friends tab
+  useEffect(() => {
+    if (!authUser) return;
 
-  const handleSendMessage = (customText?: string, isGameInvite = false) => {
-    if (!activeChat) return;
-    const text = (customText ?? draftMessage).trim();
-    if (!text) return;
-
-    const nowTime = formatCurrentTimeFa();
-    const newMsg: ChatMessage = {
-      id: `msg-${Date.now()}`,
-      sender: currentUsername,
-      text,
-      time: nowTime,
-      isMe: true,
-      isGameInvite,
+    const pollPresence = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
+      try {
+        const res = await fetchFriendsPresenceRequest();
+        if (!res.ok || !Array.isArray(res.presence)) return;
+        const map = new Map(res.presence.map((p) => [p.userId, p.onlineStatus]));
+        setFriends((prev) =>
+          prev.map((friend) => {
+            const nextStatus = map.get(friend.userId);
+            return nextStatus && nextStatus !== friend.onlineStatus
+              ? { ...friend, onlineStatus: nextStatus }
+              : friend;
+          })
+        );
+      } catch {
+        // Ignore transient polling hiccups
+      }
     };
 
-    if (activeChat.type === 'direct') {
-      setDirectChats((prev) => ({
-        ...prev,
-        [activeChat.id]: [...(prev[activeChat.id] ?? []), newMsg],
-      }));
-      setFriends((prev) =>
-        prev.map((f) =>
-          f.id === activeChat.id
-            ? { ...f, lastMessage: text, lastMessageTime: 'هم‌اکنون' }
-            : f
-        )
-      );
-    } else {
-      setGroupChats((prev) => ({
-        ...prev,
-        [activeChat.id]: [...(prev[activeChat.id] ?? []), newMsg],
-      }));
-      setGroups((prev) =>
-        prev.map((g) =>
-          g.id === activeChat.id
-            ? {
-                ...g,
-                lastMessage: `${currentUsername}: ${text}`,
-                lastMessageTime: 'هم‌اکنون',
-              }
-            : g
-        )
-      );
-    }
+    const timer = window.setInterval(pollPresence, PRESENCE_POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [authUser]);
 
-    if (!customText) setDraftMessage('');
-    window.setTimeout(() => {
-      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, 30);
-  };
+  const executeSearch = useCallback(
+    async (rawQuery: string, offset = 0, append = false) => {
+      const trimmed = rawQuery.trim();
+      searchAbortRef.current?.abort();
 
-  const handleCreateGroup = (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = newGroupName.trim();
-    if (!trimmed) return;
+      if (trimmed.length === 0) {
+        setSearchResults([]);
+        setSearchExecutedQuery('');
+        setSearchHasMore(false);
+        setSearchOffset(0);
+        setSearchError(null);
+        setSearchLoading(false);
+        return;
+      }
 
-    const newId = `g-${Date.now()}`;
-    const members = [currentUsername, ...selectedMembers];
-    const created: ChatGroupDemo = {
-      id: newId,
-      name: trimmed,
-      members,
-      onlineCount: Math.max(1, members.length - 1),
-      accentColor: '#0D8A8A',
-      lastMessage: `${currentUsername}: گروه ساخته شد`,
-      lastMessageTime: 'هم‌اکنون',
-      unreadCount: 0,
-    };
+      if (trimmed.length < 2) {
+        setSearchResults([]);
+        setSearchExecutedQuery('');
+        setSearchHasMore(false);
+        setSearchError('برای جستجو حداقل ۲ کاراکتر از نام کاربری را وارد کنید.');
+        setSearchLoading(false);
+        return;
+      }
 
-    setGroups((prev) => [created, ...prev]);
-    setGroupChats((prev) => ({
-      ...prev,
-      [newId]: [
-        {
-          id: `gm-init-${Date.now()}`,
-          sender: currentUsername,
-          text: 'سلام بچه‌ها! گروه جدید ساخته شد، آماده حکم هستید؟',
-          time: formatCurrentTimeFa(),
-          isMe: true,
-        },
-      ],
-    }));
-    setNewGroupName('');
-    setIsCreatingGroup(false);
-    setActiveChat({ type: 'group', id: newId });
-  };
+      const controller = new AbortController();
+      searchAbortRef.current = controller;
+      setSearchLoading(true);
+      setSearchError(null);
 
-  const activeFriend = useMemo(
-    () =>
-      activeChat?.type === 'direct'
-        ? friends.find((f) => f.id === activeChat.id) ?? null
-        : null,
-    [activeChat, friends]
+      try {
+        const res = await searchSocialUsersRequest(
+          trimmed,
+          SEARCH_PAGE_SIZE,
+          offset,
+          controller.signal
+        );
+        if (controller.signal.aborted) return;
+
+        if (!res.ok) {
+          setSearchError(res.message ?? 'جستجو با خطا مواجه شد.');
+          if (!append) setSearchResults([]);
+          setSearchHasMore(false);
+          return;
+        }
+
+        const list = Array.isArray(res.users) ? res.users : [];
+        setSearchResults((prev) => (append ? [...prev, ...list] : list));
+        setSearchHasMore(Boolean(res.hasMore));
+        setSearchOffset(offset + list.length);
+        setSearchExecutedQuery(trimmed);
+      } catch (err) {
+        if ((err as { name?: string })?.name === 'AbortError') return;
+        setSearchError('خطا در ارتباط با سرور هنگام جستجو.');
+      } finally {
+        if (!controller.signal.aborted) {
+          setSearchLoading(false);
+        }
+      }
+    },
+    []
   );
 
-  const activeGroup = useMemo(
-    () =>
-      activeChat?.type === 'group'
-        ? groups.find((g) => g.id === activeChat.id) ?? null
-        : null,
-    [activeChat, groups]
+  // Debounced search as user types
+  useEffect(() => {
+    if (!authUser) return;
+    const trimmed = searchQuery.trim();
+    if (trimmed.length === 0) {
+      setSearchResults([]);
+      setSearchExecutedQuery('');
+      setSearchHasMore(false);
+      setSearchError(null);
+      return;
+    }
+    if (trimmed.length < 2) {
+      setSearchError(null);
+      return;
+    }
+    const tid = window.setTimeout(() => {
+      void executeSearch(trimmed, 0, false);
+    }, 350);
+    return () => window.clearTimeout(tid);
+  }, [searchQuery, authUser, executeSearch]);
+
+  const refreshAfterMutation = useCallback(async () => {
+    await loadSocialSnapshot(true);
+    if (searchExecutedQuery.length >= 2) {
+      await executeSearch(searchExecutedQuery, 0, false);
+    }
+  }, [loadSocialSnapshot, executeSearch, searchExecutedQuery]);
+
+  const handleSendRequest = async (targetUserId: string) => {
+    setBusyKey(`req:${targetUserId}`);
+    try {
+      const res = await sendFriendRequestApi(targetUserId);
+      if (!res.ok) {
+        showToast('error', res.message ?? 'ارسال درخواست دوستی انجام نشد.');
+        return;
+      }
+      showToast(
+        'success',
+        res.message ??
+          (res.outcome === 'auto_accepted'
+            ? 'دوستی شما برقرار شد.'
+            : 'درخواست دوستی ارسال شد.')
+      );
+      await refreshAfterMutation();
+    } catch {
+      showToast('error', 'خطا در ارتباط با سرور هنگام ارسال درخواست.');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleAcceptRequest = async (friendshipId: string) => {
+    setBusyKey(`acc:${friendshipId}`);
+    try {
+      const res = await acceptFriendRequestApi(friendshipId);
+      if (!res.ok) {
+        showToast('error', res.message ?? 'پذیرش درخواست انجام نشد.');
+        return;
+      }
+      showToast('success', res.message ?? 'درخواست دوستی پذیرفته شد.');
+      await refreshAfterMutation();
+    } catch {
+      showToast('error', 'خطا در ارتباط با سرور هنگام پذیرش درخواست.');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleRejectRequest = async (friendshipId: string) => {
+    setBusyKey(`rej:${friendshipId}`);
+    try {
+      const res = await rejectFriendRequestApi(friendshipId);
+      if (!res.ok) {
+        showToast('error', res.message ?? 'رد کردن درخواست انجام نشد.');
+        return;
+      }
+      showToast('success', res.message ?? 'درخواست دوستی رد شد.');
+      await refreshAfterMutation();
+    } catch {
+      showToast('error', 'خطا در ارتباط با سرور هنگام رد درخواست.');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleCancelRequest = async (friendshipId: string) => {
+    setBusyKey(`can:${friendshipId}`);
+    try {
+      const res = await cancelFriendRequestApi(friendshipId);
+      if (!res.ok) {
+        showToast('error', res.message ?? 'لغو درخواست انجام نشد.');
+        return;
+      }
+      showToast('success', res.message ?? 'درخواست دوستی لغو شد.');
+      await refreshAfterMutation();
+    } catch {
+      showToast('error', 'خطا در ارتباط با سرور هنگام لغو درخواست.');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleRemoveFriend = async (targetUserId: string) => {
+    setBusyKey(`rem:${targetUserId}`);
+    try {
+      const res = await removeFriendApi(targetUserId);
+      if (!res.ok) {
+        showToast('error', res.message ?? 'حذف دوستی انجام نشد.');
+        return;
+      }
+      setConfirmRemoveUserId(null);
+      showToast('success', res.message ?? 'این کاربر از لیست دوستان شما حذف شد.');
+      await refreshAfterMutation();
+    } catch {
+      showToast('error', 'خطا در ارتباط با سرور هنگام حذف دوستی.');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleTogglePrivacyField = async (
+    field: 'showOnlineStatus' | 'allowFriendRequests'
+  ) => {
+    if (!privacy || privacySaving) return;
+    setPrivacySaving(true);
+    const nextValue = !privacy[field];
+    const payload =
+      field === 'showOnlineStatus'
+        ? {
+            showOnlineStatus: nextValue,
+            presencePreference: nextValue ? ('online' as const) : ('invisible' as const),
+          }
+        : { allowFriendRequests: nextValue };
+
+    try {
+      const res = await updateSocialPrivacyRequest(payload);
+      if (!res.ok || !res.privacy) {
+        showToast('error', res.message ?? 'ذخیره تنظیمات حریم خصوصی انجام نشد.');
+        return;
+      }
+      setPrivacy(res.privacy);
+      showToast('success', res.message ?? 'تنظیمات حریم خصوصی ذخیره شد.');
+    } catch {
+      showToast('error', 'خطا در ارتباط با سرور هنگام ذخیره حریم خصوصی.');
+    } finally {
+      setPrivacySaving(false);
+    }
+  };
+
+  const sortedFriends = useMemo(() => {
+    return [...friends].sort((a, b) => {
+      if (a.onlineStatus !== b.onlineStatus) {
+        return a.onlineStatus === 'online' ? -1 : 1;
+      }
+      return a.username.localeCompare(b.username, 'en', { sensitivity: 'base' });
+    });
+  }, [friends]);
+
+  const onlineFriendsCount = useMemo(
+    () => friends.filter((f) => f.onlineStatus === 'online').length,
+    [friends]
   );
 
   // =========================================================================
-  // FULL-SCREEN TELEGRAM-STYLE CHAT ROOM (100dvh edge-to-edge, Send on RIGHT)
+  // LOADING SESSION STATE
   // =========================================================================
-  if (activeChat && (activeFriend || activeGroup)) {
-    const messages =
-      activeChat.type === 'direct'
-        ? directChats[activeChat.id] ?? []
-        : groupChats[activeChat.id] ?? [];
-
+  if (authLoading) {
     return (
       <div
-        className="fixed inset-0 z-40 h-[100dvh] w-full flex flex-col bg-[var(--eyvan-bg)] overflow-hidden"
-        data-testid="chat-room-view"
+        className="max-w-3xl mx-auto py-12 flex flex-col items-center justify-center gap-3 theme-muted"
+        data-testid="friends-loading-auth"
       >
-        {/* Full-Width Compact Header */}
-        <header className="px-3 sm:px-5 py-2.5 border-b border-[var(--eyvan-gold-border)] flex items-center justify-between gap-2.5 theme-panel-tint backdrop-blur-md shrink-0">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <button
-              type="button"
-              onClick={() => setActiveChat(null)}
-              data-testid="chat-back-btn"
-              aria-label="بازگشت به لیست دوستان"
-              className="w-9 h-9 rounded-full hover:bg-black/10 theme-heading flex items-center justify-center cursor-pointer shrink-0 transition-colors"
-            >
-              <ArrowRight className="w-5 h-5" />
-            </button>
-
-            {activeFriend ? (
-              <>
-                <div className="relative shrink-0">
-                  <img
-                    src={activeFriend.avatarSrc}
-                    alt={activeFriend.username}
-                    className="w-10 h-10 rounded-full object-cover border border-[#D4AE58]/60"
-                  />
-                  <span
-                    className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full ring-2 ring-[#0B1528] ${
-                      activeFriend.status === 'online'
-                        ? 'bg-[#22C55E]'
-                        : 'bg-[#64748B]'
-                    }`}
-                  />
-                </div>
-                <div className="min-w-0 leading-tight">
-                  <div
-                    dir="ltr"
-                    className="text-sm sm:text-[15px] font-extrabold theme-heading truncate text-right"
-                  >
-                    {activeFriend.username}
-                  </div>
-                  <div
-                    className={`text-[11px] mt-0.5 font-semibold ${
-                      activeFriend.status === 'online'
-                        ? 'text-[#22C55E]'
-                        : 'theme-muted'
-                    }`}
-                  >
-                    {activeFriend.status === 'online'
-                      ? 'آنلاین'
-                      : 'آخرین بازدید به‌تازگی'}
-                  </div>
-                </div>
-              </>
-            ) : (
-              activeGroup && (
-                <>
-                  <div
-                    className="w-10 h-10 rounded-full border border-[#D4AE58]/55 flex items-center justify-center text-white shrink-0 shadow-xs"
-                    style={{ backgroundColor: activeGroup.accentColor }}
-                  >
-                    <Users className="w-5 h-5" />
-                  </div>
-                  <div className="min-w-0 leading-tight">
-                    <div className="text-sm sm:text-[15px] font-extrabold theme-heading truncate">
-                      {activeGroup.name}
-                    </div>
-                    <div className="text-[11px] theme-muted mt-0.5 truncate">
-                      {toPersianDigits(activeGroup.members.length)} عضو ·{' '}
-                      <span className="text-[#22C55E] font-semibold">
-                        {toPersianDigits(activeGroup.onlineCount)} آنلاین
-                      </span>
-                    </div>
-                  </div>
-                </>
-              )
-            )}
-          </div>
-
-          <button
-            type="button"
-            onClick={() =>
-              handleSendMessage('دعوت به میز بازی حکم چهارنفره ♠♥', true)
-            }
-            aria-label="دعوت به بازی حکم"
-            className="min-h-[36px] px-3 py-1.5 rounded-full bg-gradient-to-b from-[#F3D179] to-[#C89B3C] hover:from-[#F8DD94] hover:to-[#D4AE58] text-[#0B1628] text-xs font-extrabold inline-flex items-center gap-1.5 shrink-0 cursor-pointer shadow-xs transition-all"
-          >
-            <Gamepad2 className="w-4 h-4" />
-            <span className="hidden sm:inline">دعوت به حکم</span>
-          </button>
-        </header>
-
-        {/* Telegram Patterned Chat Wallpaper + Message Stream */}
-        <div className="flex-1 overflow-y-auto px-3 sm:px-4 py-3 space-y-2 telegram-chat-wallpaper">
-          {/* Telegram Date Divider Pill */}
-          <div className="flex justify-center pb-2">
-            <span className="px-3 py-0.5 rounded-full text-[11px] font-bold bg-black/28 text-white/90 backdrop-blur-xs">
-              امروز
-            </span>
-          </div>
-
-          {messages.map((msg) => {
-            const isSent = Boolean(msg.isMe);
-            return (
-              <div
-                key={msg.id}
-                className={`flex w-full ${
-                  isSent ? 'justify-start' : 'justify-end'
-                }`}
-              >
-                <div
-                  className={`relative max-w-[82%] sm:max-w-[70%] px-3.5 pt-2 pb-1.5 text-[13px] sm:text-sm leading-relaxed shadow-[0_1px_3px_rgba(0,0,0,0.22)] ${
-                    isSent
-                      ? 'telegram-bubble-out rounded-[18px] rounded-br-[4px]'
-                      : 'telegram-bubble-in rounded-[18px] rounded-bl-[4px]'
-                  }`}
-                >
-                  {activeChat.type === 'group' && !isSent && (
-                    <div
-                      dir="ltr"
-                      className="text-[11px] font-extrabold text-[#38BDF8] mb-0.5 text-right"
-                    >
-                      {msg.sender}
-                    </div>
-                  )}
-
-                  <p className="whitespace-pre-wrap break-words">{msg.text}</p>
-
-                  {msg.isGameInvite && (
-                    <button
-                      type="button"
-                      onClick={onInviteToHokm}
-                      className="mt-2 mb-1 w-full min-h-[36px] px-3 py-1.5 rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] hover:from-[#F8DD94] text-[#0B1528] text-xs font-extrabold flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
-                    >
-                      <Gamepad2 className="w-4 h-4" />
-                      <span>ورود به میز حکم</span>
-                    </button>
-                  )}
-
-                  {/* Telegram Inline Timestamp + Double Checkmark */}
-                  <div
-                    className={`flex items-center justify-end gap-1 mt-0.5 text-[10px] tabular-nums select-none ${
-                      isSent ? 'text-white/75' : 'theme-muted'
-                    }`}
-                  >
-                    <span>{msg.time}</span>
-                    {isSent && (
-                      <CheckCheck
-                        className="w-3.5 h-3.5 text-[#7DD3FC]"
-                        aria-hidden="true"
-                      />
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-          <div ref={chatEndRef} />
-        </div>
-
-        {/* Full-Width Composer — Send Button strictly on the physical RIGHT side (first in RTL row) */}
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleSendMessage();
-          }}
-          className="px-3 sm:px-5 py-2.5 pb-[max(0.65rem,env(safe-area-inset-bottom))] border-t border-[var(--eyvan-gold-border)] flex items-center gap-2 theme-panel-tint backdrop-blur-md shrink-0"
-        >
-          <button
-            type="submit"
-            disabled={!draftMessage.trim()}
-            data-testid="chat-send-btn"
-            aria-label="ارسال پیام"
-            className="w-[42px] h-[42px] rounded-full bg-[#0D8A8A] hover:bg-[#11A3A3] disabled:opacity-40 text-white flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0 shadow-sm"
-          >
-            <Send className="w-4 h-4 -scale-x-100 translate-x-[1px]" />
-          </button>
-          <input
-            type="text"
-            value={draftMessage}
-            onChange={(e) => setDraftMessage(e.target.value)}
-            placeholder="پیام..."
-            data-testid="chat-message-input"
-            className="flex-1 min-h-[42px] px-4 rounded-full theme-input border text-sm focus:outline-none focus:border-[#0D8A8A]"
-          />
-        </form>
+        <Loader2 className="w-7 h-7 animate-spin theme-accent-teal" />
+        <p className="text-sm font-bold">در حال بررسی وضعیت حساب کاربری...</p>
       </div>
     );
   }
 
   // =========================================================================
-  // FRIENDS HUB: Slim Invite Link at TOP + Slim People/Groups Switcher BELOW
+  // LOGGED-OUT GATE (Central Account Required — Zero Fake/Demo Data)
+  // =========================================================================
+  if (!authUser) {
+    return (
+      <div
+        className="max-w-xl mx-auto pt-4 sm:pt-8"
+        data-testid="friends-auth-required"
+      >
+        <section className="eyvan-card rounded-2xl p-6 sm:p-8 text-center space-y-5">
+          <div className="w-16 h-16 mx-auto rounded-2xl bg-[#0D8A8A]/16 border border-[#0D8A8A]/40 flex items-center justify-center">
+            <Users className="w-8 h-8 theme-accent-teal" />
+          </div>
+
+          <div className="space-y-2">
+            <h1 className="text-lg sm:text-xl font-black theme-heading">
+              بخش دوستان و حضور آنلاین
+            </h1>
+            <p className="text-xs sm:text-sm theme-muted leading-relaxed max-w-md mx-auto">
+              برای جستجوی بازیکنان، ارسال و مدیریت درخواست‌های دوستی و مشاهده وضعیت واقعی آنلاین دوستان، ابتدا وارد حساب کاربری مرکزی ایوان شوید.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-right pt-1">
+            <div className="theme-subcard border rounded-xl p-3 space-y-1">
+              <div className="text-xs font-extrabold theme-heading flex items-center gap-1.5">
+                <Search className="w-3.5 h-3.5 theme-accent-teal shrink-0" />
+                <span>جستجوی واقعی</span>
+              </div>
+              <p className="text-[11px] theme-muted leading-relaxed">
+                یافتن بازیکنان با نام کاربری بدون افشای اطلاعات خصوصی
+              </p>
+            </div>
+            <div className="theme-subcard border rounded-xl p-3 space-y-1">
+              <div className="text-xs font-extrabold theme-heading flex items-center gap-1.5">
+                <UserCheck className="w-3.5 h-3.5 theme-accent-teal shrink-0" />
+                <span>مدیریت دوستی</span>
+              </div>
+              <p className="text-[11px] theme-muted leading-relaxed">
+                ارسال، پذیرش، رد یا لغو درخواست‌ها با تأیید سرور
+              </p>
+            </div>
+            <div className="theme-subcard border rounded-xl p-3 space-y-1">
+              <div className="text-xs font-extrabold theme-heading flex items-center gap-1.5">
+                <Shield className="w-3.5 h-3.5 theme-accent-gold shrink-0" />
+                <span>حریم خصوصی</span>
+              </div>
+              <p className="text-[11px] theme-muted leading-relaxed">
+                کنترل کامل نمایش وضعیت آنلاین و پذیرش درخواست‌ها
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={onOpenAccount}
+            data-testid="friends-open-account-btn"
+            className="w-full sm:w-auto min-h-[46px] px-7 rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] hover:from-[#F8DD94] hover:to-[#D4AE58] text-[#0B1628] text-sm font-black inline-flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer"
+          >
+            <UserPlus className="w-4 h-4" />
+            <span>ورود یا ساخت حساب کاربری</span>
+          </button>
+        </section>
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // AUTHENTICATED STAGE D1 FRIENDS & ONLINE PRESENCE VIEW
   // =========================================================================
   return (
-    <div className="space-y-2.5 max-w-3xl mx-auto" data-testid="friends-page">
-      {/* TOP: Slim Copy Invite Link Strip */}
-      <section
-        className="eyvan-card rounded-xl px-3 py-2 flex items-center justify-between gap-2.5"
-        data-testid="invite-link-card"
-      >
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-8 h-8 rounded-lg bg-[#0D8A8A]/18 border border-[#0D8A8A]/40 flex items-center justify-center shrink-0">
-            <Link2 className="w-4 h-4 theme-accent-teal" />
+    <div className="space-y-3.5 max-w-3xl mx-auto" data-testid="friends-page">
+      {/* Header Summary + Controls */}
+      <section className="eyvan-card rounded-2xl p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-11 h-11 rounded-xl bg-[#0D8A8A]/18 border border-[#0D8A8A]/40 flex items-center justify-center shrink-0">
+              <Users className="w-5 h-5 theme-accent-teal" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="text-base sm:text-lg font-black theme-heading truncate">
+                دوستان
+              </h1>
+              <div
+                className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs theme-muted mt-0.5"
+                data-testid="friends-summary-counts"
+              >
+                <span>{toPersianDigits(friends.length)} دوست</span>
+                <span aria-hidden="true">·</span>
+                <span className="inline-flex items-center gap-1.5 font-bold text-[#22C55E]">
+                  <span className="w-2 h-2 rounded-full bg-[#22C55E]" />
+                  <span>{toPersianDigits(onlineFriendsCount)} آنلاین</span>
+                </span>
+              </div>
+            </div>
           </div>
-          <div className="min-w-0 leading-tight">
-            <div
-              className="text-xs sm:text-[13px] font-extrabold theme-heading truncate"
-              data-testid="invite-link-title"
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setShowPrivacyPanel((prev) => !prev)}
+              data-testid="social-privacy-toggle-btn"
+              aria-expanded={showPrivacyPanel}
+              className={`min-h-[40px] px-3 rounded-xl border text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                showPrivacyPanel
+                  ? 'bg-[#0D8A8A]/18 border-[#0D8A8A]/50 theme-accent-teal'
+                  : 'theme-btn-secondary'
+              }`}
             >
-              لینک دعوت به دوستی
-            </div>
-            <div
-              dir="ltr"
-              className="text-[11px] theme-muted truncate text-right font-mono mt-0.5"
+              <Shield className="w-4 h-4" />
+              <span>حریم خصوصی</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void refreshAfterMutation()}
+              disabled={refreshing}
+              data-testid="social-refresh-btn"
+              aria-label="به‌روزرسانی لیست دوستان"
+              className="w-10 h-10 rounded-xl theme-btn-secondary border flex items-center justify-center cursor-pointer disabled:opacity-50"
             >
-              {inviteLink}
-            </div>
+              <RefreshCw
+                className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`}
+              />
+            </button>
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={handleCopyInviteLink}
-          data-testid="copy-invite-link-btn"
-          className={`min-h-[34px] px-3 py-1 rounded-lg text-xs font-extrabold inline-flex items-center justify-center gap-1.5 transition-all cursor-pointer shrink-0 whitespace-nowrap ${
-            copiedInvite
-              ? 'bg-[#107C41] text-white'
-              : 'bg-gradient-to-b from-[#F3D179] to-[#C89B3C] hover:from-[#F8DD94] hover:to-[#D4AE58] text-[#0B1628]'
-          }`}
-        >
-          {copiedInvite ? (
-            <>
-              <Check className="w-3.5 h-3.5" />
-              <span>کپی شد</span>
-            </>
-          ) : (
-            <>
-              <Copy className="w-3.5 h-3.5" />
-              <span>کپی لینک</span>
-            </>
-          )}
-        </button>
+        {/* Collapsible Privacy Controls Panel */}
+        {showPrivacyPanel && privacy && (
+          <div
+            className="pt-3 border-t border-[var(--eyvan-line)] grid grid-cols-1 sm:grid-cols-2 gap-2.5"
+            data-testid="social-privacy-panel"
+          >
+            <button
+              type="button"
+              disabled={privacySaving}
+              onClick={() => void handleTogglePrivacyField('showOnlineStatus')}
+              data-testid="privacy-show-online-toggle"
+              className="theme-subcard border rounded-xl p-3 flex items-center justify-between gap-3 text-right hover:border-[#0D8A8A]/50 transition-colors cursor-pointer disabled:opacity-60"
+            >
+              <div className="min-w-0 space-y-0.5">
+                <div className="text-xs font-extrabold theme-heading flex items-center gap-1.5">
+                  {privacy.showOnlineStatus ? (
+                    <Eye className="w-3.5 h-3.5 text-[#22C55E] shrink-0" />
+                  ) : (
+                    <EyeOff className="w-3.5 h-3.5 theme-muted shrink-0" />
+                  )}
+                  <span>نمایش وضعیت آنلاین به دوستان</span>
+                </div>
+                <p className="text-[11px] theme-muted">
+                  {privacy.showOnlineStatus
+                    ? 'دوستان تأییدشده وضعیت آنلاین شما را می‌بینند'
+                    : 'وضعیت شما برای همه آفلاین نمایش داده می‌شود'}
+                </p>
+              </div>
+              <span
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-black shrink-0 ${
+                  privacy.showOnlineStatus
+                    ? 'bg-[#22C55E]/15 text-[#22C55E]'
+                    : 'bg-slate-500/15 theme-muted'
+                }`}
+              >
+                {privacy.showOnlineStatus ? 'فعال' : 'مخفی'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              disabled={privacySaving}
+              onClick={() => void handleTogglePrivacyField('allowFriendRequests')}
+              data-testid="privacy-allow-requests-toggle"
+              className="theme-subcard border rounded-xl p-3 flex items-center justify-between gap-3 text-right hover:border-[#0D8A8A]/50 transition-colors cursor-pointer disabled:opacity-60"
+            >
+              <div className="min-w-0 space-y-0.5">
+                <div className="text-xs font-extrabold theme-heading flex items-center gap-1.5">
+                  <UserPlus className="w-3.5 h-3.5 theme-accent-teal shrink-0" />
+                  <span>پذیرش درخواست‌های دوستی جدید</span>
+                </div>
+                <p className="text-[11px] theme-muted">
+                  {privacy.allowFriendRequests
+                    ? 'کاربران دیگر می‌توانند به شما درخواست دوستی بفرستند'
+                    : 'درخواست دوستی جدیدی برای شما ثبت نمی‌شود'}
+                </p>
+              </div>
+              <span
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-black shrink-0 ${
+                  privacy.allowFriendRequests
+                    ? 'bg-[#0D8A8A]/18 theme-accent-teal'
+                    : 'bg-slate-500/15 theme-muted'
+                }`}
+              >
+                {privacy.allowFriendRequests ? 'باز' : 'بسته'}
+              </span>
+            </button>
+          </div>
+        )}
       </section>
 
-      {/* BELOW INVITE LINK: Slim 2-Tab Switcher Box (افراد | گروه) */}
+      {/* Inline Feedback Toast */}
+      {feedback && (
+        <div
+          role="status"
+          data-testid="social-feedback-banner"
+          className={`rounded-xl px-4 py-2.5 text-xs sm:text-sm font-bold flex items-center justify-between gap-2 border ${
+            feedback.type === 'success'
+              ? 'bg-[#107C41]/15 border-[#107C41]/40 text-[#22C55E]'
+              : 'bg-red-500/12 border-red-500/35 text-red-400'
+          }`}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            {feedback.type === 'success' ? (
+              <Check className="w-4 h-4 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 shrink-0" />
+            )}
+            <span className="truncate">{feedback.text}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFeedback(null)}
+            aria-label="بستن پیام"
+            className="p-1 opacity-75 hover:opacity-100 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Search Users Card */}
       <section
-        className="eyvan-card rounded-xl p-1"
-        data-testid="friends-tabs-card"
+        className="eyvan-card rounded-2xl p-4 space-y-3"
+        data-testid="social-search-section"
       >
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void executeSearch(searchQuery, 0, false);
+          }}
+          className="flex items-center gap-2"
+        >
+          <div className="relative flex-1 min-w-0">
+            <Search className="w-4 h-4 theme-muted absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              dir="ltr"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="جستجو با نام کاربری..."
+              maxLength={20}
+              data-testid="social-search-input"
+              aria-label="جستجوی کاربر با نام کاربری"
+              className="w-full min-h-[44px] pr-10 pl-9 rounded-xl theme-input border text-sm text-right placeholder:text-right focus:outline-none focus:border-[#0D8A8A]"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  setSearchResults([]);
+                  setSearchExecutedQuery('');
+                  setSearchError(null);
+                }}
+                aria-label="پاک کردن جستجو"
+                className="w-7 h-7 rounded-lg flex items-center justify-center theme-muted hover:theme-heading absolute left-1.5 top-1/2 -translate-y-1/2 cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          <button
+            type="submit"
+            disabled={searchLoading}
+            data-testid="social-search-btn"
+            className="min-h-[44px] px-4 sm:px-5 rounded-xl bg-[#0D8A8A] hover:bg-[#11A3A3] disabled:opacity-50 text-white text-xs sm:text-sm font-extrabold inline-flex items-center justify-center gap-1.5 shrink-0 cursor-pointer transition-colors"
+          >
+            {searchLoading ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Search className="w-4 h-4" />
+            )}
+            <span>جستجو</span>
+          </button>
+        </form>
+
+        {searchError && (
+          <p
+            className="text-xs font-bold text-amber-400 px-1"
+            data-testid="social-search-error"
+          >
+            {searchError}
+          </p>
+        )}
+
+        {/* Search Results List */}
+        {searchExecutedQuery && !searchError && (
+          <div
+            className="pt-2 border-t border-[var(--eyvan-line)] space-y-2"
+            data-testid="social-search-results"
+          >
+            <div className="flex items-center justify-between text-[11px] theme-muted px-1">
+              <span>
+                نتایج جستجو برای{' '}
+                <strong dir="ltr" className="theme-heading font-mono">
+                  {searchExecutedQuery}
+                </strong>
+              </span>
+              <span>{toPersianDigits(searchResults.length)} نتیجه</span>
+            </div>
+
+            {searchResults.length === 0 && !searchLoading ? (
+              <div
+                className="py-5 text-center text-xs theme-muted theme-subcard border rounded-xl"
+                data-testid="social-search-empty"
+              >
+                کاربری با این نام کاربری یافت نشد.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {searchResults.map((user) => {
+                  const isBusy =
+                    busyKey === `req:${user.userId}` ||
+                    (user.friendshipId !== null &&
+                      (busyKey === `can:${user.friendshipId}` ||
+                        busyKey === `acc:${user.friendshipId}`));
+
+                  return (
+                    <div
+                      key={user.userId}
+                      data-testid={`search-result-${user.username}`}
+                      className="theme-subcard border rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-3"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="relative shrink-0">
+                          <ProfileAvatar
+                            avatarCode={toValidAvatarCode(user.avatarCode)}
+                            username={user.username}
+                            size="sm"
+                          />
+                          {user.relationshipStatus === 'friend' && (
+                            <span
+                              className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[var(--eyvan-surface)] ${
+                                user.onlineStatus === 'online'
+                                  ? 'bg-[#22C55E]'
+                                  : 'bg-[#64748B]'
+                              }`}
+                            />
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <div
+                            dir="ltr"
+                            className="text-sm font-extrabold theme-heading truncate text-right"
+                          >
+                            {user.username}
+                          </div>
+                          <div className="text-[11px] theme-muted mt-0.5">
+                            {user.relationshipStatus === 'friend'
+                              ? user.onlineStatus === 'online'
+                                ? 'دوست شما · آنلاین'
+                                : 'دوست شما · آفلاین'
+                              : user.relationshipStatus === 'outgoing_pending'
+                                ? 'درخواست دوستی ارسال شده'
+                                : user.relationshipStatus === 'incoming_pending'
+                                  ? 'برای شما درخواست فرستاده است'
+                                  : 'کاربر ایوان'}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="shrink-0">
+                        {user.relationshipStatus === 'none' && (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => void handleSendRequest(user.userId)}
+                            data-testid={`send-request-btn-${user.username}`}
+                            className="min-h-[38px] px-3.5 rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] hover:from-[#F8DD94] hover:to-[#D4AE58] disabled:opacity-50 text-[#0B1628] text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer"
+                          >
+                            {isBusy ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <UserPlus className="w-3.5 h-3.5" />
+                            )}
+                            <span>ارسال درخواست</span>
+                          </button>
+                        )}
+
+                        {user.relationshipStatus === 'outgoing_pending' &&
+                          user.friendshipId && (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() =>
+                                void handleCancelRequest(user.friendshipId!)
+                              }
+                              data-testid={`cancel-request-btn-${user.username}`}
+                              className="min-h-[38px] px-3 rounded-xl theme-btn-secondary border text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                            >
+                              {isBusy ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <X className="w-3.5 h-3.5" />
+                              )}
+                              <span>لغو درخواست</span>
+                            </button>
+                          )}
+
+                        {user.relationshipStatus === 'incoming_pending' &&
+                          user.friendshipId && (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() =>
+                                void handleAcceptRequest(user.friendshipId!)
+                              }
+                              data-testid={`accept-request-btn-${user.username}`}
+                              className="min-h-[38px] px-3.5 rounded-xl bg-[#0D8A8A] hover:bg-[#11A3A3] text-white text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                            >
+                              {isBusy ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Check className="w-3.5 h-3.5" />
+                              )}
+                              <span>پذیرش درخواست</span>
+                            </button>
+                          )}
+
+                        {user.relationshipStatus === 'friend' && (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#0D8A8A]/14 border border-[#0D8A8A]/35 text-xs font-bold theme-accent-teal">
+                            <UserCheck className="w-3.5 h-3.5" />
+                            <span>دوست شما</span>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {searchHasMore && (
+                  <button
+                    type="button"
+                    disabled={searchLoading}
+                    onClick={() =>
+                      void executeSearch(searchExecutedQuery, searchOffset, true)
+                    }
+                    className="w-full min-h-[40px] rounded-xl theme-btn-secondary border text-xs font-bold cursor-pointer disabled:opacity-50"
+                  >
+                    نمایش نتایج بیشتر
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* 3-Tab Switcher: دوستان | دریافتی | ارسالی */}
+      <section className="eyvan-card rounded-xl p-1" data-testid="friends-tabs-card">
         <div
           role="tablist"
           aria-label="بخش‌های دوستان"
-          className="grid grid-cols-2 gap-1 p-0.5 theme-tab-track rounded-lg border"
+          className="grid grid-cols-3 gap-1 p-0.5 theme-tab-track rounded-lg border"
         >
           <button
             type="button"
             role="tab"
-            aria-selected={activeSubTab === 'people'}
-            data-testid="friends-tab-people"
-            onClick={() => setActiveSubTab('people')}
-            className={`min-h-[34px] rounded-md text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-              activeSubTab === 'people'
+            aria-selected={activeTab === 'friends'}
+            data-testid="social-tab-friends"
+            onClick={() => setActiveTab('friends')}
+            className={`min-h-[40px] rounded-md text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'friends'
                 ? 'bg-gradient-to-b from-[#F3D179] to-[#C89B3C] text-[#0B1628] shadow-xs'
                 : 'theme-muted'
             }`}
           >
-            <User className="w-3.5 h-3.5" />
-            <span>افراد</span>
+            <Users className="w-3.5 h-3.5 shrink-0" />
+            <span>دوستان</span>
+            <span className="text-[11px] opacity-85 tabular-nums">
+              ({toPersianDigits(friends.length)})
+            </span>
           </button>
 
           <button
             type="button"
             role="tab"
-            aria-selected={activeSubTab === 'groups'}
-            data-testid="friends-tab-groups"
-            onClick={() => setActiveSubTab('groups')}
-            className={`min-h-[34px] rounded-md text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-              activeSubTab === 'groups'
+            aria-selected={activeTab === 'incoming'}
+            data-testid="social-tab-incoming"
+            onClick={() => setActiveTab('incoming')}
+            className={`min-h-[40px] rounded-md text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'incoming'
                 ? 'bg-gradient-to-b from-[#F3D179] to-[#C89B3C] text-[#0B1628] shadow-xs'
                 : 'theme-muted'
             }`}
           >
-            <Users className="w-3.5 h-3.5" />
-            <span>گروه</span>
+            <UserPlus className="w-3.5 h-3.5 shrink-0" />
+            <span>دریافتی</span>
+            {incoming.length > 0 && (
+              <span
+                className={`min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-black inline-flex items-center justify-center tabular-nums ${
+                  activeTab === 'incoming'
+                    ? 'bg-[#0B1628]/20 text-[#0B1628]'
+                    : 'bg-[#0D8A8A] text-white'
+                }`}
+              >
+                {toPersianDigits(incoming.length)}
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'outgoing'}
+            data-testid="social-tab-outgoing"
+            onClick={() => setActiveTab('outgoing')}
+            className={`min-h-[40px] rounded-md text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'outgoing'
+                ? 'bg-gradient-to-b from-[#F3D179] to-[#C89B3C] text-[#0B1628] shadow-xs'
+                : 'theme-muted'
+            }`}
+          >
+            <Clock className="w-3.5 h-3.5 shrink-0" />
+            <span>ارسالی</span>
+            {outgoing.length > 0 && (
+              <span className="text-[11px] opacity-85 tabular-nums">
+                ({toPersianDigits(outgoing.length)})
+              </span>
+            )}
           </button>
         </div>
       </section>
 
-      {/* TAB 1: افراد — Friends List */}
-      {activeSubTab === 'people' && (
-        <div>
-          {/* Friends Chat List (Every friend has a cohesive portrait avatar) */}
-          <section className="eyvan-card rounded-2xl overflow-hidden divide-y divide-[var(--eyvan-gold-border)]">
-            {friends.length === 0 ? (
-              <div className="px-4 py-8 text-center text-xs sm:text-sm theme-muted">
-                هنوز دوستی اضافه نشده است.
-              </div>
-            ) : (
-              friends.map((friend) => (
-                <button
-                  key={friend.id}
-                  type="button"
-                  onClick={() => handleOpenDirectChat(friend.id)}
-                  data-friend-chat={friend.username}
-                  className="w-full px-4 py-3.5 flex items-center justify-between gap-3 hover:bg-black/5 transition-colors text-right cursor-pointer"
+      {/* Main List Body */}
+      <section className="eyvan-card rounded-2xl overflow-hidden divide-y divide-[var(--eyvan-line)]">
+        {initialLoading ? (
+          <div className="px-4 py-10 flex items-center justify-center gap-2.5 theme-muted text-sm font-bold">
+            <Loader2 className="w-5 h-5 animate-spin theme-accent-teal" />
+            <span>در حال بارگذاری اطلاعات...</span>
+          </div>
+        ) : activeTab === 'friends' ? (
+          sortedFriends.length === 0 ? (
+            <div
+              className="px-5 py-10 text-center space-y-2"
+              data-testid="friends-empty-state"
+            >
+              <p className="text-sm font-bold theme-heading">
+                هنوز دوستی در لیست شما ثبت نشده است.
+              </p>
+              <p className="text-xs theme-muted">
+                نام کاربری دوستان خود را در کادر بالا جستجو کنید و درخواست دوستی بفرستید.
+              </p>
+            </div>
+          ) : (
+            sortedFriends.map((friend) => {
+              const isConfirming = confirmRemoveUserId === friend.userId;
+              const isBusy = busyKey === `rem:${friend.userId}`;
+              return (
+                <div
+                  key={friend.userId}
+                  data-testid={`friend-row-${friend.username}`}
+                  data-presence={friend.onlineStatus}
+                  className="px-4 py-3.5 flex items-center justify-between gap-3"
                 >
                   <div className="flex items-center gap-3 min-w-0">
                     <div className="relative shrink-0">
-                      <img
-                        src={friend.avatarSrc}
-                        alt={friend.username}
-                        decoding="sync"
-                        loading="eager"
-                        className="w-11 h-11 rounded-full object-cover border-2 border-[#D4AE58]/55"
+                      <ProfileAvatar
+                        avatarCode={toValidAvatarCode(friend.avatarCode)}
+                        username={friend.username}
+                        size="md"
                       />
                       <span
-                        className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-[#0B1528] ${
-                          friend.status === 'online'
+                        aria-label={
+                          friend.onlineStatus === 'online' ? 'آنلاین' : 'آفلاین'
+                        }
+                        className={`absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full border-2 border-[var(--eyvan-surface)] ${
+                          friend.onlineStatus === 'online'
                             ? 'bg-[#22C55E]'
                             : 'bg-[#64748B]'
                         }`}
@@ -551,176 +1026,199 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                     <div className="min-w-0">
                       <div
                         dir="ltr"
-                        className="text-sm font-extrabold theme-heading truncate text-right"
+                        className="text-sm sm:text-[15px] font-extrabold theme-heading truncate text-right"
                       >
                         {friend.username}
                       </div>
-                      <div className="text-xs theme-muted truncate mt-0.5">
-                        {friend.lastMessage}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col items-end gap-1.5 shrink-0">
-                    <span className="text-[10px] theme-muted whitespace-nowrap">
-                      {friend.lastMessageTime}
-                    </span>
-                    {friend.unreadCount > 0 && (
-                      <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-[#0D8A8A] text-white text-[10px] font-extrabold flex items-center justify-center tabular-nums">
-                        {toPersianDigits(friend.unreadCount)}
-                      </span>
-                    )}
-                  </div>
-                </button>
-              ))
-            )}
-          </section>
-        </div>
-      )}
-
-      {/* TAB 2: گروه — Groups List + Create New Group + Click to Open Group Chat */}
-      {activeSubTab === 'groups' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between px-1">
-            <span className="text-xs font-bold theme-muted">
-              گروه‌های بازی شما ({toPersianDigits(groups.length)})
-            </span>
-            <button
-              type="button"
-              onClick={() => setIsCreatingGroup((prev) => !prev)}
-              data-testid="create-group-toggle-btn"
-              className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] text-[#0B1628] text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer"
-            >
-              {isCreatingGroup ? (
-                <>
-                  <X className="w-3.5 h-3.5" />
-                  <span>بستن</span>
-                </>
-              ) : (
-                <>
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>ساخت گروه جدید</span>
-                </>
-              )}
-            </button>
-          </div>
-
-          {isCreatingGroup && (
-            <form
-              onSubmit={handleCreateGroup}
-              className="eyvan-card rounded-2xl p-4 space-y-3"
-            >
-              <div>
-                <label
-                  htmlFor="new-group-name"
-                  className="block text-xs font-bold theme-heading mb-1.5"
-                >
-                  نام گروه
-                </label>
-                <input
-                  id="new-group-name"
-                  type="text"
-                  value={newGroupName}
-                  onChange={(e) => setNewGroupName(e.target.value)}
-                  placeholder="مثلاً میز حکم آخر هفته"
-                  required
-                  className="w-full min-h-[42px] px-3.5 rounded-xl theme-input border text-sm focus:outline-none focus:border-[#0D8A8A]"
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <div className="text-xs font-bold theme-heading">
-                  انتخاب اعضا
-                </div>
-                <div dir="ltr" className="flex flex-wrap gap-1.5">
-                  {friends.map((f) => {
-                    const picked = selectedMembers.includes(f.username);
-                    return (
-                      <button
-                        key={f.id}
-                        type="button"
-                        onClick={() => {
-                          setSelectedMembers((prev) =>
-                            picked
-                              ? prev.filter((u) => u !== f.username)
-                              : [...prev, f.username]
-                          );
-                        }}
-                        className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border cursor-pointer transition-colors ${
-                          picked
-                            ? 'bg-[#0D8A8A] text-white border-[#0D8A8A]'
-                            : 'theme-subcard theme-heading'
+                      <div
+                        className={`text-xs font-bold mt-0.5 flex items-center gap-1.5 ${
+                          friend.onlineStatus === 'online'
+                            ? 'text-[#22C55E]'
+                            : 'theme-muted'
                         }`}
                       >
-                        {f.username}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                className="w-full min-h-[42px] rounded-xl bg-[#0D8A8A] hover:bg-[#11A3A3] text-white text-sm font-extrabold cursor-pointer"
-              >
-                ایجاد گروه و ورود به گفتگو
-              </button>
-            </form>
-          )}
-
-          <section className="eyvan-card rounded-2xl overflow-hidden divide-y divide-[var(--eyvan-gold-border)]">
-            {groups.length === 0 ? (
-              <div className="px-4 py-8 text-center text-xs sm:text-sm theme-muted">
-                هنوز گروهی ثبت نشده است.
-              </div>
-            ) : (
-              groups.map((group) => (
-                <button
-                  key={group.id}
-                  type="button"
-                  onClick={() => handleOpenGroupChat(group.id)}
-                  data-group-chat={group.id}
-                  className="w-full px-4 py-3.5 flex items-center justify-between gap-3 hover:bg-black/5 transition-colors text-right cursor-pointer"
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div
-                      className="w-11 h-11 rounded-full border border-[#D4AE58]/50 flex items-center justify-center text-white shrink-0"
-                      style={{ backgroundColor: group.accentColor }}
-                    >
-                      <Users className="w-5 h-5" />
-                    </div>
-
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-extrabold theme-heading truncate">
-                          {group.name}
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full ${
+                            friend.onlineStatus === 'online'
+                              ? 'bg-[#22C55E]'
+                              : 'bg-[#64748B]'
+                          }`}
+                        />
+                        <span>
+                          {friend.onlineStatus === 'online' ? 'آنلاین' : 'آفلاین'}
                         </span>
-                        <span className="text-[10px] theme-accent-teal font-bold whitespace-nowrap">
-                          {toPersianDigits(group.members.length)} عضو
-                        </span>
-                      </div>
-                      <div className="text-xs theme-muted truncate mt-0.5">
-                        {group.lastMessage}
                       </div>
                     </div>
                   </div>
 
-                  <div className="flex flex-col items-end gap-1.5 shrink-0">
-                    <span className="text-[10px] theme-muted whitespace-nowrap">
-                      {group.lastMessageTime}
-                    </span>
-                    {group.unreadCount > 0 && (
-                      <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-[#0D8A8A] text-white text-[10px] font-extrabold flex items-center justify-center tabular-nums">
-                        {toPersianDigits(group.unreadCount)}
-                      </span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {isConfirming ? (
+                      <>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => void handleRemoveFriend(friend.userId)}
+                          data-testid={`confirm-remove-friend-${friend.username}`}
+                          className="min-h-[36px] px-3 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                        >
+                          {isBusy ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <UserMinus className="w-3.5 h-3.5" />
+                          )}
+                          <span>تأیید حذف</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => setConfirmRemoveUserId(null)}
+                          className="min-h-[36px] px-2.5 rounded-xl theme-btn-secondary border text-xs font-bold cursor-pointer"
+                        >
+                          انصراف
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmRemoveUserId(friend.userId)}
+                        data-testid={`remove-friend-btn-${friend.username}`}
+                        className="min-h-[36px] px-3 rounded-xl theme-btn-secondary border hover:border-red-500/50 hover:text-red-400 text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        <UserMinus className="w-3.5 h-3.5" />
+                        <span>حذف دوستی</span>
+                      </button>
                     )}
                   </div>
+                </div>
+              );
+            })
+          )
+        ) : activeTab === 'incoming' ? (
+          incoming.length === 0 ? (
+            <div
+              className="px-5 py-10 text-center text-xs sm:text-sm theme-muted"
+              data-testid="incoming-empty-state"
+            >
+              درخواست دوستی در انتظار پاسخی وجود ندارد.
+            </div>
+          ) : (
+            incoming.map((req) => {
+              const accepting = busyKey === `acc:${req.friendshipId}`;
+              const rejecting = busyKey === `rej:${req.friendshipId}`;
+              return (
+                <div
+                  key={req.friendshipId}
+                  data-testid={`incoming-request-${req.user.username}`}
+                  className="px-4 py-3.5 flex flex-wrap items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <ProfileAvatar
+                      avatarCode={toValidAvatarCode(req.user.avatarCode)}
+                      username={req.user.username}
+                      size="md"
+                    />
+                    <div className="min-w-0">
+                      <div
+                        dir="ltr"
+                        className="text-sm font-extrabold theme-heading truncate text-right"
+                      >
+                        {req.user.username}
+                      </div>
+                      <div className="text-xs theme-muted mt-0.5">
+                        درخواست دوستی برای شما ارسال کرده است
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      disabled={accepting || rejecting}
+                      onClick={() => void handleAcceptRequest(req.friendshipId)}
+                      data-testid={`incoming-accept-${req.user.username}`}
+                      className="min-h-[38px] px-3.5 rounded-xl bg-[#0D8A8A] hover:bg-[#11A3A3] disabled:opacity-50 text-white text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {accepting ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Check className="w-3.5 h-3.5" />
+                      )}
+                      <span>پذیرش</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={accepting || rejecting}
+                      onClick={() => void handleRejectRequest(req.friendshipId)}
+                      data-testid={`incoming-reject-${req.user.username}`}
+                      className="min-h-[38px] px-3 rounded-xl theme-btn-secondary border hover:border-red-500/45 hover:text-red-400 disabled:opacity-50 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {rejecting ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <UserX className="w-3.5 h-3.5" />
+                      )}
+                      <span>رد کردن</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })
+          )
+        ) : outgoing.length === 0 ? (
+          <div
+            className="px-5 py-10 text-center text-xs sm:text-sm theme-muted"
+            data-testid="outgoing-empty-state"
+          >
+            درخواست دوستی ارسال‌شده در انتظار تأییدی ندارید.
+          </div>
+        ) : (
+          outgoing.map((req) => {
+            const canceling = busyKey === `can:${req.friendshipId}`;
+            return (
+              <div
+                key={req.friendshipId}
+                data-testid={`outgoing-request-${req.user.username}`}
+                className="px-4 py-3.5 flex items-center justify-between gap-3"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <ProfileAvatar
+                    avatarCode={toValidAvatarCode(req.user.avatarCode)}
+                    username={req.user.username}
+                    size="md"
+                  />
+                  <div className="min-w-0">
+                    <div
+                      dir="ltr"
+                      className="text-sm font-extrabold theme-heading truncate text-right"
+                    >
+                      {req.user.username}
+                    </div>
+                    <div className="text-xs theme-muted mt-0.5">
+                      در انتظار تأیید کاربر مقابل
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={canceling}
+                  onClick={() => void handleCancelRequest(req.friendshipId)}
+                  data-testid={`outgoing-cancel-${req.user.username}`}
+                  className="min-h-[38px] px-3.5 rounded-xl theme-btn-secondary border hover:border-amber-500/45 text-xs font-bold inline-flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-50"
+                >
+                  {canceling ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <X className="w-3.5 h-3.5" />
+                  )}
+                  <span>لغو درخواست</span>
                 </button>
-              ))
-            )}
-          </section>
-        </div>
-      )}
+              </div>
+            );
+          })
+        )}
+      </section>
     </div>
   );
 };

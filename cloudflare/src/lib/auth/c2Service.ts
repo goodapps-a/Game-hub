@@ -749,6 +749,15 @@ export async function resetPasswordWithToken(
     };
   }
 
+  try {
+    await db
+      .prepare(`DELETE FROM user_presence_sessions WHERE user_id = ?`)
+      .bind(row.user_id)
+      .run();
+  } catch {
+    // Non-fatal on pre-0007 databases
+  }
+
   return {
     ok: true,
     status: 200,

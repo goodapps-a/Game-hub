@@ -23,6 +23,7 @@ import {
 } from './lib/types';
 import { HokmRoomDO, INTERNAL_SESSION_TOKEN_HEADER } from './HokmRoomDO';
 import {
+  fetchPlayerStatsByUserIdFromD1,
   fetchPlayerStatsFromD1,
   fetchRecentMatchesFromD1,
   upsertUserInD1,
@@ -35,6 +36,8 @@ import {
   isHttpsRequest,
   parseSessionCookieFromHeader,
 } from './lib/sessionCookie';
+import { parseAuthCookieFromHeader } from './lib/auth/authCookie';
+import { verifyAuthSession } from './lib/auth/authService';
 import { handleAuthHttpRequest } from './lib/auth/httpHandler';
 import {
   createEmailSender,
@@ -45,6 +48,8 @@ import {
   evaluateOriginPolicy,
   resolveClientIp,
 } from './lib/auth/securityPolicy';
+import { handleSocialHttpRequest } from './lib/social/httpHandler';
+import { pruneExpiredPresenceSessionsBatched } from './lib/social/socialService';
 
 export { HokmRoomDO };
 
@@ -248,6 +253,22 @@ export default {
       if (authRes) return authRes;
     }
 
+    // 1c) Stage D1 Social & Online Presence (`/api/social/*`)
+    if (url.pathname.startsWith('/api/social/')) {
+      const clientIp = resolveClientIp({
+        cfConnectingIp: request.headers.get('CF-Connecting-IP'),
+      });
+      const socialRes = await handleSocialHttpRequest(request, url.pathname, {
+        db: env.EYVAN_DB,
+        corsHeaders: cors,
+        secureCookie,
+        cookieOptions: cookieOpts,
+        originAllowed: isOriginAllowed(request, env),
+        clientIp,
+      });
+      if (socialRes) return socialRes;
+    }
+
     // 2) R2 asset serving (card artwork, audio, avatars)
     if (url.pathname.startsWith('/r2/') && request.method === 'GET') {
       const key = url.pathname.slice(4);
@@ -446,15 +467,35 @@ export default {
         );
       }
 
+      // Optionally resolve verified central userId from HttpOnly auth cookie (never trust body)
+      let verifiedUserId: string | null = null;
+      const rawAuthToken = parseAuthCookieFromHeader(request.headers.get('Cookie'));
+      if (rawAuthToken && env.EYVAN_DB) {
+        try {
+          const verifiedAuth = await verifyAuthSession(env.EYVAN_DB, rawAuthToken);
+          if (verifiedAuth.authenticated && verifiedAuth.user) {
+            verifiedUserId = verifiedAuth.user.userId;
+          }
+        } catch {
+          // Non-fatal: continue as guest room join
+        }
+      }
+
       let lastRes: Response | null = null;
       for (let attempt = 0; attempt < MAX_ROOM_CREATE_RETRIES; attempt++) {
         const code = generateShortRoomCode();
         const id = env.HOKM_ROOM.idFromName(code);
         const stub = env.HOKM_ROOM.get(id);
+        const forwardHeaders: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
+        if (verifiedUserId) {
+          forwardHeaders['X-Eyvan-Verified-User-Id'] = verifiedUserId;
+        }
         const res = await stub.fetch(
           new Request(`https://room.internal/create?code=${code}`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: forwardHeaders,
             body: bodyRead.text,
           })
         );
@@ -530,10 +571,29 @@ export default {
           );
         }
 
+        let verifiedUserId: string | null = null;
+        const rawAuthToken = parseAuthCookieFromHeader(request.headers.get('Cookie'));
+        if (rawAuthToken && env.EYVAN_DB) {
+          try {
+            const verifiedAuth = await verifyAuthSession(env.EYVAN_DB, rawAuthToken);
+            if (verifiedAuth.authenticated && verifiedAuth.user) {
+              verifiedUserId = verifiedAuth.user.userId;
+            }
+          } catch {
+            // Non-fatal: continue as guest room join
+          }
+        }
+
+        const forwardHeaders: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
+        if (verifiedUserId) {
+          forwardHeaders['X-Eyvan-Verified-User-Id'] = verifiedUserId;
+        }
         const res = await stub.fetch(
           new Request(`https://room.internal/join?code=${code}`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: forwardHeaders,
             body: bodyRead.text,
           })
         );
@@ -601,8 +661,62 @@ export default {
       }
     }
 
-    // 9) D1 Player Stats (canonical case-insensitive camelCase, error-resilient)
-    const statsMatch = url.pathname.match(/^\/api\/stats\/([A-Za-z0-9_]{3,20})$/);
+    // 9a) Authenticated Permanent Stats (`GET /api/stats/me` — strictly bound to server-verified user_id)
+    if (url.pathname === '/api/stats/me' && request.method === 'GET') {
+      const rawAuthToken = parseAuthCookieFromHeader(request.headers.get('Cookie'));
+      if (!rawAuthToken) {
+        return Response.json(
+          { ok: false, code: 'UNAUTHORIZED', message: 'برای مشاهده آمار حساب خود ابتدا وارد شوید.' },
+          {
+            status: 401,
+            headers: { 'Cache-Control': 'no-store, private', ...cors },
+          }
+        );
+      }
+      try {
+        const verified = await verifyAuthSession(env.EYVAN_DB, rawAuthToken);
+        if (!verified.authenticated || !verified.user) {
+          return Response.json(
+            { ok: false, code: 'UNAUTHORIZED', message: 'نشست کاربری معتبر نیست.' },
+            {
+              status: 401,
+              headers: { 'Cache-Control': 'no-store, private', ...cors },
+            }
+          );
+        }
+        const stats = await fetchPlayerStatsByUserIdFromD1(
+          env.EYVAN_DB,
+          verified.user.userId
+        );
+        return Response.json(
+          {
+            ok: true,
+            stats: stats ?? {
+              userId: verified.user.userId,
+              username: verified.user.username,
+              matchesPlayed: 0,
+              wins: 0,
+              losses: 0,
+              kotWins: 0,
+              hakemKotWins: 0,
+              lastPlayedAt: null,
+            },
+          },
+          {
+            headers: { 'Cache-Control': 'no-store, private', ...cors },
+          }
+        );
+      } catch (err) {
+        console.error('[Worker] D1 /api/stats/me query failed:', err);
+        return Response.json(
+          { ok: false, code: 'DATABASE_ERROR', message: 'خطا در خواندن آمار حساب کاربری.' },
+          { status: 503, headers: cors }
+        );
+      }
+    }
+
+    // 9b) D1 Player Stats (resolved via users.username_key -> user_id -> user_game_stats)
+    const statsMatch = url.pathname.match(/^\/api\/stats\/([A-Za-z0-9_.]{3,20})$/);
     if (statsMatch && request.method === 'GET') {
       const username = sanitizeUsername(statsMatch[1]);
       if (!username) {
@@ -637,17 +751,27 @@ export default {
     ctx?: ExecutionContextLike
   ): Promise<void> {
     const task = (async () => {
+      const now =
+        typeof controller?.scheduledTime === 'number' &&
+        Number.isFinite(controller.scheduledTime) &&
+        controller.scheduledTime > 0
+          ? controller.scheduledTime
+          : Date.now();
+
       try {
-        const now =
-          typeof controller?.scheduledTime === 'number' &&
-          Number.isFinite(controller.scheduledTime) &&
-          controller.scheduledTime > 0
-            ? controller.scheduledTime
-            : Date.now();
         await pruneExpiredRateLimitsBatched(env.EYVAN_DB, { now });
       } catch (err) {
         console.error(
           '[Worker] Scheduled rate-limit cleanup failed:',
+          err instanceof Error ? err.message : 'unknown'
+        );
+      }
+
+      try {
+        await pruneExpiredPresenceSessionsBatched(env.EYVAN_DB, { now });
+      } catch (err) {
+        console.error(
+          '[Worker] Scheduled presence cleanup failed:',
           err instanceof Error ? err.message : 'unknown'
         );
       }

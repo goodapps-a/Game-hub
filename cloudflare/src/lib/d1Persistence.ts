@@ -4,7 +4,7 @@ import {
   normalizeUsernameKey,
 } from '../../../src/games/hokm/online/protocol';
 import { Seat, TeamId } from '../../../src/games/hokm/engine/types';
-import { D1DatabaseLike } from './types';
+import { D1DatabaseLike, D1PreparedStatementLike } from './types';
 
 interface D1MatchRow {
   match_id: string;
@@ -22,6 +22,7 @@ interface D1MatchRow {
 interface D1MatchPlayerRow {
   match_id: string;
   player_id: string;
+  user_id?: string | null;
   username: string;
   canonical_seat: Seat;
   team: TeamId;
@@ -29,6 +30,7 @@ interface D1MatchPlayerRow {
 }
 
 interface D1PlayerStatsRow {
+  user_id?: string | null;
   username: string;
   display_username?: string | null;
   matches_played: number;
@@ -37,6 +39,11 @@ interface D1PlayerStatsRow {
   kot_wins: number;
   hakem_kot_wins: number;
   last_played_at: number | null;
+}
+
+interface D1UserLookupRow {
+  user_id: string;
+  username: string;
 }
 
 function generateD1UserId(): string {
@@ -59,8 +66,8 @@ export async function upsertUserInD1(
   username: string,
   avatarCode: string,
   now = Date.now()
-): Promise<void> {
-  if (!db) return;
+): Promise<string | null> {
+  if (!db) return null;
   const canonicalKey = normalizeUsernameKey(username);
   const displayName = username.trim();
   const newUserId = generateD1UserId();
@@ -81,6 +88,43 @@ export async function upsertUserInD1(
     )
     .bind(newUserId, displayName, canonicalKey, displayName, avatarCode, now, now, now)
     .run();
+
+  const row = await db
+    .prepare(`SELECT user_id FROM users WHERE username_key = ? LIMIT 1`)
+    .bind(canonicalKey)
+    .first<{ user_id: string }>();
+
+  return row?.user_id ?? null;
+}
+
+async function resolveCanonicalUserIdForMatchPlayer(
+  db: D1DatabaseLike,
+  player: CompletedMatchRecord['players'][number],
+  now: number
+): Promise<string | null> {
+  // 1) Prefer verified permanent userId if explicitly attached and present in `users`
+  if (player.userId && typeof player.userId === 'string') {
+    const byId = await db
+      .prepare(`SELECT user_id FROM users WHERE user_id = ? LIMIT 1`)
+      .bind(player.userId)
+      .first<{ user_id: string }>();
+    if (byId?.user_id) {
+      return byId.user_id;
+    }
+  }
+
+  // 2) Fallback: resolve by canonical lowercase `username_key`
+  const canonicalKey = normalizeUsernameKey(player.username);
+  const byKey = await db
+    .prepare(`SELECT user_id FROM users WHERE username_key = ? LIMIT 1`)
+    .bind(canonicalKey)
+    .first<{ user_id: string }>();
+  if (byKey?.user_id) {
+    return byKey.user_id;
+  }
+
+  // 3) Ensure guest players without a prior `users` row still receive a stable `user_id`
+  return upsertUserInD1(db, player.username, 'portrait', now);
 }
 
 /**
@@ -88,12 +132,14 @@ export async function upsertUserInD1(
  *
  * Guarantees:
  * - Only persists genuinely completed matches (caller enforces MATCH_COMPLETE + 4 players).
- * - Checks whether `match_id` already exists BEFORE updating `player_stats`, so retries
- *   after network glitches or DO restarts NEVER double-count wins/losses/kot stats!
- * - Uses canonical lowercase `username` keys in `player_stats` (with `display_username`
- *   preserved) and links `user_id` non-destructively when a matching `users` row exists.
- * - Executes `matches`, `match_players`, and `player_stats` in one atomic `db.batch(...)`
- *   transaction (all succeed or all roll back cleanly).
+ * - Checks whether `match_id` already exists BEFORE updating `user_game_stats` / `player_stats`,
+ *   so retries after network glitches or DO restarts NEVER double-count stats!
+ * - Permanently binds match players and cumulative stats (`user_game_stats`) to immutable
+ *   `users.user_id`, while preserving historical display `username` on `match_players`.
+ * - Keeps legacy `player_stats` mirrored safely without ever colliding with or corrupting
+ *   another `user_id`'s row if an old username is later recycled.
+ * - Executes `matches`, `match_players`, `user_game_stats`, and `player_stats` in one atomic
+ *   `db.batch(...)` transaction.
  */
 export async function persistCompletedMatchToD1(
   db: D1DatabaseLike | undefined,
@@ -103,7 +149,7 @@ export async function persistCompletedMatchToD1(
     return { persisted: false, alreadyExisted: false };
   }
 
-  // Idempotency check: if this match_id was already committed, do NOT re-increment player_stats!
+  // Idempotency check: if this match_id was already committed, do NOT re-increment stats!
   const existing = await db
     .prepare(`SELECT match_id FROM matches WHERE match_id = ? LIMIT 1`)
     .bind(record.matchId)
@@ -113,7 +159,25 @@ export async function persistCompletedMatchToD1(
     return { persisted: true, alreadyExisted: true };
   }
 
-  const stmts = [
+  const resolvedPlayers: Array<{
+    player: CompletedMatchRecord['players'][number];
+    canonicalKey: string;
+    displayName: string;
+    userId: string | null;
+  }> = [];
+
+  for (const p of record.players) {
+    const canonicalKey = normalizeUsernameKey(p.username);
+    const displayName = p.username.trim();
+    const userId = await resolveCanonicalUserIdForMatchPlayer(
+      db,
+      p,
+      record.finishedAt
+    );
+    resolvedPlayers.push({ player: p, canonicalKey, displayName, userId });
+  }
+
+  const stmts: D1PreparedStatementLike[] = [
     db
       .prepare(
         `INSERT INTO matches
@@ -134,53 +198,113 @@ export async function persistCompletedMatchToD1(
       ),
   ];
 
-  for (const p of record.players) {
-    const canonicalKey = normalizeUsernameKey(p.username);
-    const displayName = p.username.trim();
+  for (const item of resolvedPlayers) {
+    const { player: p, canonicalKey, displayName, userId } = item;
+    const wonInt = p.won ? 1 : 0;
+    const lossInt = p.won ? 0 : 1;
+    const isKotWin = p.won && record.lastWinType === 'kot' ? 1 : 0;
+    const isHakemKotWin = p.won && record.lastWinType === 'hakem_kot' ? 1 : 0;
 
+    // Preserve historical display username AND permanent user_id on match_players
     stmts.push(
       db
         .prepare(
           `INSERT INTO match_players
            (match_id, player_id, username, username_key, user_id, canonical_seat, team, won)
-           VALUES (?, ?, ?, ?, (SELECT user_id FROM users WHERE username_key = ? LIMIT 1), ?, ?, ?)`
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           record.matchId,
           p.playerId,
           displayName,
           canonicalKey,
-          canonicalKey,
+          userId,
           p.canonicalSeat,
           p.team,
-          p.won ? 1 : 0
+          wonInt
         )
     );
 
-    const isKotWin = p.won && record.lastWinType === 'kot' ? 1 : 0;
-    const isHakemKotWin = p.won && record.lastWinType === 'hakem_kot' ? 1 : 0;
+    // Authoritative permanent stats keyed strictly by immutable `user_id`
+    if (userId) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO user_game_stats (
+               user_id, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at, updated_at
+             ) VALUES (?, 1, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(user_id) DO UPDATE SET
+               matches_played = matches_played + 1,
+               wins = wins + excluded.wins,
+               losses = losses + excluded.losses,
+               kot_wins = kot_wins + excluded.kot_wins,
+               hakem_kot_wins = hakem_kot_wins + excluded.hakem_kot_wins,
+               last_played_at = CASE
+                 WHEN user_game_stats.last_played_at IS NULL OR excluded.last_played_at >= user_game_stats.last_played_at
+                   THEN excluded.last_played_at
+                 ELSE user_game_stats.last_played_at
+               END,
+               updated_at = excluded.updated_at`
+          )
+          .bind(
+            userId,
+            wonInt,
+            lossInt,
+            isKotWin,
+            isHakemKotWin,
+            record.finishedAt,
+            record.finishedAt
+          )
+      );
+    }
+
+    // Legacy compatibility mirror in `player_stats`:
+    // Never merges two different `user_id` owners if an old username was recycled.
     stmts.push(
       db
         .prepare(
           `INSERT INTO player_stats
            (username, display_username, user_id, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at)
-           VALUES (?, ?, (SELECT user_id FROM users WHERE username_key = ? LIMIT 1), 1, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
            ON CONFLICT(username) DO UPDATE SET
              display_username = excluded.display_username,
-             user_id = COALESCE(player_stats.user_id, excluded.user_id),
-             matches_played = matches_played + 1,
-             wins = wins + excluded.wins,
-             losses = losses + excluded.losses,
-             kot_wins = kot_wins + excluded.kot_wins,
-             hakem_kot_wins = hakem_kot_wins + excluded.hakem_kot_wins,
+             user_id = CASE
+               WHEN excluded.user_id IS NOT NULL THEN excluded.user_id
+               ELSE player_stats.user_id
+             END,
+             matches_played = CASE
+               WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
+                 THEN 1
+               ELSE player_stats.matches_played + 1
+             END,
+             wins = CASE
+               WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
+                 THEN excluded.wins
+               ELSE player_stats.wins + excluded.wins
+             END,
+             losses = CASE
+               WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
+                 THEN excluded.losses
+               ELSE player_stats.losses + excluded.losses
+             END,
+             kot_wins = CASE
+               WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
+                 THEN excluded.kot_wins
+               ELSE player_stats.kot_wins + excluded.kot_wins
+             END,
+             hakem_kot_wins = CASE
+               WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
+                 THEN excluded.hakem_kot_wins
+               ELSE player_stats.hakem_kot_wins + excluded.hakem_kot_wins
+             END,
              last_played_at = excluded.last_played_at`
         )
         .bind(
           canonicalKey,
           displayName,
-          canonicalKey,
-          p.won ? 1 : 0,
-          p.won ? 0 : 1,
+          userId,
+          wonInt,
+          lossInt,
           isKotWin,
           isHakemKotWin,
           record.finishedAt
@@ -221,7 +345,7 @@ export async function fetchRecentMatchesFromD1(
   const matchIds = rows.map((r) => r.match_id);
   const playersRes = await db
     .prepare(
-      `SELECT match_id, player_id, username, canonical_seat, team, won
+      `SELECT match_id, player_id, user_id, username, canonical_seat, team, won
        FROM match_players
        WHERE match_id IN (${placeholders})
        ORDER BY canonical_seat ASC`
@@ -249,6 +373,7 @@ export async function fetchRecentMatchesFromD1(
     handsPlayed: row.hands_played,
     players: (playersByMatch.get(row.match_id) ?? []).map((p) => ({
       playerId: p.player_id,
+      ...(p.user_id ? { userId: p.user_id } : {}),
       username: p.username,
       canonicalSeat: p.canonical_seat,
       team: p.team,
@@ -258,26 +383,160 @@ export async function fetchRecentMatchesFromD1(
 }
 
 /**
- * Fetches player stats by canonical lowercase username key, returning preserved `display_username`.
+ * Fetches match history for a permanent `user_id` across ALL past & current usernames,
+ * preserving the historical `username` played in each match.
+ */
+export async function fetchPlayerMatchHistoryByUserIdFromD1(
+  db: D1DatabaseLike,
+  userId: string,
+  limit = 20
+): Promise<CompletedMatchRecord[]> {
+  const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+  const matchesRes = await db
+    .prepare(
+      `SELECT DISTINCT
+         m.match_id, m.room_code, m.started_at, m.finished_at,
+         m.winning_team, m.team_a_score, m.team_b_score, m.target_score,
+         m.last_win_type, m.hands_played
+       FROM matches m
+       INNER JOIN match_players mp ON mp.match_id = m.match_id
+       WHERE mp.user_id = ?
+       ORDER BY m.finished_at DESC
+       LIMIT ?`
+    )
+    .bind(userId, safeLimit)
+    .all<D1MatchRow>();
+
+  const rows = matchesRes.results ?? [];
+  if (rows.length === 0) return [];
+
+  const placeholders = rows.map(() => '?').join(', ');
+  const matchIds = rows.map((r) => r.match_id);
+  const playersRes = await db
+    .prepare(
+      `SELECT match_id, player_id, user_id, username, canonical_seat, team, won
+       FROM match_players
+       WHERE match_id IN (${placeholders})
+       ORDER BY canonical_seat ASC`
+    )
+    .bind(...matchIds)
+    .all<D1MatchPlayerRow>();
+
+  const playersByMatch = new Map<string, D1MatchPlayerRow[]>();
+  for (const p of playersRes.results ?? []) {
+    const list = playersByMatch.get(p.match_id) ?? [];
+    list.push(p);
+    playersByMatch.set(p.match_id, list);
+  }
+
+  return rows.map((row) => ({
+    matchId: row.match_id,
+    roomCode: row.room_code,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    winningTeam: row.winning_team,
+    teamAScore: row.team_a_score,
+    teamBScore: row.team_b_score,
+    targetScore: row.target_score,
+    lastWinType: row.last_win_type,
+    handsPlayed: row.hands_played,
+    players: (playersByMatch.get(row.match_id) ?? []).map((p) => ({
+      playerId: p.player_id,
+      ...(p.user_id ? { userId: p.user_id } : {}),
+      username: p.username,
+      canonicalSeat: p.canonical_seat,
+      team: p.team,
+      won: p.won === 1,
+    })),
+  }));
+}
+
+/**
+ * Fetches authoritative game statistics strictly by permanent immutable `user_id`.
+ * Immune to username renames (1, 2, or N times).
+ */
+export async function fetchPlayerStatsByUserIdFromD1(
+  db: D1DatabaseLike,
+  userId: string
+): Promise<PlayerOnlineStats | null> {
+  const userRow = await db
+    .prepare(`SELECT user_id, username FROM users WHERE user_id = ? LIMIT 1`)
+    .bind(userId)
+    .first<D1UserLookupRow>();
+
+  if (!userRow) return null;
+
+  const statsRow = await db
+    .prepare(
+      `SELECT
+         user_id, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at
+       FROM user_game_stats
+       WHERE user_id = ?
+       LIMIT 1`
+    )
+    .bind(userId)
+    .first<Omit<D1PlayerStatsRow, 'username'>>();
+
+  if (!statsRow) {
+    return {
+      userId: userRow.user_id,
+      username: userRow.username,
+      matchesPlayed: 0,
+      wins: 0,
+      losses: 0,
+      kotWins: 0,
+      hakemKotWins: 0,
+      lastPlayedAt: null,
+    };
+  }
+
+  return {
+    userId: userRow.user_id,
+    username: userRow.username,
+    matchesPlayed: statsRow.matches_played,
+    wins: statsRow.wins,
+    losses: statsRow.losses,
+    kotWins: statsRow.kot_wins,
+    hakemKotWins: statsRow.hakem_kot_wins,
+    lastPlayedAt: statsRow.last_played_at,
+  };
+}
+
+/**
+ * Fetches player stats by current username, resolving strictly through `users.username_key -> user_id -> user_game_stats`.
+ * Falls back to unlinked legacy `player_stats` rows (`user_id IS NULL`) ONLY when no `users` row matches,
+ * ensuring renamed users' stats follow their current username and never leak under abandoned names.
  */
 export async function fetchPlayerStatsFromD1(
   db: D1DatabaseLike,
   username: string
 ): Promise<PlayerOnlineStats> {
   const canonicalKey = normalizeUsernameKey(username);
-  const row = await db
+  const userRow = await db
+    .prepare(`SELECT user_id, username FROM users WHERE username_key = ? LIMIT 1`)
+    .bind(canonicalKey)
+    .first<D1UserLookupRow>();
+
+  if (userRow) {
+    const byId = await fetchPlayerStatsByUserIdFromD1(db, userRow.user_id);
+    if (byId) return byId;
+  }
+
+  // Fallback ONLY for legacy pre-0004 unlinked rows (`user_id IS NULL`)
+  const legacyRow = await db
     .prepare(
       `SELECT
          username, display_username, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at
        FROM player_stats
-       WHERE username = ?
+       WHERE username = ? AND user_id IS NULL
        LIMIT 1`
     )
     .bind(canonicalKey)
     .first<D1PlayerStatsRow>();
 
-  if (!row) {
+  if (!legacyRow) {
     return {
+      userId: null,
       username: username.trim(),
       matchesPlayed: 0,
       wins: 0,
@@ -289,12 +548,13 @@ export async function fetchPlayerStatsFromD1(
   }
 
   return {
-    username: row.display_username ?? row.username,
-    matchesPlayed: row.matches_played,
-    wins: row.wins,
-    losses: row.losses,
-    kotWins: row.kot_wins,
-    hakemKotWins: row.hakem_kot_wins,
-    lastPlayedAt: row.last_played_at,
+    userId: null,
+    username: legacyRow.display_username ?? legacyRow.username,
+    matchesPlayed: legacyRow.matches_played,
+    wins: legacyRow.wins,
+    losses: legacyRow.losses,
+    kotWins: legacyRow.kot_wins,
+    hakemKotWins: legacyRow.hakem_kot_wins,
+    lastPlayedAt: legacyRow.last_played_at,
   };
 }

@@ -245,6 +245,7 @@ export class HokmRoomManager {
 
   public createRoom(input: {
     username: unknown;
+    userId?: string | null;
     avatarCode?: unknown;
     targetMatchScore?: unknown;
   }):
@@ -289,6 +290,7 @@ export class HokmRoomManager {
 
     const joinRes = controller.joinPlayer({
       username,
+      userId: input.userId ?? null,
       avatarCode,
       preferredSeat: 'south',
     });
@@ -334,6 +336,7 @@ export class HokmRoomManager {
     rawRoomCode: string,
     input: {
       username: unknown;
+      userId?: string | null;
       avatarCode?: unknown;
       preferredSeat?: Seat;
     }
@@ -373,6 +376,7 @@ export class HokmRoomManager {
 
     const joinRes = room.controller.joinPlayer({
       username,
+      userId: input.userId ?? null,
       avatarCode,
       preferredSeat: input.preferredSeat,
     });

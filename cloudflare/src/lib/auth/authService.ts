@@ -601,7 +601,8 @@ export async function verifyAuthSession(
 }
 
 /**
- * Revokes a single session on the server by its opaque cookie token.
+ * Revokes a single session on the server by its opaque cookie token
+ * and immediately removes any online presence leases tied to that session.
  */
 export async function revokeAuthSessionByToken(
   db: D1DatabaseLike,
@@ -610,6 +611,15 @@ export async function revokeAuthSessionByToken(
 ): Promise<boolean> {
   if (!rawToken) return false;
   const tokenHash = await sha256Hex(rawToken);
+
+  // Look up session_id first so we can clear its presence leases immediately on logout
+  const sessionRow = await db
+    .prepare(
+      `SELECT session_id FROM auth_sessions WHERE token_hash = ? LIMIT 1`
+    )
+    .bind(tokenHash)
+    .first<{ session_id: string }>();
+
   const res = await db
     .prepare(
       `UPDATE auth_sessions
@@ -618,11 +628,24 @@ export async function revokeAuthSessionByToken(
     )
     .bind(now, tokenHash)
     .run();
+
+  if (sessionRow?.session_id) {
+    try {
+      await db
+        .prepare(`DELETE FROM user_presence_sessions WHERE auth_session_id = ?`)
+        .bind(sessionRow.session_id)
+        .run();
+    } catch {
+      // Non-fatal on pre-0007 databases
+    }
+  }
+
   return Number(res.meta?.changes ?? 0) > 0;
 }
 
 /**
- * Revokes ALL active sessions for a user on the server (used by logout-all and C2 password reset).
+ * Revokes ALL active sessions for a user on the server (used by logout-all and C2 password reset)
+ * and immediately clears all online presence leases for that user.
  */
 export async function revokeAllAuthSessionsForUser(
   db: D1DatabaseLike,
@@ -637,11 +660,21 @@ export async function revokeAllAuthSessionsForUser(
     )
     .bind(now, userId)
     .run();
+
+  try {
+    await db
+      .prepare(`DELETE FROM user_presence_sessions WHERE user_id = ?`)
+      .bind(userId)
+      .run();
+  } catch {
+    // Non-fatal on pre-0007 databases
+  }
+
   return Number(res.meta?.changes ?? 0);
 }
 
 /**
- * Revokes a specific session owned by `userId`.
+ * Revokes a specific session owned by `userId` and clears its presence leases.
  */
 export async function revokeAuthSessionById(
   db: D1DatabaseLike,
@@ -657,6 +690,16 @@ export async function revokeAuthSessionById(
     )
     .bind(now, sessionId, userId)
     .run();
+
+  try {
+    await db
+      .prepare(`DELETE FROM user_presence_sessions WHERE auth_session_id = ?`)
+      .bind(sessionId)
+      .run();
+  } catch {
+    // Non-fatal on pre-0007 databases
+  }
+
   return Number(res.meta?.changes ?? 0) > 0;
 }
 
@@ -911,4 +954,210 @@ export async function updateAuthenticatedProfile(
     message: 'تغییرات پروفایل با موفقیت ذخیره شد.',
   };
 }
+
+/**
+ * Safely upgrades a server-verified guest `users` row (`account_status = 'guest'`)
+ * into a registered central account IN-PLACE so the permanent `user_id`, all
+ * `user_game_stats`, and all `match_players.user_id` records remain 100% preserved.
+ *
+ * Security invariant:
+ * - Only upgrades rows whose current `account_status === 'guest'` and `auth_provider === 'guest'`.
+ * - Enforces global uniqueness for `email_key` and `username_key` excluding `guestUserId`.
+ * - Enters `pending_verification` and issues a single-use SHA-256 verification token.
+ */
+export async function upgradeGuestAccountToRegistered(
+  db: D1DatabaseLike,
+  guestUserId: string,
+  body: Record<string, unknown>,
+  ctx: AuthRequestContext,
+  emailSender?: EmailSender
+): Promise<AuthRegisterResult> {
+  const now = ctx.now ?? Date.now();
+  const sender = emailSender ?? createEmailSender({ provider: 'disabled' });
+
+  const validated = validateRegisterPayload(body);
+  if (validated.ok === false) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'INVALID_INPUT',
+      message: validated.message,
+    };
+  }
+
+  const guestRow = await db
+    .prepare(
+      `SELECT
+         user_id, username, username_key, display_name,
+         email, email_key, email_verified,
+         avatar_code, avatar_url, auth_provider, account_status,
+         created_at, last_seen_at
+       FROM users
+       WHERE user_id = ?
+       LIMIT 1`
+    )
+    .bind(guestUserId)
+    .first<UserDbRow>();
+
+  if (
+    !guestRow ||
+    guestRow.account_status !== 'guest' ||
+    guestRow.auth_provider !== 'guest'
+  ) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'ACCOUNT_CONFLICT',
+      message: 'حساب مهمان معتبر برای ارتقا یافت نشد.',
+    };
+  }
+
+  const conflict = await db
+    .prepare(
+      `SELECT 1 AS hit
+       FROM users
+       WHERE (email_key = ? OR username_key = ?)
+         AND user_id != ?
+       LIMIT 1`
+    )
+    .bind(validated.emailKey, validated.usernameKey, guestUserId)
+    .first<{ hit: number }>();
+
+  if (conflict) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'ACCOUNT_CONFLICT',
+      message:
+        'امکان ثبت‌نام با این مشخصات وجود ندارد. لطفاً ایمیل یا نام کاربری دیگری انتخاب کنید.',
+    };
+  }
+
+  const identityId = generatePrefixedId('idn', 12);
+  const rawVerifyToken = generateOpaqueToken(32);
+  const verifyTokenHash = await sha256Hex(rawVerifyToken);
+  const verifyExpiresAt = now + EMAIL_VERIFICATION_TTL_MS;
+  const pwdRecord = await hashPassword(validated.password);
+
+  try {
+    await db.batch([
+      db
+        .prepare(
+          `UPDATE users
+           SET username = ?,
+               username_key = ?,
+               display_name = ?,
+               email = ?,
+               email_key = ?,
+               email_verified = 0,
+               auth_provider = 'password',
+               account_status = 'pending_verification',
+               last_seen_at = ?,
+               updated_at = ?
+           WHERE user_id = ? AND account_status = 'guest'`
+        )
+        .bind(
+          validated.username,
+          validated.usernameKey,
+          validated.username,
+          validated.email,
+          validated.emailKey,
+          now,
+          now,
+          guestUserId
+        ),
+      db
+        .prepare(
+          `INSERT INTO auth_identities (
+             identity_id, user_id, provider, provider_subject,
+             password_hash, password_salt, password_algo,
+             created_at, updated_at
+           ) VALUES (?, ?, 'password', ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          identityId,
+          guestUserId,
+          guestUserId,
+          pwdRecord.hash,
+          pwdRecord.salt,
+          pwdRecord.algo,
+          now,
+          now
+        ),
+      db
+        .prepare(
+          `INSERT INTO email_verification_tokens (
+             token_hash, user_id, email_key, created_at, expires_at, consumed_at
+           ) VALUES (?, ?, ?, ?, ?, NULL)`
+        )
+        .bind(
+          verifyTokenHash,
+          guestUserId,
+          validated.emailKey,
+          now,
+          verifyExpiresAt
+        ),
+    ]);
+  } catch (err) {
+    if (isUniqueConstraintError(err)) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'ACCOUNT_CONFLICT',
+        message:
+          'امکان ثبت‌نام با این مشخصات وجود ندارد. لطفاً ایمیل یا نام کاربری دیگری انتخاب کنید.',
+      };
+    }
+    throw err;
+  }
+
+  let delivery: EmailDeliveryResult;
+  if (ctx.isProduction && !ctx.publicAppBaseUrl) {
+    delivery = {
+      configured: false,
+      sent: false,
+      provider: 'unconfigured',
+      errorCode: 'PUBLIC_APP_URL_UNCONFIGURED',
+    };
+  } else {
+    const baseUrl = ctx.publicAppBaseUrl ?? 'http://localhost:3000';
+    const verifyUrl = buildVerificationLink(baseUrl, rawVerifyToken);
+    delivery = await deliverEmailSafely(() =>
+      sender.sendVerificationEmail({
+        to: validated.email,
+        username: validated.username,
+        verifyUrl,
+        expiresInHours: Math.round(EMAIL_VERIFICATION_TTL_MS / (60 * 60 * 1000)),
+      })
+    );
+  }
+
+  return {
+    ok: true,
+    status: 201,
+    verificationRequired: true,
+    emailDelivery: {
+      configured: delivery.configured,
+      sent: delivery.sent,
+    },
+    internalDelivery: delivery,
+    message: delivery.sent
+      ? 'حساب مهمان با حفظ شناسه و سوابق به حساب مرکزی ارتقا یافت. لطفاً ایمیل خود را تأیید کنید.'
+      : 'حساب مهمان با حفظ شناسه و سوابق در انتظار تأیید ایمیل ثبت شد.',
+    user: {
+      userId: guestUserId,
+      username: validated.username,
+      displayName: validated.username,
+      email: validated.email,
+      emailVerified: false,
+      avatarCode: guestRow.avatar_code,
+      avatarUrl: guestRow.avatar_url,
+      authProvider: 'password',
+      accountStatus: 'pending_verification',
+      createdAt: guestRow.created_at,
+      lastSeenAt: now,
+    },
+  };
+}
+
 

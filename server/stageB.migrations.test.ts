@@ -209,15 +209,18 @@ describe('Stage B — Database Migrations, Cleanup Safety & Demo Data Separation
       ).run(t1);
 
       const res = runDatabaseMigrations(db);
+      const expectedAfterBaseline = listMigrationFiles().filter(
+        (f) =>
+          f !== '0001_init.sql' &&
+          f !== '0002_indexes.sql' &&
+          f !== '0003_username_canonical_key.sql'
+      );
       assert.deepEqual(res.baselineRecorded, [
         '0001_init.sql',
         '0002_indexes.sql',
         '0003_username_canonical_key.sql',
       ]);
-      assert.deepEqual(res.applied, [
-        '0004_accounts_auth.sql',
-        '0005_social_chat.sql',
-      ]);
+      assert.deepEqual(res.applied, expectedAfterBaseline);
 
       // Verify legacy_users_archive preserved all pre-0004 users
       const legacyCount = (
@@ -283,17 +286,18 @@ describe('Stage B — Database Migrations, Cleanup Safety & Demo Data Separation
     const db = new Database(':memory:');
     db.pragma('foreign_keys = ON');
     try {
+      const totalMigrations = listMigrationFiles().length;
       const first = runDatabaseMigrations(db);
-      assert.equal(first.applied.length, 5);
+      assert.equal(first.applied.length, totalMigrations);
 
       const second = runDatabaseMigrations(db);
       assert.deepEqual(second.applied, []);
-      assert.equal(second.skipped.length, 5);
+      assert.equal(second.skipped.length, totalMigrations);
       assert.deepEqual(second.baselineRecorded, []);
 
       const third = runDatabaseMigrations(db);
       assert.deepEqual(third.applied, []);
-      assert.equal(third.skipped.length, 5);
+      assert.equal(third.skipped.length, totalMigrations);
     } finally {
       db.close();
     }

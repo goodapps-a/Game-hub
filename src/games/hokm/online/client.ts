@@ -305,6 +305,23 @@ export async function fetchPlayerOnlineStats(
   }
 }
 
+export async function fetchMyOnlineStats(): Promise<PlayerOnlineStats | null> {
+  try {
+    const res = await fetch(buildOnlineHttpUrl('/api/stats/me'), {
+      method: 'GET',
+      credentials: 'include',
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      ok?: boolean;
+      stats?: PlayerOnlineStats;
+    };
+    return data.stats ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Resilient WebSocket Client (Heartbeat + Stale Detection + Jittered Reconnect)
 // ---------------------------------------------------------------------------

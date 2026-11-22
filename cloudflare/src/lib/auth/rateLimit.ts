@@ -100,6 +100,34 @@ export const PROFILE_UPDATE_USER_RATE_LIMIT: RateLimitPolicy = {
   blockMs: 15 * 60 * 1000,
 };
 
+export const SOCIAL_SEARCH_USER_RATE_LIMIT: RateLimitPolicy = {
+  action: 'social_search_user',
+  maxAttempts: 40,
+  windowMs: 5 * 60 * 1000,
+  blockMs: 5 * 60 * 1000,
+};
+
+export const SOCIAL_FRIEND_REQUEST_USER_RATE_LIMIT: RateLimitPolicy = {
+  action: 'social_friend_request_user',
+  maxAttempts: 20,
+  windowMs: 15 * 60 * 1000,
+  blockMs: 15 * 60 * 1000,
+};
+
+export const SOCIAL_FRIEND_MUTATION_USER_RATE_LIMIT: RateLimitPolicy = {
+  action: 'social_friend_mutation_user',
+  maxAttempts: 45,
+  windowMs: 15 * 60 * 1000,
+  blockMs: 5 * 60 * 1000,
+};
+
+export const SOCIAL_PRESENCE_USER_RATE_LIMIT: RateLimitPolicy = {
+  action: 'social_presence_user',
+  maxAttempts: 90,
+  windowMs: 5 * 60 * 1000,
+  blockMs: 60 * 1000,
+};
+
 const MAX_ACTIVE_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 export const DEFAULT_RATE_LIMIT_RETENTION_MS = 24 * 60 * 60 * 1000; // 24 hours
 

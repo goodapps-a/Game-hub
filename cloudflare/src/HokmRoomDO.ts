@@ -447,8 +447,12 @@ export class HokmRoomDO {
         rng: this.rngFn,
       });
 
+      const verifiedUserId =
+        request.headers.get('X-Eyvan-Verified-User-Id')?.trim() || null;
+
       const joined = ctrl.joinPlayer({
         username,
+        userId: verifiedUserId,
         avatarCode,
         preferredSeat: 'south',
       });
@@ -513,8 +517,12 @@ export class HokmRoomDO {
         ? bodyRes.data.preferredSeat
         : undefined;
 
+      const verifiedUserId =
+        request.headers.get('X-Eyvan-Verified-User-Id')?.trim() || null;
+
       const joined = this.controller.joinPlayer({
         username,
+        userId: verifiedUserId,
         avatarCode,
         preferredSeat,
       });

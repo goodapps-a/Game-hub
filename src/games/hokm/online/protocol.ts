@@ -253,6 +253,7 @@ export interface CompletedMatchRecord {
   readonly handsPlayed: number;
   readonly players: readonly {
     playerId: string;
+    userId?: string | null;
     username: string;
     canonicalSeat: Seat;
     team: TeamId;
@@ -261,6 +262,7 @@ export interface CompletedMatchRecord {
 }
 
 export interface PlayerOnlineStats {
+  readonly userId?: string | null;
   readonly username: string;
   readonly matchesPlayed: number;
   readonly wins: number;
@@ -273,13 +275,13 @@ export interface PlayerOnlineStats {
 // ---------------------------------------------------------------------------
 // Strict Input Validators (shared between Client, Express Server & CF Worker)
 // ---------------------------------------------------------------------------
-const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
+const USERNAME_RE = /^[a-zA-Z0-9_.]{3,20}$/;
 const ROOM_CODE_RE = /^[A-Z2-9]{4,8}$/;
 const ACTION_ID_RE = /^[a-zA-Z0-9_-]{8,80}$/;
 const CARD_ID_RE = /^(hearts|diamonds|clubs|spades)-(2|3|4|5|6|7|8|9|10|J|Q|K|A)$/;
 const VALID_SEATS = new Set<Seat>(['south', 'east', 'north', 'west']);
 const VALID_SUITS = new Set<Suit>(['hearts', 'diamonds', 'clubs', 'spades']);
-const VALID_AVATARS = new Set(['portrait', 'shamsa', 'turquoise', 'jade']);
+const VALID_AVATARS = new Set(['portrait', 'shamsa', 'turquoise', 'lapis', 'jade']);
 
 const UTF8_ENCODER = new TextEncoder();
 
@@ -290,7 +292,15 @@ export function getUtf8ByteLength(input: string): number {
 export function sanitizeUsername(input: unknown): string | null {
   if (typeof input !== 'string') return null;
   const trimmed = input.trim();
-  return USERNAME_RE.test(trimmed) ? trimmed : null;
+  if (
+    !USERNAME_RE.test(trimmed) ||
+    trimmed.startsWith('.') ||
+    trimmed.endsWith('.') ||
+    trimmed.includes('..')
+  ) {
+    return null;
+  }
+  return trimmed;
 }
 
 /**

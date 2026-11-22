@@ -12,7 +12,10 @@ import {
   buildSetSessionCookieHeader,
   parseSessionCookieFromHeader,
 } from '../cloudflare/src/lib/sessionCookie';
+import { parseAuthCookieFromHeader } from '../cloudflare/src/lib/auth/authCookie';
+import { verifyAuthSession } from '../cloudflare/src/lib/auth/authService';
 import { handleAuthHttpRequest } from '../cloudflare/src/lib/auth/httpHandler';
+import { handleSocialHttpRequest } from '../cloudflare/src/lib/social/httpHandler';
 import {
   EmailSender,
   createEmailSender,
@@ -307,10 +310,92 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
     }
   });
 
-  app.post('/api/rooms', (req: Request, res: Response) => {
+  // Stage D1 Social & Online Presence (`/api/social/*` — shared handler with Cloudflare Workers)
+  app.all('/api/social/*', async (req: Request, res: Response) => {
+    try {
+      const secure = isSecureIncomingReq(req);
+      const protocol = secure ? 'https' : 'http';
+      const host = req.headers.host ?? `localhost:${defaultPort}`;
+      const fullUrl = `${protocol}://${host}${req.originalUrl}`;
+      const headers = new Headers();
+      for (const [key, val] of Object.entries(req.headers)) {
+        const lower = key.toLowerCase();
+        if (
+          lower === 'content-length' ||
+          lower === 'transfer-encoding' ||
+          lower === 'connection'
+        ) {
+          continue;
+        }
+        if (typeof val === 'string') {
+          headers.set(key, val);
+        } else if (Array.isArray(val)) {
+          headers.set(key, val.join(', '));
+        }
+      }
+
+      const method = req.method.toUpperCase();
+      const hasBody = method !== 'GET' && method !== 'HEAD';
+      const bodyStr =
+        hasBody && req.body !== undefined && typeof req.body === 'object' && req.body !== null
+          ? JSON.stringify(req.body)
+          : undefined;
+
+      const webReq = new Request(fullUrl, {
+        method,
+        headers,
+        body: bodyStr,
+      });
+
+      const webRes = await handleSocialHttpRequest(webReq, req.path, {
+        db: db.getD1Adapter(),
+        corsHeaders: {},
+        secureCookie: secure,
+        cookieOptions: cookieOpts,
+        originAllowed: isRequestOriginAllowed(req),
+        clientIp: extractClientIp(req),
+      });
+
+      if (!webRes) {
+        res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'مسیر اجتماعی یافت نشد.' });
+        return;
+      }
+
+      webRes.headers.forEach((value, key) => {
+        res.setHeader(key, value);
+      });
+      const responseText = await webRes.text();
+      res.status(webRes.status).send(responseText);
+    } catch (err) {
+      console.error(
+        '[Social] Express route adapter error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      res.status(500).json({
+        ok: false,
+        code: 'DATABASE_ERROR',
+        message: 'خطای داخلی سرور رخ داد.',
+      });
+    }
+  });
+
+  const resolveOptionalAuthUserId = async (req: Request): Promise<string | null> => {
+    const rawAuthToken = parseAuthCookieFromHeader(req.headers.cookie);
+    if (!rawAuthToken) return null;
+    try {
+      const verified = await verifyAuthSession(db.getD1Adapter(), rawAuthToken);
+      return verified.authenticated && verified.user ? verified.user.userId : null;
+    } catch {
+      return null;
+    }
+  };
+
+  app.post('/api/rooms', async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
+    const verifiedUserId = await resolveOptionalAuthUserId(req);
     const result = roomManager.createRoom({
       username: body.username,
+      userId: verifiedUserId,
       avatarCode: body.avatarCode,
       targetMatchScore: body.targetMatchScore,
     });
@@ -348,14 +433,16 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
     res.json(summary);
   });
 
-  app.post('/api/rooms/:code/join', (req: Request, res: Response) => {
+  app.post('/api/rooms/:code/join', async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const preferredSeat = isValidSeat(body.preferredSeat)
       ? body.preferredSeat
       : undefined;
+    const verifiedUserId = await resolveOptionalAuthUserId(req);
 
     const result = roomManager.joinRoom(String(req.params.code ?? ''), {
       username: body.username,
+      userId: verifiedUserId,
       avatarCode: body.avatarCode,
       preferredSeat,
     });
@@ -461,6 +548,50 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
     const limit = Number.isFinite(rawLimit) ? rawLimit : 10;
     const matches = db.getRecentMatches(limit);
     res.json({ matches });
+  });
+
+  app.get('/api/stats/me', async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, private');
+    const rawAuthToken = parseAuthCookieFromHeader(req.headers.cookie);
+    if (!rawAuthToken) {
+      res.status(401).json({
+        ok: false,
+        code: 'UNAUTHORIZED',
+        message: 'برای مشاهده آمار حساب خود ابتدا وارد شوید.',
+      });
+      return;
+    }
+    try {
+      const verified = await verifyAuthSession(db.getD1Adapter(), rawAuthToken);
+      if (!verified.authenticated || !verified.user) {
+        res.status(401).json({
+          ok: false,
+          code: 'UNAUTHORIZED',
+          message: 'نشست کاربری معتبر نیست.',
+        });
+        return;
+      }
+      const stats = db.getPlayerStatsByUserId(verified.user.userId);
+      res.json({
+        ok: true,
+        stats: stats ?? {
+          userId: verified.user.userId,
+          username: verified.user.username,
+          matchesPlayed: 0,
+          wins: 0,
+          losses: 0,
+          kotWins: 0,
+          hakemKotWins: 0,
+          lastPlayedAt: null,
+        },
+      });
+    } catch {
+      res.status(503).json({
+        ok: false,
+        code: 'DATABASE_ERROR',
+        message: 'خطا در خواندن آمار حساب کاربری.',
+      });
+    }
   });
 
   app.get('/api/stats/:username', (req: Request, res: Response) => {
