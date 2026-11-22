@@ -18,7 +18,11 @@
  */
 
 import { generatePrefixedId } from '../auth/crypto';
-import { RateLimitPolicy, consumeRateLimitSlot } from '../auth/rateLimit';
+import {
+  CHAT_CONVERSATION_MUTATION_USER_RATE_LIMIT,
+  RateLimitPolicy,
+  consumeRateLimitSlot,
+} from '../auth/rateLimit';
 import { D1DatabaseLike } from '../types';
 import {
   ChatConversationItem,
@@ -46,6 +50,11 @@ export const CHAT_SEND_USER_RATE_LIMIT: RateLimitPolicy = {
 function isUniqueConstraintError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? '');
   return /UNIQUE constraint failed|SQLITE_CONSTRAINT_UNIQUE/i.test(msg);
+}
+
+function isNotNullConstraintError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return /NOT NULL constraint failed|SQLITE_CONSTRAINT_NOTNULL/i.test(msg);
 }
 
 function sanitizeMessageBody(raw: unknown): string | null {
@@ -160,6 +169,22 @@ export async function openOrCreateDirectConversation(
   ctx: SocialRequestContext
 ): Promise<OpenDirectConversationResult> {
   const now = ctx.now ?? Date.now();
+  const rl = await consumeRateLimitSlot(
+    db,
+    `chat_conv_mut:user:${ctx.actorUserId}`,
+    CHAT_CONVERSATION_MUTATION_USER_RATE_LIMIT,
+    now
+  );
+  if (!rl.allowed) {
+    return {
+      ok: false,
+      status: 429,
+      code: 'RATE_LIMITED',
+      message: 'تعداد درخواست‌های باز کردن گفتگو بیش از حد مجاز است. لطفاً کمی صبر کنید.',
+      retryAfterSec: rl.retryAfterSec,
+    };
+  }
+
   const targetVal = validateTargetUserId(rawTargetUserId);
   if (targetVal.ok === false) {
     return {
@@ -286,8 +311,11 @@ export async function openOrCreateDirectConversation(
         last_message_at: null,
         created_at: now,
       };
-    } catch {
-      // Concurrent creation race: re-fetch canonical direct conversation
+    } catch (err) {
+      if (!isUniqueConstraintError(err)) {
+        throw err;
+      }
+      // Concurrent creation race (UNIQUE violation on direct_pair_key): re-fetch canonical direct conversation
       existing = await db
         .prepare(
           `SELECT conversation_id, last_message_preview, last_message_at, created_at
@@ -764,16 +792,57 @@ export async function sendDirectMessage(
 
   const messageId = generatePrefixedId('msg', 12);
   const preview = buildMessagePreview(cleanBody);
+  const pairKey = buildCanonicalPairKey(
+    ctx.actorUserId,
+    membership.partnerUserId
+  );
 
+  // Atomic commit-time guard: `sender_id` subquery returns NULL (rolling back the entire batch,
+  // including conversation preview and read-state updates) if membership, friendship, or block
+  // status changed concurrently between pre-check and commit.
   try {
     await db.batch([
       db
         .prepare(
           `INSERT INTO messages (
              message_id, conversation_id, sender_id, kind, body, client_msg_id, created_at, deleted_at
-           ) VALUES (?, ?, ?, 'text', ?, ?, ?, NULL)`
+           ) VALUES (
+             ?,
+             ?,
+             (
+               SELECT cm.user_id
+               FROM conversation_members cm
+               WHERE cm.conversation_id = ?
+                 AND cm.user_id = ?
+                 AND cm.left_at IS NULL
+                 AND EXISTS (
+                   SELECT 1 FROM friendships f
+                   WHERE f.pair_key = ? AND f.status = 'accepted'
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM user_blocks ub
+                   WHERE (ub.blocker_id = ? AND ub.blocked_id = ?)
+                      OR (ub.blocker_id = ? AND ub.blocked_id = ?)
+                 )
+               LIMIT 1
+             ),
+             'text', ?, ?, ?, NULL
+           )`
         )
-        .bind(messageId, conversationId, ctx.actorUserId, cleanBody, clientMsgId, now),
+        .bind(
+          messageId,
+          conversationId,
+          conversationId,
+          ctx.actorUserId,
+          pairKey,
+          ctx.actorUserId,
+          membership.partnerUserId,
+          membership.partnerUserId,
+          ctx.actorUserId,
+          cleanBody,
+          clientMsgId,
+          now
+        ),
       db
         .prepare(
           `UPDATE conversations
@@ -797,6 +866,34 @@ export async function sendDirectMessage(
         .bind(conversationId, ctx.actorUserId, messageId, now),
     ]);
   } catch (err) {
+    if (isNotNullConstraintError(err)) {
+      const [nowBlocked, nowFriends] = await Promise.all([
+        isBlockedEitherWay(db, ctx.actorUserId, membership.partnerUserId),
+        areAcceptedFriends(db, ctx.actorUserId, membership.partnerUserId),
+      ]);
+      if (nowBlocked) {
+        return {
+          ok: false,
+          status: 403,
+          code: 'USER_BLOCKED',
+          message: 'ارسال پیام به این کاربر به دلیل مسدودیت مجاز نیست.',
+        };
+      }
+      if (!nowFriends) {
+        return {
+          ok: false,
+          status: 403,
+          code: 'NOT_FRIENDS',
+          message: 'ارسال پیام فقط به دوستان تأییدشده امکان‌پذیر است.',
+        };
+      }
+      return {
+        ok: false,
+        status: 403,
+        code: 'FORBIDDEN',
+        message: 'شما عضو این گفتگو نیستید.',
+      };
+    }
     // Handle concurrent duplicate clientMsgId race cleanly
     if (clientMsgId && isUniqueConstraintError(err)) {
       const existing = await db
@@ -871,6 +968,22 @@ export async function markConversationRead(
   ctx: SocialRequestContext
 ): Promise<MarkReadResult> {
   const now = ctx.now ?? Date.now();
+  const rl = await consumeRateLimitSlot(
+    db,
+    `chat_conv_mut:user:${ctx.actorUserId}`,
+    CHAT_CONVERSATION_MUTATION_USER_RATE_LIMIT,
+    now
+  );
+  if (!rl.allowed) {
+    return {
+      ok: false,
+      status: 429,
+      code: 'RATE_LIMITED',
+      message: 'تعداد درخواست‌های ثبت وضعیت خوانده‌شدن بیش از حد مجاز است. لطفاً کمی صبر کنید.',
+      retryAfterSec: rl.retryAfterSec,
+    };
+  }
+
   const conversationId = rawConversationId.trim();
   if (!CONVERSATION_ID_RE.test(conversationId)) {
     return {

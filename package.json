@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/games/hokm/engine/hokm.test.ts src/games/hokm/online/online.test.ts cloudflare/src/HokmRoomDO.test.ts server/stageB.migrations.test.ts server/stageC1.auth.test.ts server/stageC1.express.test.ts server/stageC2.auth.test.ts server/stageC2.hardening.test.ts server/uxRedesign.test.ts server/part1.identityStats.test.ts server/part2.socialD1.test.ts server/stage0.auditSecurity.test.ts server/stage1to4.identityOAuth.test.ts server/stage6to8.chatInvitesIntegration.test.ts server/hardening.securityConcurrency.test.ts",
+    "test": "tsx --test src/games/hokm/engine/hokm.test.ts src/games/hokm/online/online.test.ts cloudflare/src/HokmRoomDO.test.ts server/stageB.migrations.test.ts server/stageC1.auth.test.ts server/stageC1.express.test.ts server/stageC2.auth.test.ts server/stageC2.hardening.test.ts server/uxRedesign.test.ts server/part1.identityStats.test.ts server/part2.socialD1.test.ts server/stage0.auditSecurity.test.ts server/stage1to4.identityOAuth.test.ts server/stage6to8.chatInvitesIntegration.test.ts server/hardening.securityConcurrency.test.ts server/finalHardening.test.ts",
     "test:engine": "tsx --test src/games/hokm/engine/hokm.test.ts",
     "test:online": "tsx --test src/games/hokm/online/online.test.ts",
     "test:worker": "tsx --test cloudflare/src/HokmRoomDO.test.ts",
@@ -25,7 +25,8 @@
     "test:stage0": "tsx --test server/stage0.auditSecurity.test.ts",
     "test:stage1-4": "tsx --test server/stage1to4.identityOAuth.test.ts",
     "test:stage6-8": "tsx --test server/stage6to8.chatInvitesIntegration.test.ts",
-    "test:hardening": "tsx --test server/hardening.securityConcurrency.test.ts"
+    "test:hardening": "tsx --test server/hardening.securityConcurrency.test.ts",
+    "test:final-hardening": "tsx --test server/finalHardening.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

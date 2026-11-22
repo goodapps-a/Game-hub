@@ -9,6 +9,8 @@ import {
   MAX_WS_PAYLOAD_BYTES,
 } from './src/games/hokm/online/protocol';
 import { parseSessionCookieFromHeader } from './cloudflare/src/lib/sessionCookie';
+import { pruneExpiredOAuthStatesBatched } from './cloudflare/src/lib/auth/googleOAuthService';
+import { pruneExpiredGuestSessionsBatched } from './cloudflare/src/lib/auth/guestSession';
 import { pruneExpiredRateLimitsBatched } from './cloudflare/src/lib/auth/rateLimit';
 import { pruneExpiredPresenceSessionsBatched } from './cloudflare/src/lib/social/socialService';
 import { validateProductionAuthConfig } from './cloudflare/src/lib/auth/securityPolicy';
@@ -173,6 +175,18 @@ async function startServer() {
     void pruneExpiredPresenceSessionsBatched(d1Adapter).catch((err) => {
       console.error(
         '[Eyvan Cleanup] Presence cleanup failed:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+    });
+    void pruneExpiredGuestSessionsBatched(d1Adapter).catch((err) => {
+      console.error(
+        '[Eyvan Cleanup] Guest-session cleanup failed:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+    });
+    void pruneExpiredOAuthStatesBatched(d1Adapter).catch((err) => {
+      console.error(
+        '[Eyvan Cleanup] OAuth-state cleanup failed:',
         err instanceof Error ? err.message : 'unknown'
       );
     });

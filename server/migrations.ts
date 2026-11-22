@@ -167,6 +167,19 @@ function detectLegacyBaselineMigrations(
     detected.push('0010_hardening_oauth_and_invites.sql');
   }
 
+  const has0011 =
+    has0010 &&
+    columnExists(db, 'oauth_states', 'flow_id') &&
+    indexExists(db, 'idx_oauth_states_flow_id') &&
+    indexExists(db, 'idx_oauth_states_expires_at');
+
+  if (
+    has0011 &&
+    availableFiles.includes('0011_oauth_multitab_and_invite_order.sql')
+  ) {
+    detected.push('0011_oauth_multitab_and_invite_order.sql');
+  }
+
   return detected;
 }
 

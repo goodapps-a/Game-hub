@@ -83,6 +83,7 @@ export interface AuthRequestContext {
   readonly sessionTtlSec?: number;
   readonly publicAppBaseUrl?: string;
   readonly isProduction?: boolean;
+  readonly requireActiveGuestSession?: boolean;
 }
 
 export interface AuthSuccessWithSession {

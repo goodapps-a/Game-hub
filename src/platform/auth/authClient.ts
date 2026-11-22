@@ -81,6 +81,7 @@ export interface GoogleOAuthConfigResponse {
 
 export interface GoogleOAuthStartResponse {
   readonly ok: boolean;
+  readonly flowId?: string;
   readonly url?: string;
   readonly mode?: 'login' | 'link';
   readonly code?: string;
@@ -498,13 +499,21 @@ export async function openGoogleOAuthPopup(
     };
   }
 
+  const expectedFlowId =
+    typeof startRes.flowId === 'string' && /^[a-f0-9]{16}$/.test(startRes.flowId)
+      ? startRes.flowId
+      : null;
+  const popupName = expectedFlowId
+    ? `eyvan_google_oauth_${expectedFlowId}`
+    : `eyvan_google_oauth_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
   const width = 500;
   const height = 640;
   const left = Math.max(0, Math.round(window.screenX + (window.outerWidth - width) / 2));
   const top = Math.max(0, Math.round(window.screenY + (window.outerHeight - height) / 2));
   const popup = window.open(
     startRes.url,
-    'eyvan_google_oauth',
+    popupName,
     `width=${width},height=${height},left=${left},top=${top},popup=yes,noopener=no`
   );
 
@@ -551,6 +560,11 @@ export async function openGoogleOAuthPopup(
       if (typeof data.ok !== 'boolean') return;
       if (data.flowMode !== 'login' && data.flowMode !== 'link') return;
       if (data.flowMode !== mode) return;
+      if (expectedFlowId !== null) {
+        if (typeof data.flowId !== 'string' || data.flowId !== expectedFlowId) {
+          return;
+        }
+      }
       if (
         data.code !== null &&
         data.code !== undefined &&

@@ -135,17 +135,29 @@ interface GuestSessionLookupRow {
   auth_provider: string;
 }
 
+export type GuestSessionInspectionResult =
+  | { readonly status: 'valid'; readonly session: VerifiedGuestSession }
+  | { readonly status: 'revoked_or_upgraded'; readonly guestUserId: string }
+  | { readonly status: 'expired'; readonly guestUserId: string }
+  | { readonly status: 'invalid' };
+
 /**
- * Verifies an incoming `eyvan_guest_sess` token strictly against `guest_sessions` and `users`.
- * Returns `null` if missing, malformed, revoked, expired, or already upgraded to a registered account.
+ * Inspects an incoming `eyvan_guest_sess` token and distinguishes between:
+ * - `valid`: active guest session for a current guest account
+ * - `revoked_or_upgraded`: token matched a guest session that was already revoked or upgraded
+ * - `expired`: token matched a guest session whose TTL expired
+ * - `invalid`: missing, malformed, or unknown token
+ *
+ * Used by registration & OAuth upgrade paths so an already-upgraded or expired guest cookie
+ * is explicitly rejected (409 / 401 + cleared) rather than silently creating a duplicate account.
  */
-export async function verifyGuestSession(
+export async function inspectGuestSession(
   db: D1DatabaseLike | undefined,
   rawGuestToken: string | null | undefined,
   now = Date.now()
-): Promise<VerifiedGuestSession | null> {
+): Promise<GuestSessionInspectionResult> {
   if (!db || !rawGuestToken || !OPAQUE_TOKEN_RE.test(rawGuestToken)) {
-    return null;
+    return { status: 'invalid' };
   }
 
   const tokenHash = await sha256Hex(rawGuestToken);
@@ -169,20 +181,41 @@ export async function verifyGuestSession(
     .bind(tokenHash)
     .first<GuestSessionLookupRow>();
 
-  if (!row) return null;
-  if (row.revoked_at !== null) return null;
-  if (row.expires_at <= now) return null;
-  if (row.account_status !== 'guest' || row.auth_provider !== 'guest') {
-    return null;
+  if (!row) return { status: 'invalid' };
+  if (
+    row.revoked_at !== null ||
+    row.account_status !== 'guest' ||
+    row.auth_provider !== 'guest'
+  ) {
+    return { status: 'revoked_or_upgraded', guestUserId: row.guest_user_id };
+  }
+  if (row.expires_at <= now) {
+    return { status: 'expired', guestUserId: row.guest_user_id };
   }
 
   return {
-    guestSessionId: row.guest_session_id,
-    guestUserId: row.guest_user_id,
-    username: row.username,
-    avatarCode: row.avatar_code,
-    expiresAt: row.expires_at,
+    status: 'valid',
+    session: {
+      guestSessionId: row.guest_session_id,
+      guestUserId: row.guest_user_id,
+      username: row.username,
+      avatarCode: row.avatar_code,
+      expiresAt: row.expires_at,
+    },
   };
+}
+
+/**
+ * Verifies an incoming `eyvan_guest_sess` token strictly against `guest_sessions` and `users`.
+ * Returns `null` if missing, malformed, revoked, expired, or already upgraded to a registered account.
+ */
+export async function verifyGuestSession(
+  db: D1DatabaseLike | undefined,
+  rawGuestToken: string | null | undefined,
+  now = Date.now()
+): Promise<VerifiedGuestSession | null> {
+  const inspected = await inspectGuestSession(db, rawGuestToken, now);
+  return inspected.status === 'valid' ? inspected.session : null;
 }
 
 export interface ResolvedGuestIdentity {

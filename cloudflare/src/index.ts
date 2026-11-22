@@ -45,6 +45,7 @@ import {
   pruneExpiredGuestSessionsBatched,
   resolveOrCreateGuestIdentity,
 } from './lib/auth/guestSession';
+import { pruneExpiredOAuthStatesBatched } from './lib/auth/googleOAuthService';
 import { handleAuthHttpRequest } from './lib/auth/httpHandler';
 import {
   createEmailSender,
@@ -928,6 +929,15 @@ export default {
       } catch (err) {
         console.error(
           '[Worker] Scheduled guest-session cleanup failed:',
+          err instanceof Error ? err.message : 'unknown'
+        );
+      }
+
+      try {
+        await pruneExpiredOAuthStatesBatched(env.EYVAN_DB, { now });
+      } catch (err) {
+        console.error(
+          '[Worker] Scheduled oauth-state cleanup failed:',
           err instanceof Error ? err.message : 'unknown'
         );
       }

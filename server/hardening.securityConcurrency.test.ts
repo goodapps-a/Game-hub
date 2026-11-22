@@ -33,6 +33,7 @@ import { upgradeGuestAccountToRegistered } from '../cloudflare/src/lib/auth/auth
 import { EmailSender } from '../cloudflare/src/lib/auth/emailService';
 import {
   OAUTH_BIND_COOKIE_NAME,
+  buildOAuthBindCookieName,
   clearGoogleJwksCacheForTests,
   completeGoogleOAuthCallback,
   startGoogleOAuthFlow,
@@ -363,18 +364,20 @@ describe('Eyvan Hardening — Parts 1–4 Security & Concurrency Verification', 
     });
 
     try {
-      // 1) Browser A initiates OAuth login -> receives HttpOnly eyvan_oauth_bind cookie scoped to /api/auth/google
+      // 1) Browser A initiates OAuth login -> receives HttpOnly per-flow eyvan_oauth_bind_<flowId> cookie scoped to /api/auth/google
       const startA = await h.postJson('/api/auth/google/start', { mode: 'login' });
       assert.equal(startA.status, 200);
-      const rawBindSetA = findRawSetCookie(startA, OAUTH_BIND_COOKIE_NAME);
-      assert.ok(rawBindSetA, 'Must emit Set-Cookie for eyvan_oauth_bind');
+      const startAJson = (await startA.json()) as { flowId: string; url: string };
+      assert.ok(startAJson.flowId, 'Must return per-flow flowId');
+      const bindNameA = buildOAuthBindCookieName(startAJson.flowId);
+      const rawBindSetA = findRawSetCookie(startA, bindNameA);
+      assert.ok(rawBindSetA, 'Must emit Set-Cookie for per-flow eyvan_oauth_bind_<flowId>');
       assert.ok(rawBindSetA.includes('HttpOnly'));
       assert.ok(rawBindSetA.includes('Path=/api/auth/google'));
       assert.ok(rawBindSetA.includes('Max-Age=600'));
       assert.ok(rawBindSetA.includes('SameSite=Lax'));
-      const bindCookieA = extractCookiePair(startA, OAUTH_BIND_COOKIE_NAME)!;
+      const bindCookieA = extractCookiePair(startA, bindNameA)!;
 
-      const startAJson = (await startA.json()) as { url: string };
       const paramsA = google.captureFromAuthUrl(startAJson.url);
 
       // Verify DB stores ONLY SHA-256 hash (64 hex chars), never raw cookie value
@@ -382,10 +385,11 @@ describe('Eyvan Hardening — Parts 1–4 Security & Concurrency Verification', 
       const rawBindValA = decodeURIComponent(bindCookieA.split('=')[1]);
       const stateDbRow = await d1
         .prepare(
-          `SELECT browser_binding_hash, opener_origin FROM oauth_states ORDER BY created_at DESC LIMIT 1`
+          `SELECT browser_binding_hash, opener_origin, flow_id FROM oauth_states ORDER BY created_at DESC LIMIT 1`
         )
-        .first<{ browser_binding_hash: string; opener_origin: string }>();
+        .first<{ browser_binding_hash: string; opener_origin: string; flow_id: string }>();
       assert.ok(stateDbRow);
+      assert.equal(stateDbRow.flow_id, startAJson.flowId);
       assert.equal(stateDbRow.browser_binding_hash.length, 64);
       assert.notEqual(stateDbRow.browser_binding_hash, rawBindValA);
       assert.equal(stateDbRow.opener_origin, h.baseUrl);
@@ -403,13 +407,13 @@ describe('Eyvan Hardening — Parts 1–4 Security & Concurrency Verification', 
         0,
         'Cross-browser callback without bind cookie must NEVER reach Google token endpoint'
       );
-      const clearedOnFail1 = findRawSetCookie(crossNoCookie, OAUTH_BIND_COOKIE_NAME);
-      assert.ok(clearedOnFail1?.includes('Max-Age=0'), 'Must clear bind cookie on mismatch');
 
       // 3) Attack: Browser B starts its own OAuth (gets bindCookieB) and tries to complete Browser A's state
       const startB = await h.postJson('/api/auth/google/start', { mode: 'login' });
       assert.equal(startB.status, 200);
-      const bindCookieB = extractCookiePair(startB, OAUTH_BIND_COOKIE_NAME)!;
+      const startBJson = (await startB.json()) as { flowId: string; url: string };
+      const bindNameB = buildOAuthBindCookieName(startBJson.flowId);
+      const bindCookieB = extractCookiePair(startB, bindNameB)!;
       assert.notEqual(bindCookieA, bindCookieB);
 
       const crossWrongCookie = await fetch(
@@ -428,8 +432,11 @@ describe('Eyvan Hardening — Parts 1–4 Security & Concurrency Verification', 
         false,
         'Error popup HTML must NEVER use wildcard targetOrigin'
       );
-      assert.ok(
-        findRawSetCookie(crossWrongCookie, OAUTH_BIND_COOKIE_NAME)?.includes('Max-Age=0')
+      // Mismatched callback must NOT clear Browser B's own valid per-flow cookie
+      assert.equal(
+        findRawSetCookie(crossWrongCookie, bindNameB),
+        null,
+        'Mismatched state callback must not clear unrelated flow cookies'
       );
 
       // 4) Legitimate Browser A completes callback with bindCookieA (proves attacker did not even DoS/consume A's state!)
@@ -448,8 +455,8 @@ describe('Eyvan Hardening — Parts 1–4 Security & Concurrency Verification', 
       assert.equal(google.tokenExchangeCalls.length, 1);
       assert.ok(extractCookiePair(okA, AUTH_COOKIE_NAME));
       assert.ok(
-        findRawSetCookie(okA, OAUTH_BIND_COOKIE_NAME)?.includes('Max-Age=0'),
-        'Success callback must clear temporary eyvan_oauth_bind cookie'
+        findRawSetCookie(okA, bindNameA)?.includes('Max-Age=0'),
+        'Success callback must clear ONLY its own per-flow eyvan_oauth_bind_<flowId> cookie'
       );
       const okHtml = await okA.text();
       assert.ok(okHtml.includes('window.opener.postMessage(data, targetOrigin)'));
@@ -463,12 +470,13 @@ describe('Eyvan Hardening — Parts 1–4 Security & Concurrency Verification', 
       );
       assert.equal(replayA.status, 400);
       assert.equal(google.tokenExchangeCalls.length, 1);
-      assert.ok(findRawSetCookie(replayA, OAUTH_BIND_COOKIE_NAME)?.includes('Max-Age=0'));
+      assert.ok(findRawSetCookie(replayA, bindNameA)?.includes('Max-Age=0'));
 
       // 6) Expired OAuth state rejected & clears bind cookie
       const startExp = await h.postJson('/api/auth/google/start', { mode: 'login' });
-      const bindExp = extractCookiePair(startExp, OAUTH_BIND_COOKIE_NAME)!;
-      const startExpJson = (await startExp.json()) as { url: string };
+      const startExpJson = (await startExp.json()) as { flowId: string; url: string };
+      const bindNameExp = buildOAuthBindCookieName(startExpJson.flowId);
+      const bindExp = extractCookiePair(startExp, bindNameExp)!;
       const paramsExp = google.captureFromAuthUrl(startExpJson.url);
       await d1
         .prepare(`UPDATE oauth_states SET created_at = ?, expires_at = ?`)
@@ -480,24 +488,25 @@ describe('Eyvan Hardening — Parts 1–4 Security & Concurrency Verification', 
       );
       assert.equal(cbExp.status, 400);
       assert.equal(((await cbExp.json()) as { code: string }).code, 'OAUTH_INVALID_STATE');
-      assert.ok(findRawSetCookie(cbExp, OAUTH_BIND_COOKIE_NAME)?.includes('Max-Age=0'));
+      assert.ok(findRawSetCookie(cbExp, bindNameExp)?.includes('Max-Age=0'));
 
       // 7) Cancel flow (`?error=access_denied`) consumes state, emits exact targetOrigin, and clears bind cookie
       const startCancel = await h.postJson('/api/auth/google/start', { mode: 'login' });
-      const bindCancel = extractCookiePair(startCancel, OAUTH_BIND_COOKIE_NAME)!;
-      const startCancelJson = (await startCancel.json()) as { url: string };
+      const startCancelJson = (await startCancel.json()) as { flowId: string; url: string };
+      const bindNameCancel = buildOAuthBindCookieName(startCancelJson.flowId);
+      const bindCancel = extractCookiePair(startCancel, bindNameCancel)!;
       const paramsCancel = google.captureFromAuthUrl(startCancelJson.url);
       const cbCancel = await fetch(
         `${h.baseUrl}/api/auth/google/callback?error=access_denied&state=${encodeURIComponent(paramsCancel.state)}`,
         { headers: { Accept: 'text/html', Cookie: bindCancel } }
       );
       assert.equal(cbCancel.status, 400);
-      assert.ok(findRawSetCookie(cbCancel, OAUTH_BIND_COOKIE_NAME)?.includes('Max-Age=0'));
+      assert.ok(findRawSetCookie(cbCancel, bindNameCancel)?.includes('Max-Age=0'));
       const cancelHtml = await cbCancel.text();
       assert.ok(cancelHtml.includes(`var targetOrigin = ${JSON.stringify(h.baseUrl)};`));
       assert.equal(cancelHtml.includes("'*'"), false);
 
-      // 8) Cloudflare Worker HTTPS parity: Secure; SameSite=None (unpartitioned) + exact SPA targetOrigin
+      // 8) Cloudflare Worker HTTPS parity: Secure; SameSite=None (cross-site) + exact SPA targetOrigin
       const workerEnv = {
         EYVAN_DB: d1,
         ALLOWED_ORIGINS: 'https://eyvan.pages.dev',
@@ -522,7 +531,9 @@ describe('Eyvan Hardening — Parts 1–4 Security & Concurrency Verification', 
         workerEnv
       );
       assert.equal(wStart.status, 200);
-      const wRawBind = findRawSetCookie(wStart, OAUTH_BIND_COOKIE_NAME);
+      const wStartJson = (await wStart.json()) as { flowId: string; url: string };
+      const wBindName = buildOAuthBindCookieName(wStartJson.flowId);
+      const wRawBind = findRawSetCookie(wStart, wBindName);
       assert.ok(wRawBind);
       assert.ok(wRawBind.includes('HttpOnly'));
       assert.ok(wRawBind.includes('Secure'));
@@ -532,8 +543,7 @@ describe('Eyvan Hardening — Parts 1–4 Security & Concurrency Verification', 
         false,
         'OAuth bind cookie must NOT be Partitioned so top-level Google redirect carries it reliably'
       );
-      const wBindPair = extractCookiePair(wStart, OAUTH_BIND_COOKIE_NAME)!;
-      const wStartJson = (await wStart.json()) as { url: string };
+      const wBindPair = extractCookiePair(wStart, wBindName)!;
       const wp = google.captureFromAuthUrl(wStartJson.url);
 
       // Worker cross-browser without bind cookie rejected
@@ -567,7 +577,7 @@ describe('Eyvan Hardening — Parts 1–4 Security & Concurrency Verification', 
         workerEnv
       );
       assert.equal(wCbHtml.status, 201);
-      assert.ok(findRawSetCookie(wCbHtml, OAUTH_BIND_COOKIE_NAME)?.includes('Max-Age=0'));
+      assert.ok(findRawSetCookie(wCbHtml, wBindName)?.includes('Max-Age=0'));
       const wHtml = await wCbHtml.text();
       assert.ok(wHtml.includes('var targetOrigin = "https://eyvan.pages.dev";'));
       assert.equal(wHtml.includes("'*'"), false);
@@ -710,9 +720,12 @@ describe('Eyvan Hardening — Parts 1–4 Security & Concurrency Verification', 
         )
         .run(now - 1000, now - 1000, now + 60_000, now, now, now + 60_000);
 
-      // Run real Migration 0010 via runDatabaseMigrations
+      // Run real Migrations 0010 + 0011 via runDatabaseMigrations
       const migResult = runDatabaseMigrations(rawDb);
-      assert.deepEqual(migResult.applied, ['0010_hardening_oauth_and_invites.sql']);
+      assert.deepEqual(migResult.applied, [
+        '0010_hardening_oauth_and_invites.sql',
+        '0011_oauth_multitab_and_invite_order.sql',
+      ]);
 
       const rows = rawDb
         .prepare(`SELECT invite_id, status FROM game_invites ORDER BY invite_id ASC`)

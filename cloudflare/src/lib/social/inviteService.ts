@@ -18,7 +18,11 @@
 
 import { sanitizeRoomCode } from '../../../../src/games/hokm/online/protocol';
 import { generatePrefixedId } from '../auth/crypto';
-import { RateLimitPolicy, consumeRateLimitSlot } from '../auth/rateLimit';
+import {
+  RateLimitPolicy,
+  SOCIAL_FRIEND_MUTATION_USER_RATE_LIMIT,
+  consumeRateLimitSlot,
+} from '../auth/rateLimit';
 import { D1DatabaseLike } from '../types';
 import {
   GameInviteItem,
@@ -337,18 +341,29 @@ export async function createGameInvite(
 
   const inviteId = generatePrefixedId('inv', 12);
   const expiresAt = now + DEFAULT_GAME_INVITE_TTL_MS;
+  const pairKey = buildCanonicalPairKey(ctx.actorUserId, targetUserId);
 
-  // Atomic DB-level uniqueness backed by `uq_game_invites_pending_pair_room`.
-  // On concurrent race (UNIQUE violation), cleanly return the winning live pending invite
-  // (deduplicated: true) or retry once if a stale row expired right before INSERT.
+  // Atomic DB-level uniqueness backed by `uq_game_invites_pending_pair_room` AND
+  // atomic commit-time friendship/non-block verification so a concurrent `removeFriend`
+  // or `blockUser` can NEVER leave an orphaned live pending invite.
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      await db
+      const insertRes = await db
         .prepare(
           `INSERT INTO game_invites (
              invite_id, game_id, room_code, inviter_id, invitee_id,
              status, created_at, updated_at, expires_at, responded_at
-           ) VALUES (?, 'hokm', ?, ?, ?, 'pending', ?, ?, ?, NULL)`
+           )
+           SELECT ?, 'hokm', ?, ?, ?, 'pending', ?, ?, ?, NULL
+           WHERE EXISTS (
+             SELECT 1 FROM friendships f
+             WHERE f.pair_key = ? AND f.status = 'accepted'
+           )
+             AND NOT EXISTS (
+               SELECT 1 FROM user_blocks ub
+               WHERE (ub.blocker_id = ? AND ub.blocked_id = ?)
+                  OR (ub.blocker_id = ? AND ub.blocked_id = ?)
+             )`
         )
         .bind(
           inviteId,
@@ -357,9 +372,36 @@ export async function createGameInvite(
           targetUserId,
           now,
           now,
-          expiresAt
+          expiresAt,
+          pairKey,
+          ctx.actorUserId,
+          targetUserId,
+          targetUserId,
+          ctx.actorUserId
         )
         .run();
+
+      if (Number(insertRes.meta?.changes ?? 0) === 0) {
+        const nowBlocked = await isBlockedEitherWay(
+          db,
+          ctx.actorUserId,
+          targetUserId
+        );
+        if (nowBlocked) {
+          return {
+            ok: false,
+            status: 403,
+            code: 'USER_BLOCKED',
+            message: 'امکان ارسال دعوت به این کاربر به دلیل مسدودیت وجود ندارد.',
+          };
+        }
+        return {
+          ok: false,
+          status: 403,
+          code: 'NOT_FRIENDS',
+          message: 'ارسال دعوت بازی فقط برای دوستان تأییدشده مجاز است.',
+        };
+      }
 
       return {
         ok: true,
@@ -551,6 +593,22 @@ export async function respondToGameInvite(
   ctx: SocialRequestContext
 ): Promise<RespondGameInviteResult> {
   const now = ctx.now ?? Date.now();
+  const rl = await consumeRateLimitSlot(
+    db,
+    `social_friend_mut:user:${ctx.actorUserId}`,
+    SOCIAL_FRIEND_MUTATION_USER_RATE_LIMIT,
+    now
+  );
+  if (!rl.allowed) {
+    return {
+      ok: false,
+      status: 429,
+      code: 'RATE_LIMITED',
+      message: 'تعداد درخواست‌های پاسخ به دعوت بیش از حد مجاز است. لطفاً کمی صبر کنید.',
+      retryAfterSec: rl.retryAfterSec,
+    };
+  }
+
   const inviteId =
     typeof rawInviteId === 'string' ? rawInviteId.trim() : '';
   if (!INVITE_ID_RE.test(inviteId)) {
@@ -681,16 +739,75 @@ export async function respondToGameInvite(
 
   const nextStatus: GameInviteStatus =
     decision === 'accept' ? 'accepted' : 'declined';
-  const updRes = await db
-    .prepare(
-      `UPDATE game_invites
-       SET status = ?, updated_at = ?, responded_at = ?
-       WHERE invite_id = ? AND invitee_id = ? AND status = 'pending' AND expires_at > ?`
-    )
-    .bind(nextStatus, now, now, inviteId, ctx.actorUserId, now)
-    .run();
+  const pairKey = buildCanonicalPairKey(ctx.actorUserId, row.inviter_id);
+
+  // For 'accept', enforce accepted friendship + non-blocked atomically inside the UPDATE
+  // so a concurrent `removeFriend` / `blockUser` can NEVER allow accepting a stale invite.
+  const updRes =
+    decision === 'accept'
+      ? await db
+          .prepare(
+            `UPDATE game_invites
+             SET status = 'accepted', updated_at = ?, responded_at = ?
+             WHERE invite_id = ?
+               AND invitee_id = ?
+               AND status = 'pending'
+               AND expires_at > ?
+               AND EXISTS (
+                 SELECT 1 FROM friendships f
+                 WHERE f.pair_key = ? AND f.status = 'accepted'
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM user_blocks ub
+                 WHERE (ub.blocker_id = ? AND ub.blocked_id = ?)
+                    OR (ub.blocker_id = ? AND ub.blocked_id = ?)
+               )`
+          )
+          .bind(
+            now,
+            now,
+            inviteId,
+            ctx.actorUserId,
+            now,
+            pairKey,
+            ctx.actorUserId,
+            row.inviter_id,
+            row.inviter_id,
+            ctx.actorUserId
+          )
+          .run()
+      : await db
+          .prepare(
+            `UPDATE game_invites
+             SET status = ?, updated_at = ?, responded_at = ?
+             WHERE invite_id = ? AND invitee_id = ? AND status = 'pending' AND expires_at > ?`
+          )
+          .bind(nextStatus, now, now, inviteId, ctx.actorUserId, now)
+          .run();
 
   if (Number(updRes.meta?.changes ?? 0) !== 1) {
+    if (decision === 'accept') {
+      const [nowBlocked, nowFriends] = await Promise.all([
+        isBlockedEitherWay(db, ctx.actorUserId, row.inviter_id),
+        areAcceptedFriends(db, ctx.actorUserId, row.inviter_id),
+      ]);
+      if (nowBlocked) {
+        return {
+          ok: false,
+          status: 403,
+          code: 'USER_BLOCKED',
+          message: 'امکان پاسخ به این دعوت به دلیل مسدودیت وجود ندارد.',
+        };
+      }
+      if (!nowFriends) {
+        return {
+          ok: false,
+          status: 403,
+          code: 'NOT_FRIENDS',
+          message: 'پذیرش دعوت بازی فقط برای دوستان تأییدشده مجاز است.',
+        };
+      }
+    }
     return {
       ok: false,
       status: 409,
@@ -731,6 +848,22 @@ export async function cancelGameInvite(
   ctx: SocialRequestContext
 ): Promise<CancelGameInviteResult> {
   const now = ctx.now ?? Date.now();
+  const rl = await consumeRateLimitSlot(
+    db,
+    `social_friend_mut:user:${ctx.actorUserId}`,
+    SOCIAL_FRIEND_MUTATION_USER_RATE_LIMIT,
+    now
+  );
+  if (!rl.allowed) {
+    return {
+      ok: false,
+      status: 429,
+      code: 'RATE_LIMITED',
+      message: 'تعداد درخواست‌های لغو دعوت بیش از حد مجاز است. لطفاً کمی صبر کنید.',
+      retryAfterSec: rl.retryAfterSec,
+    };
+  }
+
   const inviteId =
     typeof rawInviteId === 'string' ? rawInviteId.trim() : '';
   if (!INVITE_ID_RE.test(inviteId)) {

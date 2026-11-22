@@ -718,10 +718,15 @@ export async function handleSocialHttpRequest(
         ctx
       );
       if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
         return buildSocialResponse(
           { ok: false, code: result.code, message: result.message },
           result.status,
-          env.corsHeaders
+          env.corsHeaders,
+          extra
         );
       }
       return buildSocialResponse(
@@ -814,10 +819,15 @@ export async function handleSocialHttpRequest(
         ctx
       );
       if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
         return buildSocialResponse(
           { ok: false, code: result.code, message: result.message },
           result.status,
-          env.corsHeaders
+          env.corsHeaders,
+          extra
         );
       }
       return buildSocialResponse(
@@ -897,10 +907,15 @@ export async function handleSocialHttpRequest(
         ctx
       );
       if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
         return buildSocialResponse(
           { ok: false, code: result.code, message: result.message },
           result.status,
-          env.corsHeaders
+          env.corsHeaders,
+          extra
         );
       }
       return buildSocialResponse(
@@ -923,10 +938,15 @@ export async function handleSocialHttpRequest(
       if (body.ok === false) return body.response;
       const result = await cancelGameInvite(env.db, body.data.inviteId, ctx);
       if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
         return buildSocialResponse(
           { ok: false, code: result.code, message: result.message },
           result.status,
-          env.corsHeaders
+          env.corsHeaders,
+          extra
         );
       }
       return buildSocialResponse(

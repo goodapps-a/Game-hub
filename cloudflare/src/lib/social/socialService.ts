@@ -873,38 +873,34 @@ export async function removeFriend(
     };
   }
 
-  const delRes = await db
-    .prepare(
-      `DELETE FROM friendships
-       WHERE friendship_id = ?
-         AND status = 'accepted'
-         AND (requester_id = ? OR addressee_id = ?)`
-    )
-    .bind(friendshipRow.friendship_id, ctx.actorUserId, ctx.actorUserId)
-    .run();
-
-  if (Number(delRes.meta?.changes ?? 0) === 0) {
-    return {
-      ok: false,
-      status: 404,
-      code: 'NOT_FOUND',
-      message: 'این کاربر در لیست دوستان شما نیست.',
-    };
-  }
-
   const otherUserId =
     friendshipRow.requester_id === ctx.actorUserId
       ? friendshipRow.addressee_id
       : friendshipRow.requester_id;
 
-  // Best-effort cancel any pending game invites between the unfriended pair
-  try {
-    await db
+  // Atomic single-transaction unfriend + pending game_invite cancellation:
+  // If canceling pending invites fails for any DB reason, the friendship deletion rolls back too.
+  // Historical invites (accepted/declined/canceled/expired) are NEVER altered.
+  const batchResults = await db.batch([
+    db
+      .prepare(
+        `DELETE FROM friendships
+         WHERE friendship_id = ?
+           AND status = 'accepted'
+           AND (requester_id = ? OR addressee_id = ?)`
+      )
+      .bind(friendshipRow.friendship_id, ctx.actorUserId, ctx.actorUserId),
+    db
       .prepare(
         `UPDATE game_invites
-         SET status = 'canceled', updated_at = ?, responded_at = ?
+         SET status = 'canceled',
+             updated_at = ?,
+             responded_at = COALESCE(responded_at, ?)
          WHERE status = 'pending'
-           AND ((inviter_id = ? AND invitee_id = ?) OR (inviter_id = ? AND invitee_id = ?))`
+           AND (
+             (inviter_id = ? AND invitee_id = ?)
+             OR (inviter_id = ? AND invitee_id = ?)
+           )`
       )
       .bind(
         now,
@@ -913,10 +909,16 @@ export async function removeFriend(
         otherUserId,
         otherUserId,
         ctx.actorUserId
-      )
-      .run();
-  } catch {
-    // Non-fatal on pre-0009 databases
+      ),
+  ]);
+
+  if (Number(batchResults[0]?.meta?.changes ?? 0) === 0) {
+    return {
+      ok: false,
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'این کاربر در لیست دوستان شما نیست.',
+    };
   }
 
   return {
@@ -1589,7 +1591,8 @@ export async function blockUser(
       : null;
   const pairKey = buildCanonicalPairKey(ctx.actorUserId, targetUserId);
 
-  const stmts = [
+  // Atomic single-transaction block + friendship removal + pending game_invite cancellation
+  await db.batch([
     db
       .prepare(
         `INSERT OR IGNORE INTO user_blocks (blocker_id, blocked_id, reason, created_at)
@@ -1599,16 +1602,12 @@ export async function blockUser(
     db
       .prepare(`DELETE FROM friendships WHERE pair_key = ?`)
       .bind(pairKey),
-  ];
-
-  await db.batch(stmts);
-
-  // Best-effort cancel any pending game invites between the pair (0009 table)
-  try {
-    await db
+    db
       .prepare(
         `UPDATE game_invites
-         SET status = 'canceled', updated_at = ?, responded_at = ?
+         SET status = 'canceled',
+             updated_at = ?,
+             responded_at = COALESCE(responded_at, ?)
          WHERE status = 'pending'
            AND (
              (inviter_id = ? AND invitee_id = ?)
@@ -1622,11 +1621,8 @@ export async function blockUser(
         targetUserId,
         targetUserId,
         ctx.actorUserId
-      )
-      .run();
-  } catch {
-    // Non-fatal on pre-0009 schemas
-  }
+      ),
+  ]);
 
   return {
     ok: true,

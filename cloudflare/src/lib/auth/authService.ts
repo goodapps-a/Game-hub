@@ -1075,19 +1075,31 @@ export async function upgradeGuestAccountToRegistered(
     };
   }
 
-  const guestRow = await db
-    .prepare(
-      `SELECT
-         user_id, username, username_key, display_name,
-         email, email_key, email_verified,
-         avatar_code, avatar_url, auth_provider, account_status,
-         created_at, last_seen_at
-       FROM users
-       WHERE user_id = ?
-       LIMIT 1`
-    )
-    .bind(guestUserId)
-    .first<UserDbRow>();
+  const [guestRow, guestSessSummary] = await Promise.all([
+    db
+      .prepare(
+        `SELECT
+           user_id, username, username_key, display_name,
+           email, email_key, email_verified,
+           avatar_code, avatar_url, auth_provider, account_status,
+           created_at, last_seen_at
+         FROM users
+         WHERE user_id = ?
+         LIMIT 1`
+      )
+      .bind(guestUserId)
+      .first<UserDbRow>(),
+    db
+      .prepare(
+        `SELECT
+           COUNT(*) AS total_cnt,
+           COALESCE(SUM(CASE WHEN revoked_at IS NULL AND expires_at > ? THEN 1 ELSE 0 END), 0) AS active_cnt
+         FROM guest_sessions
+         WHERE guest_user_id = ?`
+      )
+      .bind(now, guestUserId)
+      .first<{ total_cnt: number; active_cnt: number }>(),
+  ]);
 
   if (
     !guestRow ||
@@ -1099,6 +1111,18 @@ export async function upgradeGuestAccountToRegistered(
       status: 409,
       code: 'ACCOUNT_CONFLICT',
       message: 'حساب مهمان معتبر برای ارتقا یافت نشد.',
+    };
+  }
+
+  const totalGuestSess = Number(guestSessSummary?.total_cnt ?? 0);
+  const activeGuestSess = Number(guestSessSummary?.active_cnt ?? 0);
+  const mustRequireActiveSess = Boolean(ctx.requireActiveGuestSession) || totalGuestSess > 0;
+  if (mustRequireActiveSess && activeGuestSess === 0) {
+    return {
+      ok: false,
+      status: 401,
+      code: 'INVALID_OR_EXPIRED_TOKEN',
+      message: 'نشست مهمان منقضی یا لغو شده است. لطفاً دوباره اقدام کنید.',
     };
   }
 
@@ -1131,8 +1155,9 @@ export async function upgradeGuestAccountToRegistered(
 
   // Atomic single-transaction upgrade:
   // 1) Conditional CAS UPDATE users (only while still guest/guest)
-  // 2) INSERT auth_identities guarded by NOT NULL subquery requiring exact upgraded state
-  //    AND zero existing identities (rolls back entire batch on concurrent manual or Google race!)
+  // 2) INSERT auth_identities guarded by NOT NULL subquery requiring exact upgraded state,
+  //    zero existing identities, AND an active non-expired guest_sessions row
+  //    (rolls back entire batch on concurrent manual/Google race or mid-operation guest expiry!)
   // 3) INSERT email_verification_tokens
   // 4) Revoke all guest_sessions inside the SAME atomic batch transaction
   try {
@@ -1182,6 +1207,21 @@ export async function upgradeGuestAccountToRegistered(
                  AND NOT EXISTS (
                    SELECT 1 FROM auth_identities ai WHERE ai.user_id = u.user_id
                  )
+                 AND (
+                   EXISTS (
+                     SELECT 1 FROM guest_sessions gs
+                     WHERE gs.guest_user_id = u.user_id
+                       AND gs.revoked_at IS NULL
+                       AND gs.expires_at > ?
+                   )
+                   OR (
+                     ? = 0
+                     AND NOT EXISTS (
+                       SELECT 1 FROM guest_sessions gs_any
+                       WHERE gs_any.guest_user_id = u.user_id
+                     )
+                   )
+                 )
              ),
              'password', ?, ?, ?, ?, ?, ?
            )`
@@ -1190,6 +1230,8 @@ export async function upgradeGuestAccountToRegistered(
           identityId,
           guestUserId,
           validated.emailKey,
+          now,
+          ctx.requireActiveGuestSession ? 1 : 0,
           guestUserId,
           pwdRecord.hash,
           pwdRecord.salt,

@@ -11,6 +11,8 @@ import { AUTH_COOKIE_NAME } from '../cloudflare/src/lib/auth/authCookie';
 import { EmailSender } from '../cloudflare/src/lib/auth/emailService';
 import {
   OAUTH_BIND_COOKIE_NAME,
+  OAUTH_BIND_COOKIE_PREFIX,
+  buildOAuthBindCookieName,
   clearGoogleJwksCacheForTests,
 } from '../cloudflare/src/lib/auth/googleOAuthService';
 import { GUEST_COOKIE_NAME } from '../cloudflare/src/lib/auth/guestSession';
@@ -37,6 +39,25 @@ function extractCookieFromResponse(res: Response, name: string): string | null {
   for (const raw of getSetCookies(res)) {
     const first = raw.split(';')[0]?.trim() ?? '';
     if (first.startsWith(`${name}=`)) {
+      return first;
+    }
+  }
+  return null;
+}
+
+function extractOAuthBindCookieFromResponse(
+  res: Response,
+  flowId?: string
+): string | null {
+  if (flowId) {
+    return extractCookieFromResponse(res, buildOAuthBindCookieName(flowId));
+  }
+  for (const raw of getSetCookies(res)) {
+    const first = raw.split(';')[0]?.trim() ?? '';
+    if (
+      first.startsWith(OAUTH_BIND_COOKIE_PREFIX) ||
+      first.startsWith(`${OAUTH_BIND_COOKIE_NAME}=`)
+    ) {
       return first;
     }
   }
@@ -815,9 +836,14 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
         body: JSON.stringify({ mode: 'login' }),
       });
       assert.equal(start1.status, 200);
-      const bind1 = extractCookieFromResponse(start1, OAUTH_BIND_COOKIE_NAME);
-      assert.ok(bind1, 'OAuth /start must issue HttpOnly eyvan_oauth_bind cookie');
-      const start1Json = (await start1.json()) as { ok: boolean; url: string };
+      const start1Json = (await start1.json()) as {
+        ok: boolean;
+        flowId: string;
+        url: string;
+      };
+      assert.ok(start1Json.flowId, 'OAuth /start must return flowId');
+      const bind1 = extractOAuthBindCookieFromResponse(start1, start1Json.flowId);
+      assert.ok(bind1, 'OAuth /start must issue HttpOnly per-flow eyvan_oauth_bind_<flowId> cookie');
       const params1 = google.captureFromAuthUrl(start1Json.url);
       assert.equal(params1.codeChallengeMethod, 'S256');
       assert.ok(params1.state.length >= 20);
@@ -865,8 +891,8 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
         },
         body: JSON.stringify({ mode: 'login' }),
       });
-      const bind2 = extractCookieFromResponse(start2Res, OAUTH_BIND_COOKIE_NAME)!;
-      const start2 = (await start2Res.json()) as { url: string };
+      const start2 = (await start2Res.json()) as { flowId: string; url: string };
+      const bind2 = extractOAuthBindCookieFromResponse(start2Res, start2.flowId)!;
       const params2 = google.captureFromAuthUrl(start2.url);
       const cb2 = await fetch(
         `${h.baseUrl}/api/auth/google/callback?code=mock_code_2&state=${encodeURIComponent(params2.state)}`,
@@ -901,8 +927,8 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
           },
           body: JSON.stringify({ mode: 'login' }),
         });
-        const bindBad = extractCookieFromResponse(sBadRes, OAUTH_BIND_COOKIE_NAME)!;
-        const sBad = (await sBadRes.json()) as { url: string };
+        const sBad = (await sBadRes.json()) as { flowId: string; url: string };
+        const bindBad = extractOAuthBindCookieFromResponse(sBadRes, sBad.flowId)!;
         const pBad = google.captureFromAuthUrl(sBad.url);
         const cbBad = await fetch(
           `${h.baseUrl}/api/auth/google/callback?code=bad_code&state=${encodeURIComponent(pBad.state)}`,
@@ -927,8 +953,8 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
         },
         body: JSON.stringify({ mode: 'login' }),
       });
-      const bindTakeover = extractCookieFromResponse(sTakeoverRes, OAUTH_BIND_COOKIE_NAME)!;
-      const sTakeover = (await sTakeoverRes.json()) as { url: string };
+      const sTakeover = (await sTakeoverRes.json()) as { flowId: string; url: string };
+      const bindTakeover = extractOAuthBindCookieFromResponse(sTakeoverRes, sTakeover.flowId)!;
       const pTakeover = google.captureFromAuthUrl(sTakeover.url);
       const cbTakeover = await fetch(
         `${h.baseUrl}/api/auth/google/callback?code=takeover_code&state=${encodeURIComponent(pTakeover.state)}`,
@@ -949,8 +975,8 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
         },
         body: JSON.stringify({ mode: 'link' }),
       });
-      const bindLink = extractCookieFromResponse(sLinkRes, OAUTH_BIND_COOKIE_NAME)!;
-      const sLink = (await sLinkRes.json()) as { url: string };
+      const sLink = (await sLinkRes.json()) as { flowId: string; url: string };
+      const bindLink = extractOAuthBindCookieFromResponse(sLinkRes, sLink.flowId)!;
       const pLink = google.captureFromAuthUrl(sLink.url);
 
       // Linking callback with WRONG user cookie (even with matching browser bind) must fail (401)
@@ -971,8 +997,8 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
         },
         body: JSON.stringify({ mode: 'link' }),
       });
-      const bindLinkOk = extractCookieFromResponse(sLinkOkRes, OAUTH_BIND_COOKIE_NAME)!;
-      const sLinkOk = (await sLinkOkRes.json()) as { url: string };
+      const sLinkOk = (await sLinkOkRes.json()) as { flowId: string; url: string };
+      const bindLinkOk = extractOAuthBindCookieFromResponse(sLinkOkRes, sLinkOk.flowId)!;
       const pLinkOk = google.captureFromAuthUrl(sLinkOk.url);
       const cbLinkOk = await fetch(
         `${h.baseUrl}/api/auth/google/callback?code=link_ok_code&state=${encodeURIComponent(pLinkOk.state)}`,
@@ -1031,8 +1057,8 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
         },
         body: JSON.stringify({ mode: 'login' }),
       });
-      const bindGuest = extractCookieFromResponse(sGuestRes, OAUTH_BIND_COOKIE_NAME)!;
-      const sGuest = (await sGuestRes.json()) as { url: string };
+      const sGuest = (await sGuestRes.json()) as { flowId: string; url: string };
+      const bindGuest = extractOAuthBindCookieFromResponse(sGuestRes, sGuest.flowId)!;
       const pGuest = google.captureFromAuthUrl(sGuest.url);
       const cbGuest = await fetch(
         `${h.baseUrl}/api/auth/google/callback?code=guest_code&state=${encodeURIComponent(pGuest.state)}`,
@@ -1067,8 +1093,8 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
         },
         body: JSON.stringify({ mode: 'login' }),
       });
-      const bindHtml = extractCookieFromResponse(sHtmlRes, OAUTH_BIND_COOKIE_NAME)!;
-      const sHtml = (await sHtmlRes.json()) as { url: string };
+      const sHtml = (await sHtmlRes.json()) as { flowId: string; url: string };
+      const bindHtml = extractOAuthBindCookieFromResponse(sHtmlRes, sHtml.flowId)!;
       const pHtml = google.captureFromAuthUrl(sHtml.url);
       const cbHtml = await fetch(
         `${h.baseUrl}/api/auth/google/callback?code=html_code&state=${encodeURIComponent(pHtml.state)}`,
@@ -1110,9 +1136,9 @@ describe('Stages 1–4 — Guest Identity, Sessions, Blocks, Google OAuth (C3) &
         workerEnv
       );
       assert.equal(wStart.status, 200);
-      const wBind = extractCookieFromResponse(wStart, OAUTH_BIND_COOKIE_NAME)!;
-      assert.ok(wBind, 'Worker /start must issue eyvan_oauth_bind cookie');
-      const wStartJson = (await wStart.json()) as { url: string };
+      const wStartJson = (await wStart.json()) as { flowId: string; url: string };
+      const wBind = extractOAuthBindCookieFromResponse(wStart, wStartJson.flowId)!;
+      assert.ok(wBind, 'Worker /start must issue per-flow eyvan_oauth_bind_<flowId> cookie');
       const wp = google.captureFromAuthUrl(wStartJson.url);
       const wCb = await worker.fetch(
         new Request(

@@ -41,11 +41,152 @@ import {
 import { validateAuthUsername, validateEmail } from './validation';
 
 export const OAUTH_BIND_COOKIE_NAME = 'eyvan_oauth_bind';
+export const OAUTH_BIND_COOKIE_PREFIX = 'eyvan_oauth_bind_';
+export const MAX_CONCURRENT_OAUTH_FLOWS_PER_BROWSER = 5;
 export const OAUTH_BIND_COOKIE_TTL_SEC = 10 * 60; // 10 minutes (matches OAUTH_STATE_TTL_MS)
 const OAUTH_BIND_COOKIE_PATH = '/api/auth/google';
+export const OAUTH_FLOW_ID_RE = /^[a-f0-9]{16}$/;
 const OAUTH_BIND_TOKEN_RE = /^[A-Za-z0-9_-]{32,128}$/;
 const COOKIE_DOMAIN_RE =
   /^\.?[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$/;
+
+/**
+ * Multi-label public suffixes (cloud hosting & ccSLDs) where sibling subdomains
+ * are independent sites (cross-site), NOT same-site.
+ */
+const MULTI_LABEL_PUBLIC_SUFFIXES = new Set([
+  'pages.dev',
+  'workers.dev',
+  'run.app',
+  'appspot.com',
+  'web.app',
+  'firebaseapp.com',
+  'vercel.app',
+  'netlify.app',
+  'github.io',
+  'gitlab.io',
+  'herokuapp.com',
+  'cloudfront.net',
+  'amazonaws.com',
+  'co.uk',
+  'org.uk',
+  'ac.uk',
+  'gov.uk',
+  'com.au',
+  'net.au',
+  'org.au',
+  'co.ir',
+  'ac.ir',
+  'org.ir',
+  'gov.ir',
+  'net.ir',
+  'com.tr',
+  'co.jp',
+  'ne.jp',
+  'or.jp',
+  'com.br',
+  'co.in',
+  'co.nz',
+]);
+
+function isIpLiteralHostname(hostname: string): boolean {
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) return true;
+  if (hostname.includes(':')) return true;
+  return false;
+}
+
+function resolveRegistrableSite(hostname: string): string {
+  const lower = hostname.toLowerCase().replace(/\.$/, '');
+  if (lower === 'localhost' || isIpLiteralHostname(lower)) {
+    return lower;
+  }
+  const labels = lower.split('.').filter(Boolean);
+  if (labels.length <= 2) return lower;
+  const lastTwo = `${labels[labels.length - 2]}.${labels[labels.length - 1]}`;
+  if (MULTI_LABEL_PUBLIC_SUFFIXES.has(lastTwo)) {
+    return labels.length >= 3
+      ? `${labels[labels.length - 3]}.${lastTwo}`
+      : lower;
+  }
+  return lastTwo;
+}
+
+/**
+ * Determines whether two HTTP(S) origins (or full URLs) are schemeful Same-Site
+ * according to browser cookie rules (same scheme + same registrable eTLD+1).
+ *
+ * Examples:
+ * - `https://eyvan.ir` & `https://api.eyvan.ir` -> `true` (Same-Site -> `SameSite=Lax; Secure`)
+ * - `https://play.eyvan.ir` & `https://api.eyvan.ir` -> `true` (Same-Site)
+ * - `http://localhost:3000` & `http://localhost:5173` -> `true` (Same-Site)
+ * - `https://eyvan.pages.dev` & `https://api.eyvan.ir` -> `false` (Cross-Site -> `SameSite=None; Secure`)
+ * - `https://a.pages.dev` & `https://b.pages.dev` -> `false` (Public suffix -> Cross-Site)
+ */
+export function areOriginsSameSite(
+  originOrUrlA: string | null | undefined,
+  originOrUrlB: string | null | undefined
+): boolean {
+  if (!originOrUrlA || !originOrUrlB) return false;
+  try {
+    const a = new URL(originOrUrlA.trim());
+    const b = new URL(originOrUrlB.trim());
+    if (a.protocol !== b.protocol) return false;
+    if (a.protocol !== 'https:' && a.protocol !== 'http:') return false;
+    if (a.origin === b.origin) return true;
+    const hostA = a.hostname.toLowerCase();
+    const hostB = b.hostname.toLowerCase();
+    if (hostA === hostB) return true;
+    if (
+      hostA === 'localhost' ||
+      hostB === 'localhost' ||
+      isIpLiteralHostname(hostA) ||
+      isIpLiteralHostname(hostB)
+    ) {
+      return false;
+    }
+    return resolveRegistrableSite(hostA) === resolveRegistrableSite(hostB);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolves the safest `SameSite` attribute for the OAuth browser-binding cookie:
+ * - Plain HTTP (local dev): always `Lax` (no `Secure`).
+ * - HTTPS Same-Origin / Same-Site (e.g., `eyvan.ir` <-> `api.eyvan.ir`): `Lax` (+ `Secure`)
+ *   so browsers treat it as a first-party cookie and NEVER depend on third-party cookies
+ *   (survives Safari ITP, Firefox ETP, and Chrome third-party cookie blocking; top-level
+ *   GET redirects from accounts.google.com always transmit `SameSite=Lax` cookies).
+ * - HTTPS Cross-Site (e.g., `eyvan.pages.dev` <-> `api.eyvan.ir`, or `Sec-Fetch-Site: cross-site`
+ *   on `/start`): `None` (+ `Secure`, unpartitioned fallback).
+ */
+export function resolveOAuthBindSameSiteMode(
+  secure: boolean,
+  openerOrigin: string | null | undefined,
+  apiOriginOrUrl: string | null | undefined,
+  secFetchSite?: string | null
+): 'Lax' | 'None' {
+  if (!secure) return 'Lax';
+  if (secFetchSite?.toLowerCase() === 'cross-site') return 'None';
+  return areOriginsSameSite(openerOrigin, apiOriginOrUrl) ? 'Lax' : 'None';
+}
+
+function generateOAuthFlowId(): string {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+export function buildOAuthBindCookieName(flowId: string): string {
+  if (!OAUTH_FLOW_ID_RE.test(flowId)) {
+    throw new Error('INVALID_OAUTH_FLOW_ID');
+  }
+  return `${OAUTH_BIND_COOKIE_PREFIX}${flowId}`;
+}
 
 function sanitizeOAuthCookieDomain(domain?: string): string | null {
   if (!domain) return null;
@@ -54,43 +195,104 @@ function sanitizeOAuthCookieDomain(domain?: string): string | null {
   return trimmed;
 }
 
-export function parseOAuthBindCookieFromHeader(
+export interface ParsedOAuthBindCookies {
+  readonly flowCookies: Map<string, string>;
+  readonly legacyToken: string | null;
+  readonly hasLegacyCookie: boolean;
+}
+
+/**
+ * Extracts all per-flow OAuth binding cookies (`eyvan_oauth_bind_<flowId>`) and any
+ * legacy unsuffixed `eyvan_oauth_bind` cookie from a raw `Cookie` header.
+ */
+export function parseAllOAuthBindCookiesFromHeader(
   cookieHeader: string | null | undefined
-): string | null {
-  if (!cookieHeader) return null;
+): ParsedOAuthBindCookies {
+  const flowCookies = new Map<string, string>();
+  let legacyToken: string | null = null;
+  let hasLegacyCookie = false;
+
+  if (!cookieHeader) {
+    return { flowCookies, legacyToken, hasLegacyCookie };
+  }
+
   const parts = cookieHeader.split(';');
   for (const part of parts) {
     const eqIdx = part.indexOf('=');
     if (eqIdx === -1) continue;
     const key = part.slice(0, eqIdx).trim();
-    if (key !== OAUTH_BIND_COOKIE_NAME) continue;
     const rawVal = part.slice(eqIdx + 1).trim();
-    if (!rawVal) return null;
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(rawVal);
-    } catch {
-      return null;
+
+    if (key === OAUTH_BIND_COOKIE_NAME) {
+      hasLegacyCookie = true;
+      if (rawVal) {
+        try {
+          const decoded = decodeURIComponent(rawVal);
+          if (OAUTH_BIND_TOKEN_RE.test(decoded)) {
+            legacyToken = decoded;
+          }
+        } catch {
+          // Ignore malformed legacy cookie value
+        }
+      }
+      continue;
     }
-    if (!OAUTH_BIND_TOKEN_RE.test(decoded)) return null;
-    return decoded;
+
+    if (key.startsWith(OAUTH_BIND_COOKIE_PREFIX)) {
+      const flowId = key.slice(OAUTH_BIND_COOKIE_PREFIX.length);
+      if (!OAUTH_FLOW_ID_RE.test(flowId) || !rawVal) continue;
+      try {
+        const decoded = decodeURIComponent(rawVal);
+        if (OAUTH_BIND_TOKEN_RE.test(decoded)) {
+          flowCookies.set(flowId, decoded);
+        }
+      } catch {
+        // Ignore malformed per-flow cookie value
+      }
+    }
   }
-  return null;
+
+  return { flowCookies, legacyToken, hasLegacyCookie };
+}
+
+export function parseOAuthBindCookieForFlow(
+  cookieHeader: string | null | undefined,
+  flowId: string
+): string | null {
+  if (!OAUTH_FLOW_ID_RE.test(flowId)) return null;
+  const parsed = parseAllOAuthBindCookiesFromHeader(cookieHeader);
+  return parsed.flowCookies.get(flowId) ?? null;
 }
 
 /**
- * Sets the short-lived HttpOnly browser-binding cookie scoped strictly to `/api/auth/google`.
- * Over HTTPS uses `Secure; SameSite=None` (intentionally unpartitioned so top-level popup
- * redirects back from accounts.google.com reliably transmit the cookie across SPA/API origins).
- * Over plain HTTP localhost uses `SameSite=Lax`.
+ * Legacy helper returning the unsuffixed cookie or first per-flow cookie when only one exists.
+ */
+export function parseOAuthBindCookieFromHeader(
+  cookieHeader: string | null | undefined
+): string | null {
+  const parsed = parseAllOAuthBindCookiesFromHeader(cookieHeader);
+  if (parsed.legacyToken) return parsed.legacyToken;
+  const first = parsed.flowCookies.values().next();
+  return first.done ? null : first.value;
+}
+
+/**
+ * Sets a per-flow HttpOnly browser-binding cookie (`eyvan_oauth_bind_<flowId>`)
+ * scoped strictly to `/api/auth/google`.
+ * - Cookie name contains ONLY the non-sensitive 16-hex `flowId` (never secrets/tokens).
+ * - Uses `SameSite=Lax; Secure` on HTTPS Same-Site/Same-Origin deployments so OAuth does not
+ *   rely on third-party cookies; uses `SameSite=None; Secure` only on Cross-Site HTTPS.
  */
 export function buildSetOAuthBindCookieHeader(
+  flowId: string,
   rawBindToken: string,
   secure: boolean,
+  sameSiteMode: 'Lax' | 'None' = secure ? 'Lax' : 'Lax',
   options?: CookieHeaderOptions
 ): string {
+  const cookieName = buildOAuthBindCookieName(flowId);
   const attrs = [
-    `${OAUTH_BIND_COOKIE_NAME}=${encodeURIComponent(rawBindToken)}`,
+    `${cookieName}=${encodeURIComponent(rawBindToken)}`,
     `Path=${OAUTH_BIND_COOKIE_PATH}`,
     `Max-Age=${OAUTH_BIND_COOKIE_TTL_SEC}`,
     'HttpOnly',
@@ -100,15 +302,48 @@ export function buildSetOAuthBindCookieHeader(
     attrs.push(`Domain=${domain}`);
   }
   if (secure) {
-    attrs.push('Secure', 'SameSite=None');
+    attrs.push('Secure', `SameSite=${sameSiteMode}`);
   } else {
     attrs.push('SameSite=Lax');
   }
   return attrs.join('; ');
 }
 
+/**
+ * Clears ONLY the specified per-flow OAuth binding cookie (`eyvan_oauth_bind_<flowId>`)
+ * so concurrent OAuth tabs in the same browser remain completely unaffected.
+ */
 export function buildClearOAuthBindCookieHeader(
+  flowId: string,
   secure: boolean,
+  sameSiteMode: 'Lax' | 'None' = 'Lax',
+  options?: CookieHeaderOptions
+): string {
+  const cookieName = buildOAuthBindCookieName(flowId);
+  const attrs = [
+    `${cookieName}=`,
+    `Path=${OAUTH_BIND_COOKIE_PATH}`,
+    'Max-Age=0',
+    'HttpOnly',
+  ];
+  const domain = sanitizeOAuthCookieDomain(options?.domain);
+  if (domain) {
+    attrs.push(`Domain=${domain}`);
+  }
+  if (secure) {
+    attrs.push('Secure', `SameSite=${sameSiteMode}`);
+  } else {
+    attrs.push('SameSite=Lax');
+  }
+  return attrs.join('; ');
+}
+
+/**
+ * Clears the legacy unsuffixed `eyvan_oauth_bind` cookie when detected during migration transition.
+ */
+export function buildClearLegacyOAuthBindCookieHeader(
+  secure: boolean,
+  sameSiteMode: 'Lax' | 'None' = 'Lax',
   options?: CookieHeaderOptions
 ): string {
   const attrs = [
@@ -122,7 +357,7 @@ export function buildClearOAuthBindCookieHeader(
     attrs.push(`Domain=${domain}`);
   }
   if (secure) {
-    attrs.push('Secure', 'SameSite=None');
+    attrs.push('Secure', `SameSite=${sameSiteMode}`);
   } else {
     attrs.push('SameSite=Lax');
   }
@@ -176,15 +411,20 @@ export interface GoogleOAuthStartInput {
   readonly openerOrigin?: string | null;
   readonly initiatorUserId?: string | null;
   readonly guestUserId?: string | null;
+  /** Existing `eyvan_oauth_bind_<flowId>` cookie flowIds currently held by this browser */
+  readonly existingFlowIds?: readonly string[];
   readonly now?: number;
 }
 
 export type GoogleOAuthStartResult =
   | {
       readonly ok: true;
+      readonly flowId: string;
       readonly url: string;
       readonly stateExpiresAt: number;
       readonly rawBrowserBinding: string;
+      /** Stale, consumed, expired, or overflow flowIds whose cookies should be cleared via Max-Age=0 */
+      readonly evictFlowIds: string[];
     }
   | {
       readonly ok: false;
@@ -197,7 +437,10 @@ export interface GoogleOAuthCallbackInput {
   readonly code: string | null;
   readonly state: string | null;
   readonly error: string | null;
-  readonly rawBrowserBinding: string | null;
+  /** Per-flow cookies extracted from `eyvan_oauth_bind_<flowId>` headers */
+  readonly rawBrowserBindings?: ReadonlyMap<string, string>;
+  /** Optional legacy unsuffixed `eyvan_oauth_bind` cookie (migration compatibility / direct test calls) */
+  readonly rawBrowserBinding?: string | null;
   readonly currentAuthenticatedUserId: string | null;
   readonly clientIp: string;
   readonly userAgent: string;
@@ -209,13 +452,16 @@ export type GoogleOAuthCallbackResult =
   | {
       readonly ok: true;
       readonly status: number;
+      readonly flowId: string | null;
       readonly flowMode: 'login' | 'link';
       readonly openerOrigin: string | null;
+      readonly redirectUri: string | null;
       readonly user: PublicAuthUser;
       readonly session?: PublicAuthSessionInfo;
       readonly rawSessionToken?: string;
       readonly sessionTtlSec?: number;
       readonly clearedGuestCookie: boolean;
+      readonly clearFlowCookieId: string | null;
       readonly alreadyLinked?: boolean;
       readonly message: string;
     }
@@ -223,13 +469,18 @@ export type GoogleOAuthCallbackResult =
       readonly ok: false;
       readonly status: number;
       readonly code: AuthErrorCode;
+      readonly flowId?: string | null;
       readonly flowMode?: 'login' | 'link';
       readonly openerOrigin?: string | null;
+      readonly redirectUri?: string | null;
+      readonly clearFlowCookieId?: string | null;
+      readonly clearedGuestCookie?: boolean;
       readonly message: string;
     };
 
 interface OAuthStateRow {
   state_hash: string;
+  flow_id: string | null;
   provider: string;
   code_verifier_encrypted: string;
   nonce_hash: string;
@@ -691,6 +942,7 @@ export async function startGoogleOAuthFlow(
 
   const now = input.now ?? Date.now();
   const expiresAt = now + OAUTH_STATE_TTL_MS;
+  const flowId = generateOAuthFlowId();
   const rawState = generateOpaqueToken(32);
   const rawNonce = generateOpaqueToken(32);
   const rawBrowserBinding = generateOpaqueToken(32);
@@ -698,6 +950,77 @@ export async function startGoogleOAuthFlow(
   const openerOrigin =
     sanitizeHttpOrigin(input.openerOrigin) ??
     sanitizeHttpOrigin(input.redirectUri);
+
+  // Inspect existing per-flow cookies from this browser to prune stale/expired cookies
+  // and cap active concurrent flows at MAX_CONCURRENT_OAUTH_FLOWS_PER_BROWSER.
+  const evictFlowIds: string[] = [];
+  const candidateExistingFlowIds = Array.from(
+    new Set(
+      (input.existingFlowIds ?? []).filter((id) => OAUTH_FLOW_ID_RE.test(id))
+    )
+  ).slice(0, 30);
+
+  if (candidateExistingFlowIds.length > 0) {
+    const placeholders = candidateExistingFlowIds.map(() => '?').join(', ');
+    const rowsRes = await db
+      .prepare(
+        `SELECT flow_id, created_at, expires_at, consumed_at
+         FROM oauth_states
+         WHERE provider = 'google'
+           AND flow_id IN (${placeholders})`
+      )
+      .bind(...candidateExistingFlowIds)
+      .all<{
+        flow_id: string;
+        created_at: number;
+        expires_at: number;
+        consumed_at: number | null;
+      }>();
+
+    const byFlowId = new Map<
+      string,
+      { created_at: number; expires_at: number; consumed_at: number | null }
+    >();
+    for (const row of rowsRes.results ?? []) {
+      byFlowId.set(row.flow_id, row);
+    }
+
+    const activeExisting: Array<{ flowId: string; createdAt: number }> = [];
+    for (const id of candidateExistingFlowIds) {
+      const rec = byFlowId.get(id);
+      if (!rec || rec.consumed_at !== null || rec.expires_at <= now) {
+        evictFlowIds.push(id);
+      } else {
+        activeExisting.push({ flowId: id, createdAt: rec.created_at });
+      }
+    }
+
+    const maxRetainedPrior = Math.max(
+      0,
+      MAX_CONCURRENT_OAUTH_FLOWS_PER_BROWSER - 1
+    );
+    if (activeExisting.length > maxRetainedPrior) {
+      activeExisting.sort((a, b) => a.createdAt - b.createdAt);
+      const overflowCount = activeExisting.length - maxRetainedPrior;
+      const overflowFlowIds = activeExisting
+        .slice(0, overflowCount)
+        .map((item) => item.flowId);
+      evictFlowIds.push(...overflowFlowIds);
+
+      // Mark evicted overflow states as consumed so evicted browser cookies cannot linger
+      const overflowPlaceholders = overflowFlowIds.map(() => '?').join(', ');
+      await db
+        .prepare(
+          `UPDATE oauth_states
+           SET consumed_at = ?
+           WHERE provider = 'google'
+             AND consumed_at IS NULL
+             AND flow_id IN (${overflowPlaceholders})`
+        )
+        .bind(now, ...overflowFlowIds)
+        .run();
+    }
+  }
 
   const [
     stateHash,
@@ -716,14 +1039,15 @@ export async function startGoogleOAuthFlow(
   await db
     .prepare(
       `INSERT INTO oauth_states (
-         state_hash, provider, code_verifier_encrypted, nonce_hash,
+         state_hash, flow_id, provider, code_verifier_encrypted, nonce_hash,
          redirect_path, flow_mode, initiator_user_id, guest_user_id, redirect_uri,
          browser_binding_hash, opener_origin,
          created_at, expires_at, consumed_at
-       ) VALUES (?, 'google', ?, ?, '/', ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+       ) VALUES (?, ?, 'google', ?, ?, '/', ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
     )
     .bind(
       stateHash,
+      flowId,
       encryptedVerifier,
       nonceHash,
       input.mode,
@@ -750,18 +1074,23 @@ export async function startGoogleOAuthFlow(
 
   return {
     ok: true,
+    flowId,
     url: authUrl.toString(),
     stateExpiresAt: expiresAt,
     rawBrowserBinding,
+    evictFlowIds,
   };
 }
 
 /**
  * Completes the Google OAuth callback:
- * 1) Atomically consumes one-time `state` (anti-CSRF & anti-replay).
- * 2) Exchanges authorization code + decrypted PKCE `code_verifier` at Google's token endpoint.
- * 3) Cryptographically verifies Google's RS256 `id_token` JWT against JWKS & validates `nonce`.
- * 4) Resolves identity strictly by immutable Google `sub` with anti-takeover linking rules.
+ * 1) Resolves the exact per-flow browser-binding cookie (`eyvan_oauth_bind_<flowId>`) and verifies
+ *    it in constant time BEFORE consuming state or calling Google's token endpoint.
+ * 2) Atomically consumes one-time `state` (anti-CSRF & anti-replay).
+ * 3) Exchanges authorization code + decrypted PKCE `code_verifier` at Google's token endpoint.
+ * 4) Cryptographically verifies Google's RS256 `id_token` JWT against JWKS & validates `nonce`.
+ * 5) Resolves identity strictly by immutable Google `sub` with anti-takeover linking rules.
+ * 6) Returns `clearFlowCookieId` for ONLY this flow so concurrent OAuth tabs stay untouched.
  */
 export async function completeGoogleOAuthCallback(
   db: D1DatabaseLike,
@@ -780,10 +1109,11 @@ export async function completeGoogleOAuthCallback(
   const now = input.now ?? Date.now();
   const rawCode = input.code?.trim() ?? '';
   const rawState = input.state?.trim() ?? '';
-  const rawBind = input.rawBrowserBinding?.trim() ?? '';
+  const legacyRawBind = input.rawBrowserBinding?.trim() ?? '';
+  const hasPerFlowMap = input.rawBrowserBindings !== undefined;
 
   // Look up state row early when state is present so cancel/error paths can still
-  // bind exact openerOrigin and flowMode (never wildcard '*') after verifying browser binding.
+  // bind exact openerOrigin, flowMode, and flowId (never wildcard '*') after verifying browser binding.
   let stateHash = '';
   let stateRow: OAuthStateRow | null = null;
   if (rawState) {
@@ -791,7 +1121,7 @@ export async function completeGoogleOAuthCallback(
     stateRow = await db
       .prepare(
         `SELECT
-           state_hash, provider, code_verifier_encrypted, nonce_hash,
+           state_hash, flow_id, provider, code_verifier_encrypted, nonce_hash,
            redirect_path, flow_mode, initiator_user_id, guest_user_id, redirect_uri,
            browser_binding_hash, opener_origin,
            created_at, expires_at, consumed_at
@@ -803,13 +1133,34 @@ export async function completeGoogleOAuthCallback(
       .first<OAuthStateRow>();
   }
 
+  const matchedFlowId =
+    stateRow?.flow_id && OAUTH_FLOW_ID_RE.test(stateRow.flow_id)
+      ? stateRow.flow_id
+      : null;
+  const stateRedirectUri = stateRow?.redirect_uri ?? null;
+
+  const resolveBindingTokenForState = (row: OAuthStateRow | null): string => {
+    if (!row) return '';
+    if (row.flow_id && OAUTH_FLOW_ID_RE.test(row.flow_id)) {
+      if (hasPerFlowMap) {
+        return input.rawBrowserBindings?.get(row.flow_id)?.trim() ?? '';
+      }
+      // Direct programmatic call without cookie-map: accept explicit rawBrowserBinding
+      return legacyRawBind;
+    }
+    // Pre-0011 in-flight state row fallback
+    return legacyRawBind;
+  };
+
   const verifyBrowserBindingForState = async (
     row: OAuthStateRow | null
   ): Promise<boolean> => {
-    if (!row || !row.browser_binding_hash || !rawBind) {
+    if (!row || !row.browser_binding_hash) {
       return false;
     }
-    const actualBindHash = await sha256Hex(rawBind);
+    const candidateBind = resolveBindingTokenForState(row);
+    if (!candidateBind) return false;
+    const actualBindHash = await sha256Hex(candidateBind);
     return constantTimeEqualHex(actualBindHash, row.browser_binding_hash);
   };
 
@@ -843,8 +1194,11 @@ export async function completeGoogleOAuthCallback(
       ok: false,
       status: 400,
       code: isCancel ? 'OAUTH_CANCELLED' : 'OAUTH_FAILED',
+      flowId: bindingMatches ? matchedFlowId : null,
       flowMode: resolvedFlowMode,
       openerOrigin: resolvedOpenerOrigin,
+      redirectUri: bindingMatches ? stateRedirectUri : null,
+      clearFlowCookieId: bindingMatches ? matchedFlowId : null,
       message: isCancel
         ? 'فرآیند ورود با گوگل توسط کاربر لغو شد.'
         : 'احراز هویت با گوگل تکمیل نشد.',
@@ -861,22 +1215,34 @@ export async function completeGoogleOAuthCallback(
   }
 
   if (!stateRow || stateRow.consumed_at !== null || stateRow.expires_at <= now) {
+    // If this browser still holds a stale cookie matching this expired/consumed flow, clear ONLY that one.
+    const bindingMatchesStale =
+      stateRow !== null && (await verifyBrowserBindingForState(stateRow));
     return {
       ok: false,
       status: 400,
       code: 'OAUTH_INVALID_STATE',
+      flowId: bindingMatchesStale ? matchedFlowId : null,
+      flowMode:
+        bindingMatchesStale && stateRow?.flow_mode === 'link' ? 'link' : 'login',
+      openerOrigin: bindingMatchesStale
+        ? sanitizeHttpOrigin(stateRow?.opener_origin)
+        : null,
+      redirectUri: bindingMatchesStale ? stateRedirectUri : null,
+      clearFlowCookieId: bindingMatchesStale ? matchedFlowId : null,
       message: 'نشست ورود با گوگل منقضی شده یا قبلاً استفاده شده است. لطفاً دوباره تلاش کنید.',
     };
   }
 
-  // Strict browser-binding verification BEFORE consuming state or calling Google token endpoint.
-  // Blocks Login-CSRF where an attacker's callback URL is opened in another browser.
+  // Strict per-flow browser-binding verification BEFORE consuming state or calling Google token endpoint.
+  // Blocks Login-CSRF where an attacker's callback URL is opened in another browser or wrong flow.
   const browserBindingValid = await verifyBrowserBindingForState(stateRow);
   if (!browserBindingValid) {
     return {
       ok: false,
       status: 400,
       code: 'OAUTH_INVALID_STATE',
+      clearFlowCookieId: null,
       message:
         'درخواست ورود با گوگل با مرورگر آغازکننده مطابقت ندارد. لطفاً ورود را مجدداً از همین مرورگر آغاز کنید.',
     };
@@ -901,8 +1267,11 @@ export async function completeGoogleOAuthCallback(
       ok: false,
       status: 400,
       code: 'OAUTH_INVALID_STATE',
+      flowId: matchedFlowId,
       flowMode,
       openerOrigin,
+      redirectUri: stateRedirectUri,
+      clearFlowCookieId: matchedFlowId,
       message: 'نشست ورود با گوگل قبلاً مصرف شده است. لطفاً مجدداً اقدام کنید.',
     };
   }
@@ -918,8 +1287,11 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 401,
         code: 'UNAUTHORIZED',
+        flowId: matchedFlowId,
         flowMode,
         openerOrigin,
+        redirectUri: stateRedirectUri,
+        clearFlowCookieId: matchedFlowId,
         message: 'برای اتصال حساب گوگل، نشست فعال شما با درخواست اولیه مطابقت ندارد.',
       };
     }
@@ -934,8 +1306,11 @@ export async function completeGoogleOAuthCallback(
       ok: false,
       status: 400,
       code: 'OAUTH_INVALID_STATE',
+      flowId: matchedFlowId,
       flowMode,
       openerOrigin,
+      redirectUri: stateRedirectUri,
+      clearFlowCookieId: matchedFlowId,
       message: 'اطلاعات امنیتی درخواست گوگل معتبر نیست.',
     };
   }
@@ -966,8 +1341,11 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 502,
         code: 'OAUTH_FAILED',
+        flowId: matchedFlowId,
         flowMode,
         openerOrigin,
+        redirectUri: stateRedirectUri,
+        clearFlowCookieId: matchedFlowId,
         message: 'تبادل کد احراز هویت با سرور گوگل ناموفق بود.',
       };
     }
@@ -977,8 +1355,11 @@ export async function completeGoogleOAuthCallback(
       ok: false,
       status: 502,
       code: 'OAUTH_FAILED',
+      flowId: matchedFlowId,
       flowMode,
       openerOrigin,
+      redirectUri: stateRedirectUri,
+      clearFlowCookieId: matchedFlowId,
       message: 'خطا در برقراری ارتباط با سرویس گوگل.',
     };
   }
@@ -988,8 +1369,11 @@ export async function completeGoogleOAuthCallback(
       ok: false,
       status: 401,
       code: 'OAUTH_FAILED',
+      flowId: matchedFlowId,
       flowMode,
       openerOrigin,
+      redirectUri: stateRedirectUri,
+      clearFlowCookieId: matchedFlowId,
       message: 'توکن هویت معتبر از گوگل دریافت نشد.',
     };
   }
@@ -1007,8 +1391,11 @@ export async function completeGoogleOAuthCallback(
       ok: false,
       status: 401,
       code: 'OAUTH_FAILED',
+      flowId: matchedFlowId,
       flowMode,
       openerOrigin,
+      redirectUri: stateRedirectUri,
+      clearFlowCookieId: matchedFlowId,
       message: 'اعتبارسنجی امنیتی توکن گوگل ناموفق بود.',
     };
   }
@@ -1050,8 +1437,11 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 403,
         code: 'ACCOUNT_DISABLED',
+        flowId: matchedFlowId,
         flowMode: 'link',
         openerOrigin,
+        redirectUri: stateRedirectUri,
+        clearFlowCookieId: matchedFlowId,
         message: 'حساب کاربری فعلی شما فعال نیست.',
       };
     }
@@ -1061,10 +1451,13 @@ export async function completeGoogleOAuthCallback(
         return {
           ok: true,
           status: 200,
+          flowId: matchedFlowId,
           flowMode: 'link',
           openerOrigin,
+          redirectUri: stateRedirectUri,
           user: mapUserRowToPublic(targetUser),
           clearedGuestCookie: false,
+          clearFlowCookieId: matchedFlowId,
           alreadyLinked: true,
           message: 'این حساب گوگل از قبل به حساب کاربری شما متصل است.',
         };
@@ -1073,8 +1466,11 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 409,
         code: 'ACCOUNT_CONFLICT',
+        flowId: matchedFlowId,
         flowMode: 'link',
         openerOrigin,
+        redirectUri: stateRedirectUri,
+        clearFlowCookieId: matchedFlowId,
         message: 'این حساب گوگل قبلاً به حساب کاربری دیگری متصل شده است.',
       };
     }
@@ -1095,8 +1491,11 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 409,
         code: 'ACCOUNT_CONFLICT',
+        flowId: matchedFlowId,
         flowMode: 'link',
         openerOrigin,
+        redirectUri: stateRedirectUri,
+        clearFlowCookieId: matchedFlowId,
         message: 'حساب شما قبلاً به یک حساب گوگل دیگر متصل شده است.',
       };
     }
@@ -1152,8 +1551,11 @@ export async function completeGoogleOAuthCallback(
           ok: false,
           status: 409,
           code: 'ACCOUNT_CONFLICT',
+          flowId: matchedFlowId,
           flowMode: 'link',
           openerOrigin,
+          redirectUri: stateRedirectUri,
+          clearFlowCookieId: matchedFlowId,
           message: 'امکان اتصال هم‌زمان این حساب گوگل وجود ندارد. لطفاً وضعیت حساب را بررسی کنید.',
         };
       }
@@ -1163,14 +1565,17 @@ export async function completeGoogleOAuthCallback(
     return {
       ok: true,
       status: 200,
+      flowId: matchedFlowId,
       flowMode: 'link',
       openerOrigin,
+      redirectUri: stateRedirectUri,
       user: {
         ...mapUserRowToPublic(targetUser),
         authProvider: nextProvider,
         avatarUrl: nextAvatarUrl,
       },
       clearedGuestCookie: false,
+      clearFlowCookieId: matchedFlowId,
       message: 'حساب گوگل شما با موفقیت به حساب مرکزی ایوان متصل شد.',
     };
   }
@@ -1209,8 +1614,11 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 404,
         code: 'ACCOUNT_DISABLED',
+        flowId: matchedFlowId,
         flowMode: 'login',
         openerOrigin,
+        redirectUri: stateRedirectUri,
+        clearFlowCookieId: matchedFlowId,
         message: 'حساب کاربری متصل به این شناسه گوگل یافت نشد.',
       };
     }
@@ -1223,8 +1631,11 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 403,
         code: 'ACCOUNT_DISABLED',
+        flowId: matchedFlowId,
         flowMode: 'login',
         openerOrigin,
+        redirectUri: stateRedirectUri,
+        clearFlowCookieId: matchedFlowId,
         message: 'این حساب کاربری غیرفعال یا مسدود شده است.',
       };
     }
@@ -1261,8 +1672,10 @@ export async function completeGoogleOAuthCallback(
     return {
       ok: true,
       status: 200,
+      flowId: matchedFlowId,
       flowMode: 'login',
       openerOrigin,
+      redirectUri: stateRedirectUri,
       user: {
         ...mapUserRowToPublic(userRow),
         avatarUrl: userRow.avatar_url ?? claims.picture,
@@ -1276,6 +1689,7 @@ export async function completeGoogleOAuthCallback(
       rawSessionToken,
       sessionTtlSec,
       clearedGuestCookie: false,
+      clearFlowCookieId: matchedFlowId,
       message: 'با موفقیت از طریق گوگل وارد حساب کاربری شدید.',
     };
   }
@@ -1296,8 +1710,11 @@ export async function completeGoogleOAuthCallback(
       ok: false,
       status: 409,
       code: 'ACCOUNT_LINK_REQUIRED',
+      flowId: matchedFlowId,
       flowMode: 'login',
       openerOrigin,
+      redirectUri: stateRedirectUri,
+      clearFlowCookieId: matchedFlowId,
       message:
         'حسابی با این ایمیل از قبل ثبت شده است. برای امنیت حساب، ابتدا با رمز عبور وارد شوید و سپس از بخش «پروفایل ← امنیت و حساب کاربری» اتصال گوگل را فعال کنید.',
     };
@@ -1306,21 +1723,35 @@ export async function completeGoogleOAuthCallback(
   const identityId = generatePrefixedId('idn', 12);
 
   // B3) Upgrade verified guest account in-place if this flow started from an active guest session.
-  // Never silently fall through to creating a duplicate account if the guest was concurrently upgraded.
+  // Never silently fall through to creating a duplicate account if the guest was concurrently upgraded
+  // or if the guest session expired mid-flow.
   if (stateRow.guest_user_id) {
-    const candidateGuest = await db
-      .prepare(
-        `SELECT
-           user_id, username, username_key, display_name,
-           email, email_key, email_verified,
-           avatar_code, avatar_url, auth_provider, account_status,
-           created_at, last_seen_at
-         FROM users
-         WHERE user_id = ?
-         LIMIT 1`
-      )
-      .bind(stateRow.guest_user_id)
-      .first<UserRow>();
+    const [candidateGuest, activeGuestSess] = await Promise.all([
+      db
+        .prepare(
+          `SELECT
+             user_id, username, username_key, display_name,
+             email, email_key, email_verified,
+             avatar_code, avatar_url, auth_provider, account_status,
+             created_at, last_seen_at
+           FROM users
+           WHERE user_id = ?
+           LIMIT 1`
+        )
+        .bind(stateRow.guest_user_id)
+        .first<UserRow>(),
+      db
+        .prepare(
+          `SELECT 1 AS hit
+           FROM guest_sessions
+           WHERE guest_user_id = ?
+             AND revoked_at IS NULL
+             AND expires_at > ?
+           LIMIT 1`
+        )
+        .bind(stateRow.guest_user_id, now)
+        .first<{ hit: number }>(),
+    ]);
 
     if (
       !candidateGuest ||
@@ -1331,10 +1762,30 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 409,
         code: 'ACCOUNT_CONFLICT',
+        flowId: matchedFlowId,
         flowMode: 'login',
         openerOrigin,
+        redirectUri: stateRedirectUri,
+        clearFlowCookieId: matchedFlowId,
+        clearedGuestCookie: true,
         message:
           'حساب مهمان قبلاً ارتقا یافته یا دیگر معتبر نیست. لطفاً دوباره وارد حساب کاربری خود شوید.',
+      };
+    }
+
+    if (!activeGuestSess) {
+      return {
+        ok: false,
+        status: 401,
+        code: 'INVALID_OR_EXPIRED_TOKEN',
+        flowId: matchedFlowId,
+        flowMode: 'login',
+        openerOrigin,
+        redirectUri: stateRedirectUri,
+        clearFlowCookieId: matchedFlowId,
+        clearedGuestCookie: true,
+        message:
+          'نشست مهمان شما در حین عملیات منقضی یا لغو شد. لطفاً دوباره اقدام کنید.',
       };
     }
 
@@ -1346,8 +1797,9 @@ export async function completeGoogleOAuthCallback(
 
     // Atomic single-transaction upgrade:
     // 1) Conditional CAS UPDATE users (only if still guest/guest)
-    // 2) INSERT auth_identities guarded by NOT NULL subquery requiring the exact upgraded state
-    //    AND zero pre-existing identities (rolls back entire batch on any concurrent upgrade race!)
+    // 2) INSERT auth_identities guarded by NOT NULL subquery requiring the exact upgraded state,
+    //    zero pre-existing identities, AND an active non-expired guest_sessions row
+    //    (rolls back entire batch on concurrent upgrade race or mid-flow session expiry!)
     // 3) INSERT auth_sessions
     // 4) Revoke all guest_sessions atomically inside the SAME batch transaction
     try {
@@ -1399,6 +1851,12 @@ export async function completeGoogleOAuthCallback(
                    AND NOT EXISTS (
                      SELECT 1 FROM auth_identities ai WHERE ai.user_id = u.user_id
                    )
+                   AND EXISTS (
+                     SELECT 1 FROM guest_sessions gs
+                     WHERE gs.guest_user_id = u.user_id
+                       AND gs.revoked_at IS NULL
+                       AND gs.expires_at > ?
+                   )
                ),
                'google', ?, NULL, NULL, NULL, ?, ?
              )`
@@ -1407,6 +1865,7 @@ export async function completeGoogleOAuthCallback(
             identityId,
             candidateGuest.user_id,
             claims.emailKey,
+            now,
             claims.sub,
             now,
             now
@@ -1442,8 +1901,12 @@ export async function completeGoogleOAuthCallback(
           ok: false,
           status: 409,
           code: 'ACCOUNT_CONFLICT',
+          flowId: matchedFlowId,
           flowMode: 'login',
           openerOrigin,
+          redirectUri: stateRedirectUri,
+          clearFlowCookieId: matchedFlowId,
+          clearedGuestCookie: true,
           message:
             'امکان تکمیل هم‌زمان ارتقای حساب مهمان وجود ندارد. لطفاً دوباره تلاش کنید.',
         };
@@ -1454,8 +1917,10 @@ export async function completeGoogleOAuthCallback(
     return {
       ok: true,
       status: 200,
+      flowId: matchedFlowId,
       flowMode: 'login',
       openerOrigin,
+      redirectUri: stateRedirectUri,
       user: {
         userId: candidateGuest.user_id,
         username: allocated.username,
@@ -1477,6 +1942,7 @@ export async function completeGoogleOAuthCallback(
       rawSessionToken,
       sessionTtlSec,
       clearedGuestCookie: true,
+      clearFlowCookieId: matchedFlowId,
       message: 'حساب مهمان شما با حفظ سوابق به حساب گوگل ارتقا یافت.',
     };
   }
@@ -1544,8 +2010,11 @@ export async function completeGoogleOAuthCallback(
         ok: false,
         status: 409,
         code: 'ACCOUNT_CONFLICT',
+        flowId: matchedFlowId,
         flowMode: 'login',
         openerOrigin,
+        redirectUri: stateRedirectUri,
+        clearFlowCookieId: matchedFlowId,
         message: 'حساب کاربری با این مشخصات هم‌زمان ثبت شده است. لطفاً دوباره وارد شوید.',
       };
     }
@@ -1555,8 +2024,10 @@ export async function completeGoogleOAuthCallback(
   return {
     ok: true,
     status: 201,
+    flowId: matchedFlowId,
     flowMode: 'login',
     openerOrigin,
+    redirectUri: stateRedirectUri,
     user: {
       userId: newUserId,
       username: allocated.username,
@@ -1578,6 +2049,47 @@ export async function completeGoogleOAuthCallback(
     rawSessionToken,
     sessionTtlSec,
     clearedGuestCookie: false,
+    clearFlowCookieId: matchedFlowId,
     message: 'حساب کاربری شما با گوگل ساخته و فعال شد.',
   };
+}
+
+/**
+ * Bounded periodic cleanup of expired or long-consumed `oauth_states` rows for Cron / maintenance.
+ * Backed by `idx_oauth_states_expires_at` (migration 0011).
+ */
+export async function pruneExpiredOAuthStatesBatched(
+  db: D1DatabaseLike | undefined,
+  options?: { now?: number; graceMs?: number; batchSize?: number; maxBatches?: number }
+): Promise<number> {
+  if (!db) return 0;
+  const now = options?.now ?? Date.now();
+  const graceMs = Math.max(60_000, options?.graceMs ?? 60 * 60 * 1000); // default 1h grace
+  const cutoff = now - graceMs;
+  const batchSize = Math.max(10, Math.min(500, options?.batchSize ?? 200));
+  const maxBatches = Math.max(1, Math.min(20, options?.maxBatches ?? 5));
+  let totalDeleted = 0;
+
+  for (let i = 0; i < maxBatches; i++) {
+    const res = await db
+      .prepare(
+        `DELETE FROM oauth_states
+         WHERE state_hash IN (
+           SELECT state_hash
+           FROM oauth_states
+           WHERE expires_at <= ?
+              OR (consumed_at IS NOT NULL AND consumed_at <= ?)
+           ORDER BY expires_at ASC
+           LIMIT ?
+         )`
+      )
+      .bind(cutoff, cutoff, batchSize)
+      .run();
+
+    const deleted = Number(res.meta?.changes ?? 0);
+    totalDeleted += deleted;
+    if (deleted < batchSize) break;
+  }
+
+  return totalDeleted;
 }

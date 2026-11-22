@@ -128,6 +128,27 @@ export const SOCIAL_PRESENCE_USER_RATE_LIMIT: RateLimitPolicy = {
   blockMs: 60 * 1000,
 };
 
+export const OAUTH_START_IP_RATE_LIMIT: RateLimitPolicy = {
+  action: 'oauth_start_ip',
+  maxAttempts: 20,
+  windowMs: 15 * 60 * 1000,
+  blockMs: 15 * 60 * 1000,
+};
+
+export const OAUTH_CALLBACK_IP_RATE_LIMIT: RateLimitPolicy = {
+  action: 'oauth_callback_ip',
+  maxAttempts: 30,
+  windowMs: 15 * 60 * 1000,
+  blockMs: 15 * 60 * 1000,
+};
+
+export const CHAT_CONVERSATION_MUTATION_USER_RATE_LIMIT: RateLimitPolicy = {
+  action: 'chat_conv_mut_user',
+  maxAttempts: 60,
+  windowMs: 5 * 60 * 1000,
+  blockMs: 60 * 1000,
+};
+
 const MAX_ACTIVE_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 export const DEFAULT_RATE_LIMIT_RETENTION_MS = 24 * 60 * 60 * 1000; // 24 hours
 

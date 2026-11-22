@@ -43,22 +43,30 @@ import {
   resetPasswordWithToken,
   verifyEmailWithToken,
 } from './c2Service';
+import { sha256Hex } from './crypto';
 import { EmailSender, createEmailSender } from './emailService';
 import {
   GoogleOAuthConfig,
+  buildClearLegacyOAuthBindCookieHeader,
   buildClearOAuthBindCookieHeader,
   buildSetOAuthBindCookieHeader,
   completeGoogleOAuthCallback,
   isGoogleOAuthConfigured,
-  parseOAuthBindCookieFromHeader,
+  parseAllOAuthBindCookiesFromHeader,
   resolveGoogleCallbackRedirectUri,
+  resolveOAuthBindSameSiteMode,
   startGoogleOAuthFlow,
 } from './googleOAuthService';
 import {
   buildClearGuestCookieHeader,
+  inspectGuestSession,
   parseGuestCookieFromHeader,
-  verifyGuestSession,
 } from './guestSession';
+import {
+  OAUTH_CALLBACK_IP_RATE_LIMIT,
+  OAUTH_START_IP_RATE_LIMIT,
+  consumeRateLimitSlot,
+} from './rateLimit';
 
 const MAX_AUTH_BODY_BYTES = 8 * 1024; // 8KB strict cap for auth payloads
 export const CSRF_CLIENT_HEADER_NAME = 'X-Requested-With';
@@ -106,18 +114,21 @@ function buildOAuthPopupHtmlResponse(
   payload: {
     readonly ok: boolean;
     readonly flowMode: 'login' | 'link';
+    readonly flowId?: string | null;
     readonly code?: string;
     readonly message: string;
   },
   targetOrigin: string,
   status: number,
-  setCookies: string[]
+  setCookies: string[],
+  extraHeaders?: Record<string, string>
 ): Response {
   const safeTargetOrigin = resolveValidatedHttpOrigin(targetOrigin);
   const safeJson = JSON.stringify({
     type: 'EYVAN_OAUTH_RESULT',
     ok: payload.ok,
     flowMode: payload.flowMode,
+    flowId: payload.flowId ?? null,
     code: payload.code ?? null,
     message: payload.message,
   }).replace(/</g, '\\u003c');
@@ -173,6 +184,11 @@ function buildOAuthPopupHtmlResponse(
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
   });
+  if (extraHeaders) {
+    for (const [k, v] of Object.entries(extraHeaders)) {
+      headers.set(k, v);
+    }
+  }
   for (const cookie of setCookies) {
     headers.append('Set-Cookie', cookie);
   }
@@ -183,7 +199,8 @@ function buildAuthResponse(
   payload: unknown,
   status: number,
   corsHeaders: Record<string, string>,
-  extraHeaders?: Record<string, string>
+  extraHeaders?: Record<string, string>,
+  extraSetCookies?: readonly string[]
 ): Response {
   const headers = new Headers({
     'Content-Type': 'application/json; charset=utf-8',
@@ -196,6 +213,11 @@ function buildAuthResponse(
   if (extraHeaders) {
     for (const [k, v] of Object.entries(extraHeaders)) {
       headers.set(k, v);
+    }
+  }
+  if (extraSetCookies) {
+    for (const cookie of extraSetCookies) {
+      headers.append('Set-Cookie', cookie);
     }
   }
   return new Response(JSON.stringify(payload), { status, headers });
@@ -421,9 +443,50 @@ export async function handleAuthHttpRequest(
       const rawGuestToken = parseGuestCookieFromHeader(
         request.headers.get('Cookie')
       );
-      const verifiedGuest = rawGuestToken
-        ? await verifyGuestSession(env.db, rawGuestToken, now)
+      const guestInspection = rawGuestToken
+        ? await inspectGuestSession(env.db, rawGuestToken, now)
         : null;
+
+      if (guestInspection?.status === 'revoked_or_upgraded') {
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: 'ACCOUNT_CONFLICT',
+            message:
+              'حساب مهمان شما قبلاً ارتقا یافته یا دیگر معتبر نیست. لطفاً وارد حساب کاربری خود شوید.',
+          },
+          409,
+          env.corsHeaders,
+          {
+            'Set-Cookie': buildClearGuestCookieHeader(
+              env.secureCookie,
+              env.cookieOptions
+            ),
+          }
+        );
+      }
+
+      if (guestInspection?.status === 'expired') {
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: 'INVALID_OR_EXPIRED_TOKEN',
+            message:
+              'نشست مهمان شما منقضی شده است. لطفاً دوباره برای ثبت‌نام اقدام کنید.',
+          },
+          401,
+          env.corsHeaders,
+          {
+            'Set-Cookie': buildClearGuestCookieHeader(
+              env.secureCookie,
+              env.cookieOptions
+            ),
+          }
+        );
+      }
+
+      const verifiedGuest =
+        guestInspection?.status === 'valid' ? guestInspection.session : null;
 
       const reqCtx = {
         clientIp: env.clientIp,
@@ -432,6 +495,7 @@ export async function handleAuthHttpRequest(
         sessionTtlSec: ttlSec,
         publicAppBaseUrl: env.publicAppBaseUrl,
         isProduction: env.isProduction,
+        requireActiveGuestSession: Boolean(verifiedGuest),
       };
 
       const result = verifiedGuest
@@ -450,10 +514,30 @@ export async function handleAuthHttpRequest(
           );
 
       if (result.ok === false) {
-        const extra =
-          result.retryAfterSec !== undefined
-            ? { 'Retry-After': String(result.retryAfterSec) }
-            : undefined;
+        const extra: Record<string, string> = {};
+        if (result.retryAfterSec !== undefined) {
+          extra['Retry-After'] = String(result.retryAfterSec);
+        }
+        // If a guest upgrade failed because the guest session expired or was concurrently upgraded,
+        // clear the stale guest cookie (but keep it intact for simple username/email conflicts).
+        if (verifiedGuest) {
+          const postCheck =
+            result.code === 'INVALID_OR_EXPIRED_TOKEN'
+              ? { status: 'expired' as const }
+              : result.code === 'ACCOUNT_CONFLICT'
+                ? await inspectGuestSession(env.db, rawGuestToken, now)
+                : null;
+          if (
+            postCheck &&
+            (postCheck.status === 'expired' ||
+              postCheck.status === 'revoked_or_upgraded')
+          ) {
+            extra['Set-Cookie'] = buildClearGuestCookieHeader(
+              env.secureCookie,
+              env.cookieOptions
+            );
+          }
+        }
         return buildAuthResponse(
           {
             ok: false,
@@ -462,7 +546,7 @@ export async function handleAuthHttpRequest(
           },
           result.status,
           env.corsHeaders,
-          extra
+          Object.keys(extra).length > 0 ? extra : undefined
         );
       }
 
@@ -1262,6 +1346,27 @@ export async function handleAuthHttpRequest(
     }
 
     try {
+      const ipHash = await sha256Hex(`ip:${env.clientIp || 'unknown'}`);
+      const startRl = await consumeRateLimitSlot(
+        env.db,
+        `oauth_start:ip:${ipHash}`,
+        OAUTH_START_IP_RATE_LIMIT,
+        now
+      );
+      if (!startRl.allowed) {
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: 'RATE_LIMITED',
+            message:
+              'تعداد درخواست‌های شروع ورود با گوگل بیش از حد مجاز است. لطفاً کمی بعد دوباره تلاش کنید.',
+          },
+          429,
+          env.corsHeaders,
+          { 'Retry-After': String(startRl.retryAfterSec) }
+        );
+      }
+
       const rawCookieHeader = request.headers.get('Cookie');
       let initiatorUserId: string | null = null;
       let guestUserId: string | null = null;
@@ -1285,10 +1390,49 @@ export async function handleAuthHttpRequest(
         initiatorUserId = verified.user.userId;
       } else {
         const rawGuestToken = parseGuestCookieFromHeader(rawCookieHeader);
-        const verifiedGuest = rawGuestToken
-          ? await verifyGuestSession(env.db, rawGuestToken, now)
+        const guestInspection = rawGuestToken
+          ? await inspectGuestSession(env.db, rawGuestToken, now)
           : null;
-        guestUserId = verifiedGuest?.guestUserId ?? null;
+        if (guestInspection?.status === 'revoked_or_upgraded') {
+          return buildAuthResponse(
+            {
+              ok: false,
+              code: 'ACCOUNT_CONFLICT',
+              message:
+                'حساب مهمان شما قبلاً ارتقا یافته است. لطفاً دوباره با حساب کاربری خود وارد شوید.',
+            },
+            409,
+            env.corsHeaders,
+            {
+              'Set-Cookie': buildClearGuestCookieHeader(
+                env.secureCookie,
+                env.cookieOptions
+              ),
+            }
+          );
+        }
+        if (guestInspection?.status === 'expired') {
+          return buildAuthResponse(
+            {
+              ok: false,
+              code: 'INVALID_OR_EXPIRED_TOKEN',
+              message:
+                'نشست مهمان شما منقضی شده است. لطفاً دوباره ورود با گوگل را آغاز کنید.',
+            },
+            401,
+            env.corsHeaders,
+            {
+              'Set-Cookie': buildClearGuestCookieHeader(
+                env.secureCookie,
+                env.cookieOptions
+              ),
+            }
+          );
+        }
+        guestUserId =
+          guestInspection?.status === 'valid'
+            ? guestInspection.session.guestUserId
+            : null;
       }
 
       const redirectUri = resolveGoogleCallbackRedirectUri(
@@ -1313,6 +1457,7 @@ export async function handleAuthHttpRequest(
         resolveValidatedHttpOrigin(env.publicAppBaseUrl) ??
         resolveValidatedHttpOrigin(request.url);
 
+      const existingBindCookies = parseAllOAuthBindCookiesFromHeader(rawCookieHeader);
       const started = await startGoogleOAuthFlow(
         env.db,
         env.googleOAuth ?? {},
@@ -1322,6 +1467,7 @@ export async function handleAuthHttpRequest(
           openerOrigin,
           initiatorUserId,
           guestUserId,
+          existingFlowIds: Array.from(existingBindCookies.flowCookies.keys()),
           now,
         }
       );
@@ -1338,22 +1484,54 @@ export async function handleAuthHttpRequest(
         );
       }
 
-      const bindCookie = buildSetOAuthBindCookieHeader(
-        started.rawBrowserBinding,
+      const sameSiteMode = resolveOAuthBindSameSiteMode(
         env.secureCookie,
-        env.cookieOptions
+        openerOrigin,
+        request.url,
+        request.headers.get('Sec-Fetch-Site')
       );
+
+      const setCookies: string[] = [
+        buildSetOAuthBindCookieHeader(
+          started.flowId,
+          started.rawBrowserBinding,
+          env.secureCookie,
+          sameSiteMode,
+          env.cookieOptions
+        ),
+      ];
+      for (const evictFlowId of started.evictFlowIds) {
+        setCookies.push(
+          buildClearOAuthBindCookieHeader(
+            evictFlowId,
+            env.secureCookie,
+            sameSiteMode,
+            env.cookieOptions
+          )
+        );
+      }
+      if (existingBindCookies.hasLegacyCookie) {
+        setCookies.push(
+          buildClearLegacyOAuthBindCookieHeader(
+            env.secureCookie,
+            sameSiteMode,
+            env.cookieOptions
+          )
+        );
+      }
 
       return buildAuthResponse(
         {
           ok: true,
+          flowId: started.flowId,
           url: started.url,
           mode,
           stateExpiresAt: started.stateExpiresAt,
         },
         200,
         env.corsHeaders,
-        { 'Set-Cookie': bindCookie }
+        undefined,
+        setCookies
       );
     } catch (err) {
       console.error(
@@ -1390,15 +1568,49 @@ export async function handleAuthHttpRequest(
       resolveValidatedHttpOrigin(env.publicAppBaseUrl) ??
       resolveValidatedHttpOrigin(request.url) ??
       reqUrl.origin;
-    const clearBindCookie = buildClearOAuthBindCookieHeader(
-      env.secureCookie,
-      env.cookieOptions
-    );
 
     try {
+      const ipHash = await sha256Hex(`ip:${env.clientIp || 'unknown'}`);
+      const cbRl = await consumeRateLimitSlot(
+        env.db,
+        `oauth_callback:ip:${ipHash}`,
+        OAUTH_CALLBACK_IP_RATE_LIMIT,
+        now
+      );
+      if (!cbRl.allowed) {
+        const retryHeader = { 'Retry-After': String(cbRl.retryAfterSec) };
+        if (wantsJson) {
+          return buildAuthResponse(
+            {
+              ok: false,
+              code: 'RATE_LIMITED',
+              message:
+                'تعداد درخواست‌های بازگشت احراز هویت گوگل بیش از حد مجاز است. لطفاً کمی بعد دوباره تلاش کنید.',
+            },
+            429,
+            env.corsHeaders,
+            retryHeader
+          );
+        }
+        return buildOAuthPopupHtmlResponse(
+          {
+            ok: false,
+            flowMode: 'login',
+            flowId: null,
+            code: 'RATE_LIMITED',
+            message:
+              'تعداد درخواست‌های بازگشت احراز هویت گوگل بیش از حد مجاز است. لطفاً کمی بعد دوباره تلاش کنید.',
+          },
+          fallbackTargetOrigin,
+          429,
+          [],
+          retryHeader
+        );
+      }
+
       const rawCookieHeader = request.headers.get('Cookie');
       const rawAuthToken = parseAuthCookieFromHeader(rawCookieHeader);
-      const rawBrowserBinding = parseOAuthBindCookieFromHeader(rawCookieHeader);
+      const parsedBindCookies = parseAllOAuthBindCookiesFromHeader(rawCookieHeader);
       const currentAuth = rawAuthToken
         ? await verifyAuthSession(env.db, rawAuthToken, now)
         : null;
@@ -1414,7 +1626,8 @@ export async function handleAuthHttpRequest(
           code,
           state,
           error: oauthError,
-          rawBrowserBinding,
+          rawBrowserBindings: parsedBindCookies.flowCookies,
+          rawBrowserBinding: parsedBindCookies.legacyToken,
           currentAuthenticatedUserId: currentUserId,
           clientIp: env.clientIp,
           userAgent: env.userAgent,
@@ -1425,34 +1638,67 @@ export async function handleAuthHttpRequest(
 
       const targetOrigin =
         resolveValidatedHttpOrigin(result.openerOrigin) ?? fallbackTargetOrigin;
+      const clearSameSiteMode = resolveOAuthBindSameSiteMode(
+        env.secureCookie,
+        targetOrigin,
+        request.url
+      );
+
+      // Clear ONLY this flow's binding cookie so concurrent OAuth tabs in the same browser stay intact.
+      const setCookies: string[] = [];
+      if (result.clearFlowCookieId) {
+        setCookies.push(
+          buildClearOAuthBindCookieHeader(
+            result.clearFlowCookieId,
+            env.secureCookie,
+            clearSameSiteMode,
+            env.cookieOptions
+          )
+        );
+      } else if (parsedBindCookies.hasLegacyCookie) {
+        setCookies.push(
+          buildClearLegacyOAuthBindCookieHeader(
+            env.secureCookie,
+            clearSameSiteMode,
+            env.cookieOptions
+          )
+        );
+      }
 
       if (result.ok === false) {
+        if (result.clearedGuestCookie) {
+          setCookies.push(
+            buildClearGuestCookieHeader(env.secureCookie, env.cookieOptions)
+          );
+        }
         if (wantsJson) {
           return buildAuthResponse(
             {
               ok: false,
               code: result.code,
+              flowId: result.flowId ?? null,
               message: result.message,
             },
             result.status,
             env.corsHeaders,
-            { 'Set-Cookie': clearBindCookie }
+            undefined,
+            setCookies
           );
         }
         return buildOAuthPopupHtmlResponse(
           {
             ok: false,
             flowMode: result.flowMode ?? 'login',
+            flowId: result.flowId ?? null,
             code: result.code,
             message: result.message,
           },
           targetOrigin,
           result.status,
-          [clearBindCookie]
+          setCookies
         );
       }
 
-      const setCookies: string[] = [clearBindCookie];
       if (result.rawSessionToken) {
         setCookies.push(
           buildSetAuthCookieHeader(
@@ -1470,28 +1716,21 @@ export async function handleAuthHttpRequest(
       }
 
       if (wantsJson) {
-        const headers = new Headers({
-          'Content-Type': 'application/json; charset=utf-8',
-          'Cache-Control': 'no-store, private',
-          Pragma: 'no-cache',
-          'Referrer-Policy': 'no-referrer',
-          'X-Content-Type-Options': 'nosniff',
-          ...env.corsHeaders,
-        });
-        for (const cookie of setCookies) {
-          headers.append('Set-Cookie', cookie);
-        }
-        return new Response(
-          JSON.stringify({
+        return buildAuthResponse(
+          {
             ok: true,
             authenticated: true,
+            flowId: result.flowId,
             flowMode: result.flowMode,
             alreadyLinked: result.alreadyLinked ?? false,
             user: result.user,
             session: result.session ?? null,
             message: result.message,
-          }),
-          { status: result.status, headers }
+          },
+          result.status,
+          env.corsHeaders,
+          undefined,
+          setCookies
         );
       }
 
@@ -1499,6 +1738,7 @@ export async function handleAuthHttpRequest(
         {
           ok: true,
           flowMode: result.flowMode,
+          flowId: result.flowId,
           message: result.message,
         },
         targetOrigin,
@@ -1518,20 +1758,20 @@ export async function handleAuthHttpRequest(
             message: 'خطای داخلی در تکمیل احراز هویت گوگل رخ داد.',
           },
           500,
-          env.corsHeaders,
-          { 'Set-Cookie': clearBindCookie }
+          env.corsHeaders
         );
       }
       return buildOAuthPopupHtmlResponse(
         {
           ok: false,
           flowMode: 'login',
+          flowId: null,
           code: 'DATABASE_ERROR',
           message: 'خطای داخلی در تکمیل احراز هویت گوگل رخ داد.',
         },
         fallbackTargetOrigin,
         500,
-        [clearBindCookie]
+        []
       );
     }
   }
