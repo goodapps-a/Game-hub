@@ -2,6 +2,7 @@ import React, { Component, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
+import { CardSkinProvider } from './games/hokm/skins/CardSkinContext';
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -43,6 +44,8 @@ class AppErrorBoundary extends Component<
 
 createRoot(document.getElementById('root')!).render(
   <AppErrorBoundary>
-    <App />
+    <CardSkinProvider>
+      <App />
+    </CardSkinProvider>
   </AppErrorBoundary>
 );

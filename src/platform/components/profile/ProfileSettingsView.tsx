@@ -2,6 +2,7 @@ import React from 'react';
 import { Moon, Sun } from 'lucide-react';
 import { ANIMATION_SPEED_LABELS, AnimationSpeed } from '../../theme/tokens';
 import { UserProfile } from '../../types/platform';
+import { CardSkinPicker } from '../../../games/hokm/skins/CardSkinPicker';
 
 interface ProfileSettingsViewProps {
   profile: UserProfile;
@@ -165,6 +166,17 @@ export const ProfileSettingsView: React.FC<ProfileSettingsViewProps> = ({
             );
           })}
         </div>
+      </section>
+
+      {/* Hokm card skins */}
+      <section className="rounded-2xl theme-subcard border p-4 space-y-2.5">
+        <div className="text-xs sm:text-sm font-extrabold theme-heading">
+          طرح کارت‌های حکم
+        </div>
+        <div className="text-[11px] theme-muted">
+          طرح انتخاب‌شده روی تمام کارت‌های میز اعمال می‌شود.
+        </div>
+        <CardSkinPicker />
       </section>
     </div>
   );

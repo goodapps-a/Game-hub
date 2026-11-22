@@ -402,3 +402,11 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ============================================================================
+   Card skins: frame around face-down cards (colours set by CardSkinProvider)
+   ============================================================================ */
+.card-back-frame {
+  background: var(--card-back-frame-bg, #ffffff);
+  border-color: var(--card-back-frame-border, #d4cfc5);
+}
