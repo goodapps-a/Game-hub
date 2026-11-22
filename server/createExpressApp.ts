@@ -82,6 +82,7 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
       provider: config.emailProvider,
       resendApiKey: config.resendApiKey,
       emailFrom: config.emailFrom,
+      isProduction: config.isProduction,
     });
 
   const isSecureIncomingReq = (req: http.IncomingMessage & { secure?: boolean }): boolean => {
@@ -265,7 +266,8 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
 
       const publicAppBaseUrl = resolvePublicAppBaseUrl(
         [config.publicAppUrl, config.appUrl, config.allowedOrigins],
-        fullUrl
+        fullUrl,
+        { isProduction: config.isProduction }
       );
 
       const webRes = await handleAuthHttpRequest(webReq, req.path, {
@@ -277,7 +279,8 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
         clientIp: extractClientIp(req),
         userAgent: String(req.headers['user-agent'] ?? 'unknown'),
         sessionTtlSec: config.authSessionTtlSec,
-        publicAppBaseUrl,
+        publicAppBaseUrl: publicAppBaseUrl ?? undefined,
+        isProduction: config.isProduction,
         emailSender,
       });
 

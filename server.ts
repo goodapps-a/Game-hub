@@ -9,6 +9,7 @@ import {
   MAX_WS_PAYLOAD_BYTES,
 } from './src/games/hokm/online/protocol';
 import { parseSessionCookieFromHeader } from './cloudflare/src/lib/sessionCookie';
+import { validateProductionAuthConfig } from './cloudflare/src/lib/auth/securityPolicy';
 import { createEyvanExpressApp } from './server/createExpressApp';
 import { EyvanDatabase } from './server/database';
 import { HokmRoomManager } from './server/roomManager';
@@ -53,6 +54,22 @@ async function startServer() {
       emailFrom: process.env.EMAIL_FROM,
     },
   });
+
+  if (IS_PROD) {
+    const cfgReport = validateProductionAuthConfig({
+      allowedOrigins: process.env.ALLOWED_ORIGINS,
+      appUrl: process.env.APP_URL,
+      publicAppUrl: process.env.PUBLIC_APP_URL,
+      emailProvider: process.env.EMAIL_PROVIDER,
+      resendApiKey: process.env.RESEND_API_KEY,
+      emailFrom: process.env.EMAIL_FROM,
+      trustedProxyIps: process.env.TRUSTED_PROXY_IPS,
+    });
+    if (!cfgReport.ok) {
+      const codes = cfgReport.errors.map((e) => `${e.field}:${e.code}`).join(', ');
+      console.warn(`[Eyvan Auth Config] Production configuration incomplete: ${codes}`);
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Frontend SPA Middleware (Vite dev middleware vs production dist/)

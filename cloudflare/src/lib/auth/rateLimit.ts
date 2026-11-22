@@ -41,16 +41,26 @@ export const REGISTER_IP_RATE_LIMIT: RateLimitPolicy = {
   blockMs: 15 * 60 * 1000,
 };
 
-export const RESEND_VERIFY_RATE_LIMIT: RateLimitPolicy = {
-  action: 'resend_verify',
+export const RESEND_VERIFY_IP_RATE_LIMIT: RateLimitPolicy = {
+  action: 'resend_verify_ip',
+  maxAttempts: 10,
+  windowMs: 15 * 60 * 1000,
+  blockMs: 15 * 60 * 1000,
+};
+
+export const RESEND_VERIFY_EMAIL_RATE_LIMIT: RateLimitPolicy = {
+  action: 'resend_verify_email',
   maxAttempts: 3,
   windowMs: 15 * 60 * 1000,
   blockMs: 15 * 60 * 1000,
 };
 
+/** Backwards-compatible alias for per-email resend verification rate limit. */
+export const RESEND_VERIFY_RATE_LIMIT: RateLimitPolicy = RESEND_VERIFY_EMAIL_RATE_LIMIT;
+
 export const FORGOT_PASSWORD_IP_RATE_LIMIT: RateLimitPolicy = {
   action: 'forgot_password_ip',
-  maxAttempts: 5,
+  maxAttempts: 10,
   windowMs: 15 * 60 * 1000,
   blockMs: 15 * 60 * 1000,
 };
@@ -75,6 +85,9 @@ export const VERIFY_EMAIL_IP_RATE_LIMIT: RateLimitPolicy = {
   windowMs: 15 * 60 * 1000,
   blockMs: 15 * 60 * 1000,
 };
+
+const MAX_ACTIVE_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+export const DEFAULT_RATE_LIMIT_RETENTION_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 interface RateLimitReturningRow {
   attempts: number;
@@ -223,4 +236,32 @@ export async function clearRateLimit(
     .prepare(`DELETE FROM auth_rate_limits WHERE rate_key = ?`)
     .bind(rateKey)
     .run();
+}
+
+/**
+ * Safely prunes expired, unblocked rate-limit rows to prevent unbounded table growth.
+ *
+ * Safety invariant:
+ * - Enforces a minimum retention floor >= `MAX_ACTIVE_RATE_LIMIT_WINDOW_MS` (15m) so active
+ *   sliding windows are NEVER deleted.
+ * - Requires BOTH `updated_at < cutoff` AND `window_started_at < cutoff` AND
+ *   `(blocked_until IS NULL OR blocked_until <= now)` so active blocks are NEVER deleted.
+ */
+export async function pruneExpiredRateLimits(
+  db: D1DatabaseLike,
+  now = Date.now(),
+  retentionMs = DEFAULT_RATE_LIMIT_RETENTION_MS
+): Promise<number> {
+  const safeRetentionMs = Math.max(retentionMs, MAX_ACTIVE_RATE_LIMIT_WINDOW_MS);
+  const cutoff = now - safeRetentionMs;
+  const res = await db
+    .prepare(
+      `DELETE FROM auth_rate_limits
+       WHERE updated_at < ?
+         AND window_started_at < ?
+         AND (blocked_until IS NULL OR blocked_until <= ?)`
+    )
+    .bind(cutoff, cutoff, now)
+    .run();
+  return Number(res.meta?.changes ?? 0);
 }

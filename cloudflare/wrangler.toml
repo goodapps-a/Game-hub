@@ -7,19 +7,21 @@ compatibility_date = "2026-01-15"
 DISCONNECT_GRACE_MS = "90000"
 # TTL (ms) before a CLOSED room's Durable Object storage is purged automatically
 ROOM_CLEANUP_TTL_MS = "300000"
-# REQUIRED FOR PRODUCTION: Comma-separated frontend origins (e.g. "https://eyvan.example.com,https://www.eyvan.example.com")
-# Never use "*" — leave empty ONLY for localhost development.
+# REQUIRED FOR PRODUCTION: Exact comma-separated HTTPS frontend origins (e.g. "https://play.your-real-domain.ir")
+# Never use "*", "*.run.app", localhost, or example.com.
 ALLOWED_ORIGINS = ""
-# OPTIONAL FOR CROSS-SUBDOMAIN PRODUCTION (e.g. play.example.com + api.example.com):
-# Set COOKIE_DOMAIN = ".example.com" so both set and clear cookies share the exact parent domain.
+# OPTIONAL FOR CROSS-SUBDOMAIN PRODUCTION (e.g. play.your-domain.ir + api.your-domain.ir):
+# Set COOKIE_DOMAIN = ".your-domain.ir" so both set and clear cookies share the exact parent domain.
 # COOKIE_DOMAIN = ""
 # Set ENVIRONMENT = "production" on production deploys
 ENVIRONMENT = "production"
-# Public frontend origin used inside verification & password reset links (e.g. "https://eyvan.example.com")
+# REQUIRED FOR PRODUCTION: Public HTTPS frontend origin used inside verification & password reset links
 PUBLIC_APP_URL = ""
-# Transactional email provider for C2 (configure RESEND_API_KEY via `wrangler secret put RESEND_API_KEY`, NEVER commit keys)
+# Transactional email provider for C2:
+# 1) Configure RESEND_API_KEY via `wrangler secret put RESEND_API_KEY` (NEVER commit secrets here)
+# 2) Set EMAIL_FROM below to a Resend-verified sender on your real domain (e.g. "Eyvan <no-reply@your-real-domain.ir>")
 EMAIL_PROVIDER = "resend"
-EMAIL_FROM = "Eyvan <no-reply@example.com>"
+EMAIL_FROM = ""
 
 
 [[durable_objects.bindings]]

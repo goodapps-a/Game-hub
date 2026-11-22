@@ -209,6 +209,7 @@ export default {
 
     // 1b) Central Platform Authentication (`/api/auth/*` — independent of Hokm room sessions)
     if (url.pathname.startsWith('/api/auth/')) {
+      const isProd = isWorkerProduction(request, env);
       // On Cloudflare Workers, trust ONLY edge-injected CF-Connecting-IP (never raw X-Forwarded-For)
       const clientIp = resolveClientIp({
         cfConnectingIp: request.headers.get('CF-Connecting-IP'),
@@ -219,10 +220,12 @@ export default {
           provider: env.EMAIL_PROVIDER,
           resendApiKey: env.RESEND_API_KEY,
           emailFrom: env.EMAIL_FROM,
+          isProduction: isProd,
         });
       const publicAppBaseUrl = resolvePublicAppBaseUrl(
         [env.PUBLIC_APP_URL, env.APP_URL, env.ALLOWED_ORIGINS],
-        request.url
+        request.url,
+        { isProduction: isProd }
       );
       const authRes = await handleAuthHttpRequest(request, url.pathname, {
         db: env.EYVAN_DB,
@@ -233,7 +236,8 @@ export default {
         clientIp,
         userAgent: request.headers.get('User-Agent') ?? 'unknown',
         sessionTtlSec: env.AUTH_SESSION_TTL_SEC,
-        publicAppBaseUrl,
+        publicAppBaseUrl: publicAppBaseUrl ?? undefined,
+        isProduction: isProd,
         emailSender,
       });
       if (authRes) return authRes;

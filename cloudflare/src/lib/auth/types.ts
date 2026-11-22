@@ -54,12 +54,20 @@ export type AuthErrorCode =
   | 'RATE_LIMITED'
   | 'DATABASE_ERROR';
 
+export interface InternalEmailDeliveryDiagnostic {
+  readonly configured: boolean;
+  readonly sent: boolean;
+  readonly provider: string;
+  readonly errorCode?: string;
+}
+
 export interface AuthRequestContext {
   readonly clientIp: string;
   readonly userAgent: string;
   readonly now?: number;
   readonly sessionTtlSec?: number;
   readonly publicAppBaseUrl?: string;
+  readonly isProduction?: boolean;
 }
 
 export interface AuthSuccessWithSession {
@@ -78,6 +86,8 @@ export interface AuthRegisterPendingVerification {
   readonly verificationRequired: true;
   readonly user: PublicAuthUser;
   readonly emailDelivery: PublicEmailDeliveryInfo;
+  /** Server-side operational diagnostic only; never expose internal error codes in public JSON. */
+  readonly internalDelivery?: InternalEmailDeliveryDiagnostic;
   readonly message: string;
 }
 
@@ -88,6 +98,8 @@ export interface AuthActionSuccess {
   readonly verified?: boolean;
   readonly passwordReset?: boolean;
   readonly emailDelivery?: PublicEmailDeliveryInfo;
+  /** Server-side operational diagnostic only; MUST NOT be serialized on non-enumerating endpoints. */
+  readonly internalDelivery?: InternalEmailDeliveryDiagnostic;
 }
 
 export interface AuthFailure {

@@ -10,6 +10,14 @@
  *   and is parsed right-to-left so spoofed leading entries cannot bypass rate limits.
  */
 
+import {
+  containsPlaceholderToken,
+  isLocalOrWorkerHostname,
+  isPlaceholderHostname,
+  isValidEmailFromAddress,
+  resolvePublicAppBaseUrl,
+} from './emailService';
+
 export interface OriginPolicyConfig {
   readonly allowedOriginsRaw?: string;
   readonly appUrlRaw?: string;
@@ -35,6 +43,7 @@ function tryNormalizeOrigin(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const trimmed = raw.trim();
   if (!trimmed || trimmed.toLowerCase() === 'null') return null;
+  if (containsPlaceholderToken(trimmed)) return null;
   try {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -48,14 +57,24 @@ function tryNormalizeOrigin(raw: string | null | undefined): string | null {
 
 export function parseConfiguredOrigins(config: OriginPolicyConfig): Set<string> {
   const out = new Set<string>();
-  const appOrigin = tryNormalizeOrigin(config.appUrlRaw);
-  if (appOrigin) {
-    out.add(appOrigin);
-  }
+  const addCandidate = (raw: string | undefined) => {
+    const norm = tryNormalizeOrigin(raw);
+    if (!norm) return;
+    if (config.isProduction) {
+      try {
+        const parsed = new URL(norm);
+        if (isPlaceholderHostname(parsed.hostname)) return;
+      } catch {
+        return;
+      }
+    }
+    out.add(norm);
+  };
+
+  addCandidate(config.appUrlRaw);
   if (config.allowedOriginsRaw) {
     for (const entry of config.allowedOriginsRaw.split(',')) {
-      const norm = tryNormalizeOrigin(entry);
-      if (norm) out.add(norm);
+      addCandidate(entry);
     }
   }
   return out;
@@ -229,4 +248,178 @@ export function resolveClientIp(input: ResolveClientIpInput): string {
   }
 
   return peerIp || 'unknown';
+}
+
+export interface ProductionAuthConfigInput {
+  readonly allowedOrigins?: string;
+  readonly appUrl?: string;
+  readonly publicAppUrl?: string;
+  readonly emailProvider?: string;
+  readonly resendApiKey?: string;
+  readonly emailFrom?: string;
+  readonly trustedProxyIps?: string;
+  readonly d1DatabaseId?: string;
+}
+
+export interface ConfigValidationIssue {
+  readonly field: string;
+  readonly code: string;
+  readonly message: string;
+}
+
+export interface ProductionAuthConfigReport {
+  readonly ok: boolean;
+  readonly errors: ConfigValidationIssue[];
+  readonly warnings: ConfigValidationIssue[];
+}
+
+/**
+ * Validates Production central-auth configuration for Cloudflare Workers & Express.
+ * Never echoes secret values in diagnostic messages.
+ */
+export function validateProductionAuthConfig(
+  input: ProductionAuthConfigInput
+): ProductionAuthConfigReport {
+  const errors: ConfigValidationIssue[] = [];
+  const warnings: ConfigValidationIssue[] = [];
+
+  // 1) ALLOWED_ORIGINS check
+  const rawAllowed = (input.allowedOrigins ?? '').trim();
+  if (!rawAllowed) {
+    errors.push({
+      field: 'ALLOWED_ORIGINS',
+      code: 'ALLOWED_ORIGINS_MISSING',
+      message: 'ALLOWED_ORIGINS must list explicit HTTPS frontend origins in Production.',
+    });
+  } else {
+    const parts = rawAllowed.split(',').map((p) => p.trim()).filter(Boolean);
+    let validCount = 0;
+    for (const part of parts) {
+      if (part.includes('*')) {
+        errors.push({
+          field: 'ALLOWED_ORIGINS',
+          code: 'ALLOWED_ORIGINS_WILDCARD',
+          message: 'ALLOWED_ORIGINS must not contain wildcard patterns.',
+        });
+        continue;
+      }
+      if (containsPlaceholderToken(part)) {
+        errors.push({
+          field: 'ALLOWED_ORIGINS',
+          code: 'ALLOWED_ORIGINS_PLACEHOLDER',
+          message: 'ALLOWED_ORIGINS contains a placeholder value.',
+        });
+        continue;
+      }
+      try {
+        const u = new URL(part);
+        if (u.protocol !== 'https:') {
+          errors.push({
+            field: 'ALLOWED_ORIGINS',
+            code: 'ALLOWED_ORIGINS_NON_HTTPS',
+            message: 'ALLOWED_ORIGINS must use HTTPS in Production.',
+          });
+          continue;
+        }
+        if (isPlaceholderHostname(u.hostname) || isLocalOrWorkerHostname(u.hostname)) {
+          errors.push({
+            field: 'ALLOWED_ORIGINS',
+            code: 'ALLOWED_ORIGINS_INVALID_HOST',
+            message: 'ALLOWED_ORIGINS must not use localhost, workers.dev, or placeholder domains in Production.',
+          });
+          continue;
+        }
+        validCount += 1;
+      } catch {
+        errors.push({
+          field: 'ALLOWED_ORIGINS',
+          code: 'ALLOWED_ORIGINS_INVALID_URL',
+          message: 'ALLOWED_ORIGINS contains a malformed URL.',
+        });
+      }
+    }
+    if (validCount === 0 && errors.every((e) => e.field !== 'ALLOWED_ORIGINS')) {
+      errors.push({
+        field: 'ALLOWED_ORIGINS',
+        code: 'ALLOWED_ORIGINS_EMPTY',
+        message: 'ALLOWED_ORIGINS has no valid Production HTTPS origins.',
+      });
+    }
+  }
+
+  // 2) PUBLIC_APP_URL check (must resolve to a real HTTPS non-localhost non-placeholder origin)
+  const resolvedPublicUrl = resolvePublicAppBaseUrl(
+    [input.publicAppUrl, input.appUrl],
+    undefined,
+    { isProduction: true }
+  );
+  if (!resolvedPublicUrl) {
+    errors.push({
+      field: 'PUBLIC_APP_URL',
+      code: 'PUBLIC_APP_URL_INVALID_OR_MISSING',
+      message: 'PUBLIC_APP_URL must be an explicit HTTPS Production frontend origin (not localhost, workers.dev, or placeholder).',
+    });
+  }
+
+  // 3) Transactional email provider checks
+  const provider = (input.emailProvider ?? 'resend').trim().toLowerCase();
+  if (provider === 'disabled') {
+    warnings.push({
+      field: 'EMAIL_PROVIDER',
+      code: 'EMAIL_PROVIDER_DISABLED',
+      message: 'EMAIL_PROVIDER is disabled; verification and password reset emails will not be delivered.',
+    });
+  } else if (provider !== 'resend') {
+    errors.push({
+      field: 'EMAIL_PROVIDER',
+      code: 'EMAIL_PROVIDER_UNSUPPORTED',
+      message: 'EMAIL_PROVIDER must be "resend" or "disabled".',
+    });
+  } else {
+    const key = (input.resendApiKey ?? '').trim();
+    if (!key || containsPlaceholderToken(key)) {
+      errors.push({
+        field: 'RESEND_API_KEY',
+        code: 'RESEND_API_KEY_MISSING_OR_PLACEHOLDER',
+        message: 'RESEND_API_KEY must be set via server secret in Production.',
+      });
+    }
+    const fromCheck = isValidEmailFromAddress(input.emailFrom ?? '', {
+      isProduction: true,
+    });
+    if (fromCheck.ok === false) {
+      errors.push({
+        field: 'EMAIL_FROM',
+        code: fromCheck.code,
+        message: 'EMAIL_FROM must use a valid verified Production sender domain (not example.com).',
+      });
+    }
+  }
+
+  // 4) TRUSTED_PROXY_IPS wildcard check (when supplied)
+  if (input.trustedProxyIps && input.trustedProxyIps.includes('*')) {
+    errors.push({
+      field: 'TRUSTED_PROXY_IPS',
+      code: 'TRUSTED_PROXY_IPS_WILDCARD',
+      message: 'TRUSTED_PROXY_IPS must never contain "*".',
+    });
+  }
+
+  // 5) Optional D1 database ID placeholder check
+  if (input.d1DatabaseId !== undefined) {
+    const trimmedId = input.d1DatabaseId.trim();
+    if (!trimmedId || containsPlaceholderToken(trimmedId)) {
+      errors.push({
+        field: 'D1_DATABASE_ID',
+        code: 'D1_DATABASE_ID_PLACEHOLDER',
+        message: 'Cloudflare D1 database_id must be replaced with the real D1 UUID before deploy.',
+      });
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    warnings,
+  };
 }

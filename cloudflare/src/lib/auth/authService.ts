@@ -23,6 +23,7 @@ import {
   VerifySessionResult,
 } from './types';
 import {
+  EmailDeliveryResult,
   EmailSender,
   buildVerificationLink,
   createEmailSender,
@@ -252,14 +253,30 @@ export async function registerManualAccount(
     throw err;
   }
 
-  const baseUrl = ctx.publicAppBaseUrl ?? 'http://localhost:3000';
-  const verifyUrl = buildVerificationLink(baseUrl, rawVerifyToken);
-  const delivery = await sender.sendVerificationEmail({
-    to: validated.email,
-    username: validated.username,
-    verifyUrl,
-    expiresInHours: Math.round(EMAIL_VERIFICATION_TTL_MS / (60 * 60 * 1000)),
-  });
+  let delivery: EmailDeliveryResult;
+  if (ctx.isProduction && !ctx.publicAppBaseUrl) {
+    delivery = {
+      configured: false,
+      sent: false,
+      provider: 'unconfigured',
+      errorCode: 'PUBLIC_APP_URL_UNCONFIGURED',
+    };
+  } else {
+    const baseUrl = ctx.publicAppBaseUrl ?? 'http://localhost:3000';
+    const verifyUrl = buildVerificationLink(baseUrl, rawVerifyToken);
+    delivery = await sender.sendVerificationEmail({
+      to: validated.email,
+      username: validated.username,
+      verifyUrl,
+      expiresInHours: Math.round(EMAIL_VERIFICATION_TTL_MS / (60 * 60 * 1000)),
+    });
+  }
+
+  if (!delivery.sent) {
+    console.error(
+      `[AuthEmail] Delivery did not complete action=register provider=${delivery.provider} configured=${delivery.configured} code=${delivery.errorCode ?? 'EMAIL_DELIVERY_FAILED'}`
+    );
+  }
 
   const message = delivery.sent
     ? 'حساب کاربری شما ساخته شد. لطفاً لینک تأیید ارسال‌شده به ایمیل خود را باز کنید تا حساب فعال شود.'
@@ -275,6 +292,7 @@ export async function registerManualAccount(
       configured: delivery.configured,
       sent: delivery.sent,
     },
+    internalDelivery: delivery,
     message,
     user: {
       userId,

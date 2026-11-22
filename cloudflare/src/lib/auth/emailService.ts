@@ -46,8 +46,34 @@ export interface EmailProviderConfig {
   readonly provider?: string;
   readonly resendApiKey?: string;
   readonly emailFrom?: string;
+  readonly isProduction?: boolean;
   readonly fetchImpl?: typeof fetch;
 }
+
+export interface ResolvePublicBaseUrlOptions {
+  readonly isProduction?: boolean;
+}
+
+const PLACEHOLDER_TOKENS = [
+  'MY_APP_URL',
+  'MY_GEMINI_API_KEY',
+  'REPLACE_WITH_',
+  'YOUR_DOMAIN',
+  'YOUR_APP',
+  'YOUR_RESEND',
+];
+
+const PLACEHOLDER_DOMAINS = [
+  'example.com',
+  'example.org',
+  'example.net',
+  'your-domain.com',
+  'yourdomain.com',
+  'mydomain.com',
+];
+
+const SIMPLE_EMAIL_RE = /^[^\s@<>,"'\\]+@([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/i;
+const DISPLAY_EMAIL_RE = /^[^<>\r\n]+<\s*([^\s@<>,"'\\]+@([a-z0-9-]+(?:\.[a-z0-9-]+)+))\s*>$/i;
 
 function escapeHtml(text: string): string {
   return text
@@ -58,18 +84,101 @@ function escapeHtml(text: string): string {
     .replace(/'/g, '&#39;');
 }
 
+export function containsPlaceholderToken(value: string): boolean {
+  const upper = value.trim().toUpperCase();
+  return PLACEHOLDER_TOKENS.some((tok) => upper.includes(tok));
+}
+
+export function isPlaceholderHostname(hostname: string): boolean {
+  const lower = hostname.trim().toLowerCase().replace(/\.$/, '');
+  if (!lower) return true;
+  return PLACEHOLDER_DOMAINS.some(
+    (domain) => lower === domain || lower.endsWith(`.${domain}`)
+  );
+}
+
+export function isLocalOrWorkerHostname(hostname: string): boolean {
+  const lower = hostname.trim().toLowerCase();
+  return (
+    lower === 'localhost' ||
+    lower === '127.0.0.1' ||
+    lower === '[::1]' ||
+    lower === '::1' ||
+    lower === '0.0.0.0' ||
+    lower.endsWith('.local') ||
+    lower.endsWith('.workers.dev')
+  );
+}
+
+/**
+ * Extracts the sender mailbox domain from `user@domain.tld` or `Display Name <user@domain.tld>`.
+ * Returns `null` if the syntax is invalid or contains header-injection characters.
+ */
+export function extractEmailFromDomain(emailFrom: string): string | null {
+  const trimmed = emailFrom.trim();
+  if (!trimmed || /[\r\n]/.test(trimmed)) return null;
+  const direct = SIMPLE_EMAIL_RE.exec(trimmed);
+  if (direct) return direct[1].toLowerCase();
+  const display = DISPLAY_EMAIL_RE.exec(trimmed);
+  if (display) return display[2].toLowerCase();
+  return null;
+}
+
+export function isValidEmailFromAddress(
+  emailFrom: string,
+  options?: { isProduction?: boolean }
+): { ok: true; domain: string } | { ok: false; code: 'EMAIL_FROM_MISSING' | 'EMAIL_FROM_INVALID' | 'EMAIL_FROM_PLACEHOLDER' } {
+  const trimmed = emailFrom.trim();
+  if (!trimmed) {
+    return { ok: false, code: 'EMAIL_FROM_MISSING' };
+  }
+  if (containsPlaceholderToken(trimmed)) {
+    return { ok: false, code: 'EMAIL_FROM_PLACEHOLDER' };
+  }
+  const domain = extractEmailFromDomain(trimmed);
+  if (!domain) {
+    return { ok: false, code: 'EMAIL_FROM_INVALID' };
+  }
+  if (options?.isProduction && (isPlaceholderHostname(domain) || isLocalOrWorkerHostname(domain))) {
+    return { ok: false, code: 'EMAIL_FROM_PLACEHOLDER' };
+  }
+  return { ok: true, domain };
+}
+
+/**
+ * Resolves the canonical public frontend origin used inside verification & password reset links.
+ *
+ * Security invariants:
+ * - Always rejects placeholder values (`MY_APP_URL`, `REPLACE_WITH_*`, `example.com`).
+ * - In Production (`isProduction: true`): accepts ONLY explicit `https://` non-localhost,
+ *   non-`*.workers.dev`, non-placeholder origins; NEVER falls back to `http://localhost:3000`
+ *   or an arbitrary Worker request URL. Returns `null` if unconfigured so callers refuse
+ *   to generate broken links instead of silently emailing a localhost/Worker URL.
+ * - In local dev (`isProduction: false`): falls back cleanly to `fallbackRequestUrl` or `http://localhost:3000`.
+ */
 export function resolvePublicAppBaseUrl(
   candidates: Array<string | undefined>,
-  fallbackRequestUrl?: string
-): string {
+  fallbackRequestUrl?: string,
+  options?: ResolvePublicBaseUrlOptions
+): string | null {
+  const isProduction = options?.isProduction === true;
+
   for (const raw of candidates) {
     if (!raw) continue;
     for (const part of raw.split(',')) {
       const trimmed = part.trim();
-      if (!trimmed) continue;
+      if (!trimmed || containsPlaceholderToken(trimmed)) continue;
       try {
         const parsed = new URL(trimmed);
+        if (isProduction) {
+          if (parsed.protocol !== 'https:') continue;
+          if (isPlaceholderHostname(parsed.hostname) || isLocalOrWorkerHostname(parsed.hostname)) {
+            continue;
+          }
+          return parsed.origin;
+        }
         if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+          if (isPlaceholderHostname(parsed.hostname)) continue;
           return parsed.origin;
         }
       } catch {
@@ -77,14 +186,22 @@ export function resolvePublicAppBaseUrl(
       }
     }
   }
-  if (fallbackRequestUrl) {
+
+  if (isProduction) {
+    return null;
+  }
+
+  if (fallbackRequestUrl && !containsPlaceholderToken(fallbackRequestUrl)) {
     try {
       const parsed = new URL(fallbackRequestUrl);
-      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      if (
+        (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+        !isPlaceholderHostname(parsed.hostname)
+      ) {
         return parsed.origin;
       }
     } catch {
-      // Fall through
+      // Fall through to local dev default
     }
   }
   return 'http://localhost:3000';
@@ -98,6 +215,14 @@ export function buildVerificationLink(baseUrl: string, rawToken: string): string
 export function buildPasswordResetLink(baseUrl: string, rawToken: string): string {
   const cleanBase = baseUrl.replace(/\/+$/, '');
   return `${cleanBase}/#reset-password=${encodeURIComponent(rawToken)}`;
+}
+
+function classifyResendHttpError(status: number): string {
+  if (status === 400 || status === 422) return 'RESEND_BAD_REQUEST';
+  if (status === 401 || status === 403) return 'RESEND_AUTH_ERROR';
+  if (status === 429) return 'RESEND_RATE_LIMITED';
+  if (status >= 500) return 'RESEND_SERVER_ERROR';
+  return `PROVIDER_HTTP_${status}`;
 }
 
 function renderVerificationEmail(payload: VerificationEmailPayload): {
@@ -188,10 +313,43 @@ export function createEmailSender(config: EmailProviderConfig): EmailSender {
   const provider = (config.provider ?? 'resend').trim().toLowerCase();
   const apiKey = (config.resendApiKey ?? '').trim();
   const fromAddress = (config.emailFrom ?? '').trim();
+  const isProduction = config.isProduction === true;
   const fetchFn = config.fetchImpl ?? fetch;
 
-  const isConfigured =
-    provider === 'resend' && apiKey.length > 0 && fromAddress.length > 0;
+  function evaluateConfiguration():
+    | { ok: true }
+    | { ok: false; provider: string; errorCode: string } {
+    if (provider === 'disabled') {
+      return {
+        ok: false,
+        provider: 'disabled',
+        errorCode: 'EMAIL_PROVIDER_DISABLED',
+      };
+    }
+    if (provider !== 'resend') {
+      return {
+        ok: false,
+        provider: provider || 'unconfigured',
+        errorCode: 'EMAIL_PROVIDER_UNSUPPORTED',
+      };
+    }
+    if (!apiKey || containsPlaceholderToken(apiKey)) {
+      return {
+        ok: false,
+        provider: 'unconfigured',
+        errorCode: 'EMAIL_API_KEY_MISSING',
+      };
+    }
+    const fromCheck = isValidEmailFromAddress(fromAddress, { isProduction });
+    if (fromCheck.ok === false) {
+      return {
+        ok: false,
+        provider: 'unconfigured',
+        errorCode: fromCheck.code,
+      };
+    }
+    return { ok: true };
+  }
 
   async function sendViaResend(
     to: string,
@@ -199,12 +357,13 @@ export function createEmailSender(config: EmailProviderConfig): EmailSender {
     html: string,
     text: string
   ): Promise<EmailDeliveryResult> {
-    if (!isConfigured) {
+    const cfg = evaluateConfiguration();
+    if (cfg.ok === false) {
       return {
         configured: false,
         sent: false,
-        provider: provider === 'disabled' ? 'disabled' : 'unconfigured',
-        errorCode: 'EMAIL_NOT_CONFIGURED',
+        provider: cfg.provider,
+        errorCode: cfg.errorCode,
       };
     }
 
@@ -225,13 +384,16 @@ export function createEmailSender(config: EmailProviderConfig): EmailSender {
       });
 
       if (!response.ok) {
-        // Log ONLY HTTP status code — never recipient email, raw tokens, URLs, or API key
-        console.error(`[AuthEmail] Resend delivery failed with HTTP ${response.status}`);
+        const errorCode = classifyResendHttpError(response.status);
+        // Log ONLY HTTP status & error code — NEVER recipient email, raw tokens, URLs, or API key
+        console.error(
+          `[AuthEmail] Resend delivery failed code=${errorCode} status=${response.status}`
+        );
         return {
           configured: true,
           sent: false,
           provider: 'resend',
-          errorCode: `PROVIDER_HTTP_${response.status}`,
+          errorCode,
         };
       }
 
@@ -241,7 +403,7 @@ export function createEmailSender(config: EmailProviderConfig): EmailSender {
         provider: 'resend',
       };
     } catch {
-      console.error('[AuthEmail] Resend network error during delivery');
+      console.error('[AuthEmail] Resend delivery failed code=PROVIDER_NETWORK_ERROR');
       return {
         configured: true,
         sent: false,

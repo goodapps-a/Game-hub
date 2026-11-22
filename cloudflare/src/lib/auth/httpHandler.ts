@@ -54,6 +54,7 @@ export interface AuthHttpEnv {
   readonly sessionTtlSec?: string | number;
   readonly now?: number;
   readonly publicAppBaseUrl?: string;
+  readonly isProduction?: boolean;
   readonly emailSender?: EmailSender;
 }
 
@@ -300,6 +301,7 @@ export async function handleAuthHttpRequest(
           now,
           sessionTtlSec: ttlSec,
           publicAppBaseUrl: env.publicAppBaseUrl,
+          isProduction: env.isProduction,
         },
         emailSender
       );
@@ -593,6 +595,7 @@ export async function handleAuthHttpRequest(
           userAgent: env.userAgent,
           now,
           publicAppBaseUrl: env.publicAppBaseUrl,
+          isProduction: env.isProduction,
         },
         emailSender
       );
@@ -656,6 +659,7 @@ export async function handleAuthHttpRequest(
           userAgent: env.userAgent,
           now,
           publicAppBaseUrl: env.publicAppBaseUrl,
+          isProduction: env.isProduction,
         },
         emailSender
       );

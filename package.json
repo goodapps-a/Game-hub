@@ -10,14 +10,15 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/games/hokm/engine/hokm.test.ts src/games/hokm/online/online.test.ts cloudflare/src/HokmRoomDO.test.ts server/stageB.migrations.test.ts server/stageC1.auth.test.ts server/stageC1.express.test.ts server/stageC2.auth.test.ts",
+    "test": "tsx --test src/games/hokm/engine/hokm.test.ts src/games/hokm/online/online.test.ts cloudflare/src/HokmRoomDO.test.ts server/stageB.migrations.test.ts server/stageC1.auth.test.ts server/stageC1.express.test.ts server/stageC2.auth.test.ts server/stageC2.hardening.test.ts",
     "test:engine": "tsx --test src/games/hokm/engine/hokm.test.ts",
     "test:online": "tsx --test src/games/hokm/online/online.test.ts",
     "test:worker": "tsx --test cloudflare/src/HokmRoomDO.test.ts",
     "test:migrations": "tsx --test server/stageB.migrations.test.ts",
     "test:auth": "tsx --test server/stageC1.auth.test.ts",
     "test:express": "tsx --test server/stageC1.express.test.ts",
-    "test:c2": "tsx --test server/stageC2.auth.test.ts"
+    "test:c2": "tsx --test server/stageC2.auth.test.ts",
+    "test:c2-hardening": "tsx --test server/stageC2.hardening.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
