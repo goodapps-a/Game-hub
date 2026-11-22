@@ -57,9 +57,10 @@ function generateD1UserId(): string {
 }
 
 /**
- * Non-fatal parameterized user upsert in Cloudflare D1 (aligned with migration 0004).
- * Uses canonical lowercase `username_key` as unique lookup key while preserving
- * `user_id` and NEVER overwriting/downgrading registered (non-guest) accounts.
+ * Non-fatal parameterized guest user upsert in Cloudflare D1 (aligned with migration 0004 & Stage 0).
+ * Uses canonical lowercase `username_key` strictly for guest rows (`account_status = 'guest'`).
+ * NEVER touches, mutates (`last_seen_at`/`updated_at`), downgrades, or returns the `user_id`
+ * of any registered (non-guest) account if a guest happens to type that username.
  */
 export async function upsertUserInD1(
   db: D1DatabaseLike | undefined,
@@ -80,21 +81,42 @@ export async function upsertUserInD1(
        )
        VALUES (?, ?, ?, ?, ?, 'guest', 'guest', ?, ?, ?)
        ON CONFLICT(username_key) DO UPDATE SET
-         username = CASE WHEN users.account_status = 'guest' THEN excluded.username ELSE users.username END,
-         display_name = CASE WHEN users.account_status = 'guest' THEN excluded.display_name ELSE users.display_name END,
-         avatar_code = CASE WHEN users.account_status = 'guest' THEN excluded.avatar_code ELSE users.avatar_code END,
+         username = excluded.username,
+         display_name = excluded.display_name,
+         avatar_code = excluded.avatar_code,
          last_seen_at = excluded.last_seen_at,
-         updated_at = excluded.updated_at`
+         updated_at = excluded.updated_at
+       WHERE users.account_status = 'guest'`
     )
     .bind(newUserId, displayName, canonicalKey, displayName, avatarCode, now, now, now)
     .run();
 
   const row = await db
-    .prepare(`SELECT user_id FROM users WHERE username_key = ? LIMIT 1`)
+    .prepare(
+      `SELECT user_id
+       FROM users
+       WHERE username_key = ? AND account_status = 'guest'
+       LIMIT 1`
+    )
     .bind(canonicalKey)
     .first<{ user_id: string }>();
 
   return row?.user_id ?? null;
+}
+
+/**
+ * Updates `last_seen_at` strictly by server-verified `user_id` (never by username lookup).
+ */
+export async function touchVerifiedUserLastSeenInD1(
+  db: D1DatabaseLike | undefined,
+  userId: string,
+  now = Date.now()
+): Promise<void> {
+  if (!db || !userId) return;
+  await db
+    .prepare(`UPDATE users SET last_seen_at = ? WHERE user_id = ?`)
+    .bind(now, userId)
+    .run();
 }
 
 async function resolveCanonicalUserIdForMatchPlayer(
@@ -102,28 +124,36 @@ async function resolveCanonicalUserIdForMatchPlayer(
   player: CompletedMatchRecord['players'][number],
   now: number
 ): Promise<string | null> {
-  // 1) Prefer verified permanent userId if explicitly attached and present in `users`
+  // 1) Authenticated/verified seat: bind STRICTLY to the verified `user_id` if it exists.
+  //    Never fall back to username lookup when an explicit `userId` was supplied.
   if (player.userId && typeof player.userId === 'string') {
     const byId = await db
       .prepare(`SELECT user_id FROM users WHERE user_id = ? LIMIT 1`)
       .bind(player.userId)
       .first<{ user_id: string }>();
-    if (byId?.user_id) {
-      return byId.user_id;
-    }
+    return byId?.user_id ?? null;
   }
 
-  // 2) Fallback: resolve by canonical lowercase `username_key`
+  // 2) Unauthenticated guest seat (`player.userId == null`):
+  //    A guest may ONLY bind to an existing `'guest'` account (preserving guest history &
+  //    in-place upgrade flow). If `username_key` belongs to ANY registered/non-guest account,
+  //    we MUST return `null` so guest matches NEVER attach to registered accounts!
   const canonicalKey = normalizeUsernameKey(player.username);
   const byKey = await db
-    .prepare(`SELECT user_id FROM users WHERE username_key = ? LIMIT 1`)
+    .prepare(
+      `SELECT user_id, account_status
+       FROM users
+       WHERE username_key = ?
+       LIMIT 1`
+    )
     .bind(canonicalKey)
-    .first<{ user_id: string }>();
-  if (byKey?.user_id) {
-    return byKey.user_id;
+    .first<{ user_id: string; account_status: string }>();
+
+  if (byKey) {
+    return byKey.account_status === 'guest' ? byKey.user_id : null;
   }
 
-  // 3) Ensure guest players without a prior `users` row still receive a stable `user_id`
+  // 3) Brand-new guest username: create a dedicated guest identity (`account_status = 'guest'`)
   return upsertUserInD1(db, player.username, 'portrait', now);
 }
 
@@ -256,60 +286,62 @@ export async function persistCompletedMatchToD1(
             record.finishedAt
           )
       );
-    }
 
-    // Legacy compatibility mirror in `player_stats`:
-    // Never merges two different `user_id` owners if an old username was recycled.
-    stmts.push(
-      db
-        .prepare(
-          `INSERT INTO player_stats
-           (username, display_username, user_id, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at)
-           VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
-           ON CONFLICT(username) DO UPDATE SET
-             display_username = excluded.display_username,
-             user_id = CASE
-               WHEN excluded.user_id IS NOT NULL THEN excluded.user_id
-               ELSE player_stats.user_id
-             END,
-             matches_played = CASE
-               WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
-                 THEN 1
-               ELSE player_stats.matches_played + 1
-             END,
-             wins = CASE
-               WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
-                 THEN excluded.wins
-               ELSE player_stats.wins + excluded.wins
-             END,
-             losses = CASE
-               WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
-                 THEN excluded.losses
-               ELSE player_stats.losses + excluded.losses
-             END,
-             kot_wins = CASE
-               WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
-                 THEN excluded.kot_wins
-               ELSE player_stats.kot_wins + excluded.kot_wins
-             END,
-             hakem_kot_wins = CASE
-               WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
-                 THEN excluded.hakem_kot_wins
-               ELSE player_stats.hakem_kot_wins + excluded.hakem_kot_wins
-             END,
-             last_played_at = excluded.last_played_at`
-        )
-        .bind(
-          canonicalKey,
-          displayName,
-          userId,
-          wonInt,
-          lossInt,
-          isKotWin,
-          isHakemKotWin,
-          record.finishedAt
-        )
-    );
+      // Legacy compatibility mirror in `player_stats`:
+      // Strictly updated ONLY when `userId` is verified/resolved (`userId !== null`),
+      // so an unauthenticated guest using a registered user's username NEVER touches
+      // or contaminates that registered user's `player_stats` row!
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO player_stats
+             (username, display_username, user_id, matches_played, wins, losses, kot_wins, hakem_kot_wins, last_played_at)
+             VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+             ON CONFLICT(username) DO UPDATE SET
+               display_username = excluded.display_username,
+               user_id = CASE
+                 WHEN excluded.user_id IS NOT NULL THEN excluded.user_id
+                 ELSE player_stats.user_id
+               END,
+               matches_played = CASE
+                 WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
+                   THEN 1
+                 ELSE player_stats.matches_played + 1
+               END,
+               wins = CASE
+                 WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
+                   THEN excluded.wins
+                 ELSE player_stats.wins + excluded.wins
+               END,
+               losses = CASE
+                 WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
+                   THEN excluded.losses
+                 ELSE player_stats.losses + excluded.losses
+               END,
+               kot_wins = CASE
+                 WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
+                   THEN excluded.kot_wins
+                 ELSE player_stats.kot_wins + excluded.kot_wins
+               END,
+               hakem_kot_wins = CASE
+                 WHEN player_stats.user_id IS NOT NULL AND excluded.user_id IS NOT NULL AND player_stats.user_id != excluded.user_id
+                   THEN excluded.hakem_kot_wins
+                 ELSE player_stats.hakem_kot_wins + excluded.hakem_kot_wins
+               END,
+               last_played_at = excluded.last_played_at`
+          )
+          .bind(
+            canonicalKey,
+            displayName,
+            userId,
+            wonInt,
+            lossInt,
+            isKotWin,
+            isHakemKotWin,
+            record.finishedAt
+          )
+      );
+    }
   }
 
   await db.batch(stmts);

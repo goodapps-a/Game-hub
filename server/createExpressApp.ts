@@ -379,12 +379,21 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
     }
   });
 
-  const resolveOptionalAuthUserId = async (req: Request): Promise<string | null> => {
+  const resolveOptionalVerifiedAuthUser = async (
+    req: Request
+  ): Promise<{ userId: string; username: string; avatarCode: string } | null> => {
     const rawAuthToken = parseAuthCookieFromHeader(req.headers.cookie);
     if (!rawAuthToken) return null;
     try {
       const verified = await verifyAuthSession(db.getD1Adapter(), rawAuthToken);
-      return verified.authenticated && verified.user ? verified.user.userId : null;
+      if (verified.authenticated && verified.user) {
+        return {
+          userId: verified.user.userId,
+          username: verified.user.username,
+          avatarCode: verified.user.avatarCode,
+        };
+      }
+      return null;
     } catch {
       return null;
     }
@@ -392,11 +401,11 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
 
   app.post('/api/rooms', async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const verifiedUserId = await resolveOptionalAuthUserId(req);
+    const verifiedUser = await resolveOptionalVerifiedAuthUser(req);
     const result = roomManager.createRoom({
-      username: body.username,
-      userId: verifiedUserId,
-      avatarCode: body.avatarCode,
+      username: verifiedUser ? verifiedUser.username : body.username,
+      userId: verifiedUser ? verifiedUser.userId : null,
+      avatarCode: verifiedUser ? verifiedUser.avatarCode : body.avatarCode,
       targetMatchScore: body.targetMatchScore,
     });
     if (result.ok === false) {
@@ -438,12 +447,12 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
     const preferredSeat = isValidSeat(body.preferredSeat)
       ? body.preferredSeat
       : undefined;
-    const verifiedUserId = await resolveOptionalAuthUserId(req);
+    const verifiedUser = await resolveOptionalVerifiedAuthUser(req);
 
     const result = roomManager.joinRoom(String(req.params.code ?? ''), {
-      username: body.username,
-      userId: verifiedUserId,
-      avatarCode: body.avatarCode,
+      username: verifiedUser ? verifiedUser.username : body.username,
+      userId: verifiedUser ? verifiedUser.userId : null,
+      avatarCode: verifiedUser ? verifiedUser.avatarCode : body.avatarCode,
       preferredSeat,
     });
     if (result.ok === false) {

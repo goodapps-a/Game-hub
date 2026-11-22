@@ -114,6 +114,33 @@ function detectLegacyBaselineMigrations(
     detected.push('0005_social_chat.sql');
   }
 
+  const has0006 =
+    has0005 &&
+    tableExists(db, 'user_game_stats') &&
+    indexExists(db, 'idx_match_players_user_id_match_id');
+
+  if (has0006 && availableFiles.includes('0006_stats_user_id_binding.sql')) {
+    detected.push('0006_stats_user_id_binding.sql');
+  }
+
+  const has0007 =
+    has0006 &&
+    tableExists(db, 'user_presence_sessions') &&
+    columnExists(db, 'users', 'presence_preference');
+
+  if (has0007 && availableFiles.includes('0007_social_presence_d1.sql')) {
+    detected.push('0007_social_presence_d1.sql');
+  }
+
+  const has0008 =
+    has0007 &&
+    tableExists(db, 'stats_identity_audit_log') &&
+    columnExists(db, 'users', 'username_changed_at');
+
+  if (has0008 && availableFiles.includes('0008_stage0_identity_audit_and_guards.sql')) {
+    detected.push('0008_stage0_identity_audit_and_guards.sql');
+  }
+
   return detected;
 }
 

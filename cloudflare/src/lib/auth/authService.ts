@@ -899,6 +899,10 @@ export async function updateAuthenticatedProfile(
              username_key = ?,
              display_name = ?,
              avatar_code = ?,
+             username_changed_at = CASE
+               WHEN username_key != ? THEN ?
+               ELSE username_changed_at
+             END,
              updated_at = ?
          WHERE user_id = ?`
       )
@@ -907,6 +911,8 @@ export async function updateAuthenticatedProfile(
         validated.usernameKey,
         validated.username,
         validated.avatarCode,
+        validated.usernameKey,
+        now,
         now,
         verified.user.userId
       )

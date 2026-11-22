@@ -608,7 +608,13 @@ export async function acceptFriendRequest(
            updated_at = ?
        WHERE friendship_id = ?
          AND addressee_id = ?
-         AND status = 'pending'`
+         AND status = 'pending'
+         AND NOT EXISTS (
+           SELECT 1
+           FROM user_blocks ub
+           WHERE (ub.blocker_id = friendships.requester_id AND ub.blocked_id = friendships.addressee_id)
+              OR (ub.blocker_id = friendships.addressee_id AND ub.blocked_id = friendships.requester_id)
+         )`
     )
     .bind(now, now, validated.friendshipId, ctx.actorUserId)
     .run();
@@ -933,6 +939,7 @@ export async function listFriends(
        WHERE f.status = 'accepted'
          AND (f.requester_id = ? OR f.addressee_id = ?)
          AND u.account_status = 'active'
+         AND u.email_verified = 1
          AND NOT EXISTS (
            SELECT 1
            FROM user_blocks ub
@@ -1010,6 +1017,7 @@ export async function listFriendRequests(
        WHERE f.status = 'pending'
          AND (f.requester_id = ? OR f.addressee_id = ?)
          AND u.account_status = 'active'
+         AND u.email_verified = 1
          AND NOT EXISTS (
            SELECT 1
            FROM user_blocks ub
@@ -1255,9 +1263,23 @@ export async function getFriendsPresence(
          END
        WHERE f.status = 'accepted'
          AND (f.requester_id = ? OR f.addressee_id = ?)
-         AND u.account_status = 'active'`
+         AND u.account_status = 'active'
+         AND u.email_verified = 1
+         AND NOT EXISTS (
+           SELECT 1
+           FROM user_blocks ub
+           WHERE (ub.blocker_id = ? AND ub.blocked_id = u.user_id)
+              OR (ub.blocker_id = u.user_id AND ub.blocked_id = ?)
+         )`
     )
-    .bind(now, ctx.actorUserId, ctx.actorUserId, ctx.actorUserId)
+    .bind(
+      now,
+      ctx.actorUserId,
+      ctx.actorUserId,
+      ctx.actorUserId,
+      ctx.actorUserId,
+      ctx.actorUserId
+    )
     .all<FriendPresenceDbRow>();
 
   return (res.results ?? []).map((row) => ({

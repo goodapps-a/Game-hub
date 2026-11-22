@@ -323,8 +323,8 @@ describe('Stage B — Database Migrations, Cleanup Safety & Demo Data Separation
         .run();
       rawDb.close();
 
-      // Game room calls upsertUser with same username_key — must NOT downgrade registered account
-      eyvanDb.upsertUser('realplayer', 'portrait', 3000);
+      // Guest room calls upsertUser with registered username_key — must return null and NEVER mutate registered account
+      assert.equal(eyvanDb.upsertUser('realplayer', 'portrait', 3000), null);
 
       const match: CompletedMatchRecord = {
         matchId: 'match_stageb_1',
@@ -338,7 +338,7 @@ describe('Stage B — Database Migrations, Cleanup Safety & Demo Data Separation
         lastWinType: 'hakem_kot',
         handsPlayed: 2,
         players: [
-          { playerId: 'p1', username: 'RealPlayer', canonicalSeat: 'south', team: 'myTeam', won: true },
+          { playerId: 'p1', userId: 'usr_reg_1', username: 'RealPlayer', canonicalSeat: 'south', team: 'myTeam', won: true },
           { playerId: 'p2', username: 'GuestOne', canonicalSeat: 'north', team: 'myTeam', won: true },
           { playerId: 'p3', username: 'RivalA', canonicalSeat: 'east', team: 'opponentTeam', won: false },
           { playerId: 'p4', username: 'RivalB', canonicalSeat: 'west', team: 'opponentTeam', won: false },
@@ -370,7 +370,7 @@ describe('Stage B — Database Migrations, Cleanup Safety & Demo Data Separation
       assert.equal(regUser.avatar_code, 'gold');
       assert.equal(regUser.auth_provider, 'password');
       assert.equal(regUser.account_status, 'active');
-      assert.equal(regUser.last_seen_at, 3000);
+      assert.equal(regUser.last_seen_at, 1000);
 
       const statsLinked = verifyDb
         .prepare(`SELECT user_id FROM player_stats WHERE username = 'realplayer'`)

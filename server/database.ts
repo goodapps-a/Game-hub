@@ -63,12 +63,13 @@ interface UserGameStatsRow {
 interface UserLookupRow {
   user_id: string;
   username: string;
+  account_status?: string;
 }
 
 /**
- * SQLite persistence layer aligned 1:1 with Cloudflare D1 migrations (0001–0006+).
+ * SQLite persistence layer aligned 1:1 with Cloudflare D1 migrations (0001–0008+).
  * Runs the exact same SQL migration files as D1 via `runDatabaseMigrations`,
- * uses canonical lowercase `username_key` on `users` without downgrading registered accounts,
+ * strictly isolates guest identities from registered accounts (`account_status != 'guest'`),
  * and binds match players and cumulative statistics permanently to immutable `users.user_id`.
  */
 export class EyvanDatabase {
@@ -76,6 +77,7 @@ export class EyvanDatabase {
   private readonly d1Adapter: SqliteD1Adapter;
 
   private readonly stmtUpsertUser: Database.Statement;
+  private readonly stmtTouchUserLastSeenById: Database.Statement;
   private readonly stmtFindUserById: Database.Statement;
   private readonly stmtFindUserByKey: Database.Statement;
   private readonly stmtInsertMatch: Database.Statement;
@@ -110,19 +112,24 @@ export class EyvanDatabase {
       )
       VALUES (?, ?, ?, ?, ?, 'guest', 'guest', ?, ?, ?)
       ON CONFLICT(username_key) DO UPDATE SET
-        username = CASE WHEN users.account_status = 'guest' THEN excluded.username ELSE users.username END,
-        display_name = CASE WHEN users.account_status = 'guest' THEN excluded.display_name ELSE users.display_name END,
-        avatar_code = CASE WHEN users.account_status = 'guest' THEN excluded.avatar_code ELSE users.avatar_code END,
+        username = excluded.username,
+        display_name = excluded.display_name,
+        avatar_code = excluded.avatar_code,
         last_seen_at = excluded.last_seen_at,
         updated_at = excluded.updated_at
+      WHERE users.account_status = 'guest'
+    `);
+
+    this.stmtTouchUserLastSeenById = this.db.prepare(`
+      UPDATE users SET last_seen_at = ? WHERE user_id = ?
     `);
 
     this.stmtFindUserById = this.db.prepare(`
-      SELECT user_id, username FROM users WHERE user_id = ? LIMIT 1
+      SELECT user_id, username, account_status FROM users WHERE user_id = ? LIMIT 1
     `);
 
     this.stmtFindUserByKey = this.db.prepare(`
-      SELECT user_id, username FROM users WHERE username_key = ? LIMIT 1
+      SELECT user_id, username, account_status FROM users WHERE username_key = ? LIMIT 1
     `);
 
     this.stmtInsertMatch = this.db.prepare(`
@@ -241,7 +248,7 @@ export class EyvanDatabase {
     `);
   }
 
-  public upsertUser(username: string, avatarCode: string, now = Date.now()): string {
+  public upsertUser(username: string, avatarCode: string, now = Date.now()): string | null {
     const key = normalizeUsernameKey(username);
     const displayName = username.trim();
     this.stmtUpsertUser.run(
@@ -254,22 +261,34 @@ export class EyvanDatabase {
       now,
       now
     );
-    const row = this.stmtFindUserByKey.get(key) as UserLookupRow;
+    const row = this.stmtFindUserByKey.get(key) as UserLookupRow | undefined;
+    if (!row || row.account_status !== 'guest') {
+      return null;
+    }
     return row.user_id;
+  }
+
+  public touchVerifiedUserLastSeen(userId: string, now = Date.now()): void {
+    if (!userId) return;
+    this.stmtTouchUserLastSeenById.run(now, userId);
   }
 
   private resolveCanonicalUserIdForPlayer(
     player: CompletedMatchRecord['players'][number],
     now: number
-  ): string {
+  ): string | null {
+    // 1) Server-verified seat: bind strictly by verified `user_id` (never fallback by username)
     if (player.userId && typeof player.userId === 'string') {
       const byId = this.stmtFindUserById.get(player.userId) as UserLookupRow | undefined;
-      if (byId) return byId.user_id;
+      return byId ? byId.user_id : null;
     }
 
+    // 2) Unauthenticated guest seat: NEVER attach to any registered (non-guest) account!
     const key = normalizeUsernameKey(player.username);
     const byKey = this.stmtFindUserByKey.get(key) as UserLookupRow | undefined;
-    if (byKey) return byKey.user_id;
+    if (byKey) {
+      return byKey.account_status === 'guest' ? byKey.user_id : null;
+    }
 
     return this.upsertUser(player.username, 'portrait', now);
   }
@@ -314,26 +333,28 @@ export class EyvanDatabase {
           wonInt
         );
 
-        this.stmtUpsertUserGameStats.run(
-          userId,
-          wonInt,
-          lossInt,
-          kotInt,
-          hakemKotInt,
-          rec.finishedAt,
-          rec.finishedAt
-        );
+        if (userId) {
+          this.stmtUpsertUserGameStats.run(
+            userId,
+            wonInt,
+            lossInt,
+            kotInt,
+            hakemKotInt,
+            rec.finishedAt,
+            rec.finishedAt
+          );
 
-        this.stmtUpsertLegacyStats.run(
-          key,
-          displayName,
-          userId,
-          wonInt,
-          lossInt,
-          kotInt,
-          hakemKotInt,
-          rec.finishedAt
-        );
+          this.stmtUpsertLegacyStats.run(
+            key,
+            displayName,
+            userId,
+            wonInt,
+            lossInt,
+            kotInt,
+            hakemKotInt,
+            rec.finishedAt
+          );
+        }
       }
     });
 

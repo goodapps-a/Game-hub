@@ -199,6 +199,7 @@ describe('Part 1 — Permanent user_id Identity & Game Stats Linkage (All 12 Man
         finishedAt: 1_710_000_001_000,
         lastWinType: 'normal',
         playerUsername: 'Amir123',
+        playerUserId: permanentUserId,
         playerWon: true,
       });
       const m2 = makeMatchRecord({
@@ -206,6 +207,7 @@ describe('Part 1 — Permanent user_id Identity & Game Stats Linkage (All 12 Man
         finishedAt: 1_710_000_002_000,
         lastWinType: 'kot',
         playerUsername: 'Amir123',
+        playerUserId: permanentUserId,
         playerWon: true,
       });
       const m3 = makeMatchRecord({
@@ -213,6 +215,7 @@ describe('Part 1 — Permanent user_id Identity & Game Stats Linkage (All 12 Man
         finishedAt: 1_710_000_003_000,
         lastWinType: 'normal',
         playerUsername: 'Amir123',
+        playerUserId: permanentUserId,
         playerWon: false,
       });
 
@@ -431,6 +434,7 @@ describe('Part 1 — Permanent user_id Identity & Game Stats Linkage (All 12 Man
           matchId: 'm_p1_recycled_1',
           finishedAt: 1_710_000_009_000,
           playerUsername: 'Amir123',
+          playerUserId: newUserId,
           playerWon: false,
         })
       );
@@ -464,7 +468,7 @@ describe('Part 1 — Permanent user_id Identity & Game Stats Linkage (All 12 Man
     try {
       // Guest plays 2 matches before registering
       const guestUserId = db.upsertUser('GuestStar', 'portrait', 1_710_000_000_000);
-      assert.ok(guestUserId.startsWith('usr_'));
+      assert.ok(guestUserId && guestUserId.startsWith('usr_'));
 
       db.recordCompletedMatch(
         makeMatchRecord({
@@ -520,30 +524,41 @@ describe('Part 1 — Permanent user_id Identity & Game Stats Linkage (All 12 Man
       const history = db.getPlayerMatchHistoryByUserId(guestUserId, 10);
       assert.equal(history.length, 2);
 
-      // Subsequent guest upsert with same username must NEVER downgrade the registered account!
+      // Subsequent guest upsert with same username must NEVER return the registered userId
+      // or touch/downgrade the registered account (including last_seen_at)!
+      const rawBefore = new Database(dbPath, { readonly: true });
+      const beforeRow = rawBefore
+        .prepare(`SELECT last_seen_at, updated_at FROM users WHERE user_id = ?`)
+        .get(guestUserId) as { last_seen_at: number; updated_at: number };
+      rawBefore.close();
+
       const afterUpsertId = await upsertUserInD1(
         db.getD1Adapter(),
         'starregistered',
         'jade',
         1_710_000_020_000
       );
-      assert.equal(afterUpsertId, guestUserId);
+      assert.equal(afterUpsertId, null);
 
       const raw = new Database(dbPath, { readonly: true });
       const row = raw
         .prepare(
-          `SELECT user_id, auth_provider, account_status, username FROM users WHERE user_id = ?`
+          `SELECT user_id, auth_provider, account_status, username, last_seen_at, updated_at FROM users WHERE user_id = ?`
         )
         .get(guestUserId) as {
         user_id: string;
         auth_provider: string;
         account_status: string;
         username: string;
+        last_seen_at: number;
+        updated_at: number;
       };
       raw.close();
       assert.equal(row.auth_provider, 'password');
       assert.equal(row.account_status, 'pending_verification');
       assert.equal(row.username, 'StarRegistered');
+      assert.equal(row.last_seen_at, beforeRow.last_seen_at);
+      assert.equal(row.updated_at, beforeRow.updated_at);
     } finally {
       db.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });

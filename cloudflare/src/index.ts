@@ -26,6 +26,7 @@ import {
   fetchPlayerStatsByUserIdFromD1,
   fetchPlayerStatsFromD1,
   fetchRecentMatchesFromD1,
+  touchVerifiedUserLastSeenInD1,
   upsertUserInD1,
 } from './lib/d1Persistence';
 import { readBoundedUtf8Body } from './lib/httpBounds';
@@ -467,14 +468,22 @@ export default {
         );
       }
 
-      // Optionally resolve verified central userId from HttpOnly auth cookie (never trust body)
-      let verifiedUserId: string | null = null;
+      // Optionally resolve verified central user identity from HttpOnly auth cookie (never trust body/headers)
+      let verifiedUser: {
+        userId: string;
+        username: string;
+        avatarCode: string;
+      } | null = null;
       const rawAuthToken = parseAuthCookieFromHeader(request.headers.get('Cookie'));
       if (rawAuthToken && env.EYVAN_DB) {
         try {
           const verifiedAuth = await verifyAuthSession(env.EYVAN_DB, rawAuthToken);
           if (verifiedAuth.authenticated && verifiedAuth.user) {
-            verifiedUserId = verifiedAuth.user.userId;
+            verifiedUser = {
+              userId: verifiedAuth.user.userId,
+              username: verifiedAuth.user.username,
+              avatarCode: verifiedAuth.user.avatarCode,
+            };
           }
         } catch {
           // Non-fatal: continue as guest room join
@@ -489,8 +498,10 @@ export default {
         const forwardHeaders: Record<string, string> = {
           'Content-Type': 'application/json',
         };
-        if (verifiedUserId) {
-          forwardHeaders['X-Eyvan-Verified-User-Id'] = verifiedUserId;
+        if (verifiedUser) {
+          forwardHeaders['X-Eyvan-Verified-User-Id'] = verifiedUser.userId;
+          forwardHeaders['X-Eyvan-Verified-Username'] = verifiedUser.username;
+          forwardHeaders['X-Eyvan-Verified-Avatar'] = verifiedUser.avatarCode;
         }
         const res = await stub.fetch(
           new Request(`https://room.internal/create?code=${code}`, {
@@ -505,12 +516,20 @@ export default {
           const internalToken = res.headers.get(INTERNAL_SESSION_TOKEN_HEADER);
           let setCookie: string | undefined;
           if (res.ok) {
-            const user = tryExtractUserForUpsert(bodyRead.text);
-            if (user) {
+            if (verifiedUser) {
               try {
-                await upsertUserInD1(env.EYVAN_DB, user.username, user.avatarCode);
+                await touchVerifiedUserLastSeenInD1(env.EYVAN_DB, verifiedUser.userId);
               } catch (err) {
-                console.error('[Worker] Non-fatal D1 user upsert error:', err);
+                console.error('[Worker] Non-fatal D1 last_seen update error:', err);
+              }
+            } else {
+              const user = tryExtractUserForUpsert(bodyRead.text);
+              if (user) {
+                try {
+                  await upsertUserInD1(env.EYVAN_DB, user.username, user.avatarCode);
+                } catch (err) {
+                  console.error('[Worker] Non-fatal D1 user upsert error:', err);
+                }
               }
             }
             try {
@@ -571,13 +590,21 @@ export default {
           );
         }
 
-        let verifiedUserId: string | null = null;
+        let verifiedUser: {
+          userId: string;
+          username: string;
+          avatarCode: string;
+        } | null = null;
         const rawAuthToken = parseAuthCookieFromHeader(request.headers.get('Cookie'));
         if (rawAuthToken && env.EYVAN_DB) {
           try {
             const verifiedAuth = await verifyAuthSession(env.EYVAN_DB, rawAuthToken);
             if (verifiedAuth.authenticated && verifiedAuth.user) {
-              verifiedUserId = verifiedAuth.user.userId;
+              verifiedUser = {
+                userId: verifiedAuth.user.userId,
+                username: verifiedAuth.user.username,
+                avatarCode: verifiedAuth.user.avatarCode,
+              };
             }
           } catch {
             // Non-fatal: continue as guest room join
@@ -587,8 +614,10 @@ export default {
         const forwardHeaders: Record<string, string> = {
           'Content-Type': 'application/json',
         };
-        if (verifiedUserId) {
-          forwardHeaders['X-Eyvan-Verified-User-Id'] = verifiedUserId;
+        if (verifiedUser) {
+          forwardHeaders['X-Eyvan-Verified-User-Id'] = verifiedUser.userId;
+          forwardHeaders['X-Eyvan-Verified-Username'] = verifiedUser.username;
+          forwardHeaders['X-Eyvan-Verified-Avatar'] = verifiedUser.avatarCode;
         }
         const res = await stub.fetch(
           new Request(`https://room.internal/join?code=${code}`, {
@@ -602,12 +631,20 @@ export default {
         const internalToken = res.headers.get(INTERNAL_SESSION_TOKEN_HEADER);
         let setCookie: string | undefined;
         if (res.ok) {
-          const user = tryExtractUserForUpsert(bodyRead.text);
-          if (user) {
+          if (verifiedUser) {
             try {
-              await upsertUserInD1(env.EYVAN_DB, user.username, user.avatarCode);
+              await touchVerifiedUserLastSeenInD1(env.EYVAN_DB, verifiedUser.userId);
             } catch (err) {
-              console.error('[Worker] Non-fatal D1 user upsert error:', err);
+              console.error('[Worker] Non-fatal D1 last_seen update error:', err);
+            }
+          } else {
+            const user = tryExtractUserForUpsert(bodyRead.text);
+            if (user) {
+              try {
+                await upsertUserInD1(env.EYVAN_DB, user.username, user.avatarCode);
+              } catch (err) {
+                console.error('[Worker] Non-fatal D1 user upsert error:', err);
+              }
             }
           }
           try {

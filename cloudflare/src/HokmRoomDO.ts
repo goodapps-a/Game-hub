@@ -413,7 +413,16 @@ export class HokmRoomDO {
         );
       }
 
-      const username = sanitizeUsername(bodyRes.data.username);
+      const verifiedUserId =
+        request.headers.get('X-Eyvan-Verified-User-Id')?.trim() || null;
+      const verifiedUsername = verifiedUserId
+        ? sanitizeUsername(request.headers.get('X-Eyvan-Verified-Username'))
+        : null;
+      const rawVerifiedAvatar = verifiedUserId
+        ? request.headers.get('X-Eyvan-Verified-Avatar')
+        : null;
+
+      const username = verifiedUsername ?? sanitizeUsername(bodyRes.data.username);
       if (!username) {
         return Response.json(
           {
@@ -424,7 +433,9 @@ export class HokmRoomDO {
         );
       }
 
-      const avatarCode = sanitizeAvatarCode(bodyRes.data.avatarCode);
+      const avatarCode = rawVerifiedAvatar
+        ? sanitizeAvatarCode(rawVerifiedAvatar)
+        : sanitizeAvatarCode(bodyRes.data.avatarCode);
       const rawTarget = bodyRes.data.targetMatchScore;
       const targetMatchScore =
         typeof rawTarget === 'number' &&
@@ -446,9 +457,6 @@ export class HokmRoomDO {
         now: this.nowFn,
         rng: this.rngFn,
       });
-
-      const verifiedUserId =
-        request.headers.get('X-Eyvan-Verified-User-Id')?.trim() || null;
 
       const joined = ctrl.joinPlayer({
         username,
@@ -501,7 +509,16 @@ export class HokmRoomDO {
         );
       }
 
-      const username = sanitizeUsername(bodyRes.data.username);
+      const verifiedUserId =
+        request.headers.get('X-Eyvan-Verified-User-Id')?.trim() || null;
+      const verifiedUsername = verifiedUserId
+        ? sanitizeUsername(request.headers.get('X-Eyvan-Verified-Username'))
+        : null;
+      const rawVerifiedAvatar = verifiedUserId
+        ? request.headers.get('X-Eyvan-Verified-Avatar')
+        : null;
+
+      const username = verifiedUsername ?? sanitizeUsername(bodyRes.data.username);
       if (!username) {
         return Response.json(
           {
@@ -512,13 +529,12 @@ export class HokmRoomDO {
         );
       }
 
-      const avatarCode = sanitizeAvatarCode(bodyRes.data.avatarCode);
+      const avatarCode = rawVerifiedAvatar
+        ? sanitizeAvatarCode(rawVerifiedAvatar)
+        : sanitizeAvatarCode(bodyRes.data.avatarCode);
       const preferredSeat = isValidSeat(bodyRes.data.preferredSeat)
         ? bodyRes.data.preferredSeat
         : undefined;
-
-      const verifiedUserId =
-        request.headers.get('X-Eyvan-Verified-User-Id')?.trim() || null;
 
       const joined = this.controller.joinPlayer({
         username,

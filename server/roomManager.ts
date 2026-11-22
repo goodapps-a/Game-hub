@@ -314,9 +314,13 @@ export class HokmRoomManager {
     this.rooms.set(roomCode, managed);
 
     try {
-      this.db.upsertUser(username, avatarCode);
+      if (input.userId) {
+        this.db.touchVerifiedUserLastSeen(input.userId);
+      } else {
+        this.db.upsertUser(username, avatarCode);
+      }
     } catch (err) {
-      console.error('[HokmRoomManager] Failed to upsert user:', err);
+      console.error('[HokmRoomManager] Failed to update user presence/upsert:', err);
     }
 
     return {
@@ -398,9 +402,13 @@ export class HokmRoomManager {
     }
 
     try {
-      this.db.upsertUser(username, avatarCode);
+      if (input.userId) {
+        this.db.touchVerifiedUserLastSeen(input.userId);
+      } else {
+        this.db.upsertUser(username, avatarCode);
+      }
     } catch (err) {
-      console.error('[HokmRoomManager] Failed to upsert user:', err);
+      console.error('[HokmRoomManager] Failed to update user presence/upsert:', err);
     }
 
     // Notify existing connected players right away that a seat was claimed
