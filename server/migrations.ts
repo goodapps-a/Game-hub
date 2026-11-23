@@ -180,6 +180,18 @@ function detectLegacyBaselineMigrations(
     detected.push('0011_oauth_multitab_and_invite_order.sql');
   }
 
+  const has0012 =
+    has0011 &&
+    indexExists(db, 'idx_game_invites_status_expires_at') &&
+    indexExists(db, 'idx_auth_sessions_revoked_at');
+
+  if (
+    has0012 &&
+    availableFiles.includes('0012_cron_pruning_indexes.sql')
+  ) {
+    detected.push('0012_cron_pruning_indexes.sql');
+  }
+
   return detected;
 }
 

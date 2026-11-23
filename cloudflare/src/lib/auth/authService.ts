@@ -1322,4 +1322,64 @@ export async function upgradeGuestAccountToRegistered(
   };
 }
 
+/**
+ * Bounded periodic cleanup of long-expired and long-revoked `auth_sessions` rows.
+ * Uses `idx_auth_sessions_expires_at` (0004) and `idx_auth_sessions_revoked_at` (0012).
+ * Keeps a safety retention grace (default 7 days) so recent session state & audits remain intact.
+ */
+export async function pruneExpiredAuthSessionsBatched(
+  db: D1DatabaseLike | undefined,
+  options?: { now?: number; graceMs?: number; batchSize?: number; maxBatches?: number }
+): Promise<number> {
+  if (!db) return 0;
+  const now = options?.now ?? Date.now();
+  const graceMs = Math.max(60_000, options?.graceMs ?? 7 * 24 * 60 * 60 * 1000);
+  const cutoff = now - graceMs;
+  const batchSize = Math.max(10, Math.min(500, options?.batchSize ?? 200));
+  const maxBatches = Math.max(1, Math.min(20, options?.maxBatches ?? 5));
+  let totalDeleted = 0;
+
+  for (let i = 0; i < maxBatches; i++) {
+    const res = await db
+      .prepare(
+        `DELETE FROM auth_sessions
+         WHERE session_id IN (
+           SELECT session_id
+           FROM auth_sessions
+           WHERE expires_at <= ?
+           ORDER BY expires_at ASC
+           LIMIT ?
+         )`
+      )
+      .bind(cutoff, batchSize)
+      .run();
+
+    const deleted = Number(res.meta?.changes ?? 0);
+    totalDeleted += deleted;
+    if (deleted < batchSize) break;
+  }
+
+  for (let i = 0; i < maxBatches; i++) {
+    const res = await db
+      .prepare(
+        `DELETE FROM auth_sessions
+         WHERE session_id IN (
+           SELECT session_id
+           FROM auth_sessions
+           WHERE revoked_at IS NOT NULL AND revoked_at <= ?
+           ORDER BY revoked_at ASC
+           LIMIT ?
+         )`
+      )
+      .bind(cutoff, batchSize)
+      .run();
+
+    const deleted = Number(res.meta?.changes ?? 0);
+    totalDeleted += deleted;
+    if (deleted < batchSize) break;
+  }
+
+  return totalDeleted;
+}
+
 

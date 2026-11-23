@@ -9,9 +9,12 @@ import {
   MAX_WS_PAYLOAD_BYTES,
 } from './src/games/hokm/online/protocol';
 import { parseSessionCookieFromHeader } from './cloudflare/src/lib/sessionCookie';
+import { pruneExpiredAuthSessionsBatched } from './cloudflare/src/lib/auth/authService';
+import { pruneExpiredAuthTokensBatched } from './cloudflare/src/lib/auth/c2Service';
 import { pruneExpiredOAuthStatesBatched } from './cloudflare/src/lib/auth/googleOAuthService';
 import { pruneExpiredGuestSessionsBatched } from './cloudflare/src/lib/auth/guestSession';
 import { pruneExpiredRateLimitsBatched } from './cloudflare/src/lib/auth/rateLimit';
+import { pruneExpiredGameInvitesBatched } from './cloudflare/src/lib/social/inviteService';
 import { pruneExpiredPresenceSessionsBatched } from './cloudflare/src/lib/social/socialService';
 import { validateProductionAuthConfig } from './cloudflare/src/lib/auth/securityPolicy';
 import { createEyvanExpressApp } from './server/createExpressApp';
@@ -187,6 +190,24 @@ async function startServer() {
     void pruneExpiredOAuthStatesBatched(d1Adapter).catch((err) => {
       console.error(
         '[Eyvan Cleanup] OAuth-state cleanup failed:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+    });
+    void pruneExpiredAuthSessionsBatched(d1Adapter).catch((err) => {
+      console.error(
+        '[Eyvan Cleanup] Auth-session cleanup failed:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+    });
+    void pruneExpiredAuthTokensBatched(d1Adapter).catch((err) => {
+      console.error(
+        '[Eyvan Cleanup] Auth-token cleanup failed:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+    });
+    void pruneExpiredGameInvitesBatched(d1Adapter).catch((err) => {
+      console.error(
+        '[Eyvan Cleanup] Game-invite cleanup failed:',
         err instanceof Error ? err.message : 'unknown'
       );
     });

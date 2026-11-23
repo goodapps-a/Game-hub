@@ -105,6 +105,15 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const lastReadMarkedRef = useRef<string | null>(null);
   const pendingClientMsgIdRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+  const inFlightPollRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     const handleOnline = () => setOffline(false);
@@ -134,16 +143,17 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
 
   const loadLatestMessages = useCallback(
     async (silent = false) => {
-      if (!silent) {
+      if (silent && inFlightPollRef.current) return;
+      if (silent) {
+        inFlightPollRef.current = true;
+      } else {
         setLoading(true);
         setErrorMsg(null);
       }
+      const targetConvId = conversation.conversationId;
       try {
-        const res = await fetchChatMessagesRequest(
-          conversation.conversationId,
-          undefined,
-          30
-        );
+        const res = await fetchChatMessagesRequest(targetConvId, undefined, 30);
+        if (!mountedRef.current) return;
         if (!res.ok) {
           if (!silent) {
             setErrorMsg(res.message ?? 'خطا در دریافت پیام‌های گفتگو.');
@@ -163,11 +173,15 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
           void markLatestRead(fetched);
         }
       } catch {
-        if (!silent) {
+        if (!silent && mountedRef.current) {
           setErrorMsg('ارتباط با سرور برای دریافت پیام‌ها برقرار نشد.');
         }
       } finally {
-        if (!silent) setLoading(false);
+        if (silent) {
+          inFlightPollRef.current = false;
+        } else if (mountedRef.current) {
+          setLoading(false);
+        }
       }
     },
     [conversation.conversationId, markLatestRead]

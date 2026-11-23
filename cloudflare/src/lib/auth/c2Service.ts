@@ -766,3 +766,73 @@ export async function resetPasswordWithToken(
       'رمز عبور شما با موفقیت تغییر یافت و تمام نشست‌های قبلی لغو شدند. اکنون با رمز جدید وارد شوید.',
   };
 }
+
+/**
+ * Bounded periodic cleanup of expired or long-consumed `email_verification_tokens` and
+ * `password_reset_tokens` rows using migration 0012 indexes.
+ */
+export async function pruneExpiredAuthTokensBatched(
+  db: D1DatabaseLike | undefined,
+  options?: { now?: number; graceMs?: number; batchSize?: number; maxBatches?: number }
+): Promise<{
+  deletedVerificationTokens: number;
+  deletedResetTokens: number;
+}> {
+  if (!db) {
+    return { deletedVerificationTokens: 0, deletedResetTokens: 0 };
+  }
+  const now = options?.now ?? Date.now();
+  const graceMs = Math.max(60_000, options?.graceMs ?? 24 * 60 * 60 * 1000);
+  const cutoff = now - graceMs;
+  const batchSize = Math.max(10, Math.min(500, options?.batchSize ?? 200));
+  const maxBatches = Math.max(1, Math.min(20, options?.maxBatches ?? 5));
+
+  const pruneTable = async (tableName: 'email_verification_tokens' | 'password_reset_tokens') => {
+    let deletedTotal = 0;
+
+    for (let i = 0; i < maxBatches; i++) {
+      const res = await db
+        .prepare(
+          `DELETE FROM ${tableName}
+           WHERE token_hash IN (
+             SELECT token_hash
+             FROM ${tableName}
+             WHERE expires_at <= ?
+             ORDER BY expires_at ASC
+             LIMIT ?
+           )`
+        )
+        .bind(cutoff, batchSize)
+        .run();
+      const deleted = Number(res.meta?.changes ?? 0);
+      deletedTotal += deleted;
+      if (deleted < batchSize) break;
+    }
+
+    for (let i = 0; i < maxBatches; i++) {
+      const res = await db
+        .prepare(
+          `DELETE FROM ${tableName}
+           WHERE token_hash IN (
+             SELECT token_hash
+             FROM ${tableName}
+             WHERE consumed_at IS NOT NULL AND consumed_at <= ?
+             ORDER BY consumed_at ASC
+             LIMIT ?
+           )`
+        )
+        .bind(cutoff, batchSize)
+        .run();
+      const deleted = Number(res.meta?.changes ?? 0);
+      deletedTotal += deleted;
+      if (deleted < batchSize) break;
+    }
+
+    return deletedTotal;
+  };
+
+  const deletedVerificationTokens = await pruneTable('email_verification_tokens');
+  const deletedResetTokens = await pruneTable('password_reset_tokens');
+  return { deletedVerificationTokens, deletedResetTokens };
+}
+

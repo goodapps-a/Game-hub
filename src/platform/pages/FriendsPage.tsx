@@ -224,16 +224,23 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
   useEffect(() => {
     if (!authUser) return;
 
+    let active = true;
+    let inFlight = false;
+
     const pollLiveSocial = async () => {
+      if (inFlight || !active) return;
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
         return;
       }
+      inFlight = true;
       try {
         const [presenceRes, invitesRes, convsRes] = await Promise.all([
           fetchFriendsPresenceRequest(),
           fetchGameInvitesRequest(),
           fetchChatConversationsRequest(),
         ]);
+
+        if (!active) return;
 
         if (presenceRes.ok && Array.isArray(presenceRes.presence)) {
           const map = new Map(
@@ -256,11 +263,16 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
         }
       } catch {
         // Ignore transient polling hiccups
+      } finally {
+        inFlight = false;
       }
     };
 
     const timer = window.setInterval(pollLiveSocial, PRESENCE_POLL_INTERVAL_MS);
-    return () => window.clearInterval(timer);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
   }, [authUser]);
 
   const executeSearch = useCallback(

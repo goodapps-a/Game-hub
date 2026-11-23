@@ -55,8 +55,10 @@ const COOKIE_DOMAIN_RE =
  * are independent sites (cross-site), NOT same-site.
  */
 const MULTI_LABEL_PUBLIC_SUFFIXES = new Set([
+  // Cloud & edge hosting
   'pages.dev',
   'workers.dev',
+  'r2.dev',
   'run.app',
   'appspot.com',
   'web.app',
@@ -68,47 +70,140 @@ const MULTI_LABEL_PUBLIC_SUFFIXES = new Set([
   'herokuapp.com',
   'cloudfront.net',
   'amazonaws.com',
+  'azurewebsites.net',
+  'blogspot.com',
+  'fly.dev',
+  'railway.app',
+  'onrender.com',
+  'b-cdn.net',
+  'deno.dev',
+  'replit.app',
+  'glitch.me',
+  // ccSLDs
   'co.uk',
   'org.uk',
   'ac.uk',
   'gov.uk',
+  'net.uk',
+  'me.uk',
+  'ltd.uk',
+  'plc.uk',
   'com.au',
   'net.au',
   'org.au',
+  'edu.au',
+  'gov.au',
   'co.ir',
   'ac.ir',
   'org.ir',
   'gov.ir',
   'net.ir',
+  'id.ir',
+  'sch.ir',
   'com.tr',
+  'net.tr',
+  'org.tr',
+  'gov.tr',
+  'edu.tr',
   'co.jp',
   'ne.jp',
   'or.jp',
+  'ac.jp',
+  'go.jp',
   'com.br',
+  'net.br',
+  'org.br',
   'co.in',
+  'net.in',
+  'org.in',
   'co.nz',
+  'org.nz',
+  'co.za',
+  'org.za',
+  'net.za',
+  'com.cn',
+  'net.cn',
+  'org.cn',
+  'gov.cn',
+  'edu.cn',
+  'co.il',
+  'org.il',
+  'ac.il',
+  'com.sg',
+  'com.my',
+  'com.tw',
+  'com.hk',
+  'com.mx',
+  'com.ar',
+  'com.pl',
+  'co.kr',
+  'ne.kr',
+  'or.kr',
 ]);
+
+const THREE_LABEL_PUBLIC_SUFFIXES = new Set([
+  'up.railway.app',
+  's3.amazonaws.com',
+  's3-website.amazonaws.com',
+  'compute.amazonaws.com',
+  'elb.amazonaws.com',
+  'execute-api.amazonaws.com',
+]);
+
+function getPublicSuffixLabelCount(labels: readonly string[]): number {
+  const len = labels.length;
+  if (len <= 1) return len;
+
+  // Regional 4-label AWS public suffixes: <service>.<region>.amazonaws.com (e.g. s3.us-east-1.amazonaws.com)
+  if (
+    len >= 4 &&
+    labels[len - 2] === 'amazonaws' &&
+    labels[len - 1] === 'com' &&
+    (labels[len - 4] === 's3' ||
+      labels[len - 4] === 's3-website' ||
+      labels[len - 3] === 'compute' ||
+      labels[len - 3] === 'elb' ||
+      labels[len - 3] === 'execute-api')
+  ) {
+    return labels[len - 4] === 's3' || labels[len - 4] === 's3-website' ? 4 : 3;
+  }
+
+  if (len >= 3) {
+    const lastThree = `${labels[len - 3]}.${labels[len - 2]}.${labels[len - 1]}`;
+    if (THREE_LABEL_PUBLIC_SUFFIXES.has(lastThree)) {
+      return 3;
+    }
+  }
+
+  const lastTwo = `${labels[len - 2]}.${labels[len - 1]}`;
+  if (MULTI_LABEL_PUBLIC_SUFFIXES.has(lastTwo)) {
+    return 2;
+  }
+
+  return 1;
+}
 
 function isIpLiteralHostname(hostname: string): boolean {
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) return true;
-  if (hostname.includes(':')) return true;
+  if (hostname.includes(':') || (hostname.startsWith('[') && hostname.endsWith(']'))) {
+    return true;
+  }
   return false;
 }
 
-function resolveRegistrableSite(hostname: string): string {
+export function resolveRegistrableSite(hostname: string): string {
   const lower = hostname.toLowerCase().replace(/\.$/, '');
-  if (lower === 'localhost' || isIpLiteralHostname(lower)) {
+  if (!lower || lower === 'localhost' || isIpLiteralHostname(lower)) {
     return lower;
   }
   const labels = lower.split('.').filter(Boolean);
-  if (labels.length <= 2) return lower;
-  const lastTwo = `${labels[labels.length - 2]}.${labels[labels.length - 1]}`;
-  if (MULTI_LABEL_PUBLIC_SUFFIXES.has(lastTwo)) {
-    return labels.length >= 3
-      ? `${labels[labels.length - 3]}.${lastTwo}`
-      : lower;
+  if (labels.length <= 2) return labels.join('.');
+  const suffixLen = getPublicSuffixLabelCount(labels);
+  const registrableLen = suffixLen + 1;
+  if (labels.length <= registrableLen) {
+    return labels.join('.');
   }
-  return lastTwo;
+  return labels.slice(labels.length - registrableLen).join('.');
 }
 
 /**
@@ -519,9 +614,13 @@ interface GoogleJwk extends JsonWebKey {
   use?: string;
 }
 
+const MIN_JWKS_CACHE_TTL_MS = 60 * 1000; // 1 minute
+const MAX_JWKS_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
 interface CachedJwks {
   keys: GoogleJwk[];
   fetchedAt: number;
+  expiresAt: number;
 }
 
 const jwksCache = new Map<string, CachedJwks>();
@@ -651,6 +750,18 @@ export interface VerifiedGoogleIdTokenClaims {
   readonly picture: string | null;
 }
 
+function parseJwksCacheTtlMs(cacheControlHeader: string | null): number {
+  if (!cacheControlHeader) return JWKS_CACHE_TTL_MS;
+  const match = /max-age=(\d+)/i.exec(cacheControlHeader);
+  if (!match) return JWKS_CACHE_TTL_MS;
+  const sec = Number(match[1]);
+  if (!Number.isFinite(sec) || sec <= 0) return MIN_JWKS_CACHE_TTL_MS;
+  return Math.max(
+    MIN_JWKS_CACHE_TTL_MS,
+    Math.min(MAX_JWKS_CACHE_TTL_MS, Math.floor(sec * 1000))
+  );
+}
+
 async function fetchGoogleJwks(
   jwksEndpoint: string,
   fetchImpl: OAuthFetchFn,
@@ -658,7 +769,7 @@ async function fetchGoogleJwks(
   forceRefresh = false
 ): Promise<GoogleJwk[]> {
   const cached = jwksCache.get(jwksEndpoint);
-  if (!forceRefresh && cached && now - cached.fetchedAt < JWKS_CACHE_TTL_MS) {
+  if (!forceRefresh && cached && now < cached.expiresAt) {
     return cached.keys;
   }
 
@@ -669,9 +780,10 @@ async function fetchGoogleJwks(
   if (!res.ok) {
     throw new Error(`JWKS_HTTP_${res.status}`);
   }
+  const ttlMs = parseJwksCacheTtlMs(res.headers.get('Cache-Control'));
   const data = (await res.json()) as { keys?: GoogleJwk[] };
   const keys = Array.isArray(data?.keys) ? data.keys : [];
-  jwksCache.set(jwksEndpoint, { keys, fetchedAt: now });
+  jwksCache.set(jwksEndpoint, { keys, fetchedAt: now, expiresAt: now + ttlMs });
   return keys;
 }
 
@@ -722,16 +834,20 @@ export async function verifyGoogleIdToken(
     return { ok: false, reason: 'JWKS_FETCH_FAILED' };
   }
 
-  let matchingJwk = keys.find(
-    (k) => k.kid === header.kid && k.kty === 'RSA' && k.n && k.e
-  );
+  const isEligibleRsaSigJwk = (k: GoogleJwk): boolean =>
+    k.kid === header.kid &&
+    k.kty === 'RSA' &&
+    Boolean(k.n) &&
+    Boolean(k.e) &&
+    (k.use === undefined || k.use === 'sig') &&
+    (k.alg === undefined || k.alg === 'RS256');
+
+  let matchingJwk = keys.find(isEligibleRsaSigJwk);
   if (!matchingJwk) {
     // Handle Google key rotation with one forced refresh
     try {
       keys = await fetchGoogleJwks(jwksEndpoint, fetchImpl, now, true);
-      matchingJwk = keys.find(
-        (k) => k.kid === header.kid && k.kty === 'RSA' && k.n && k.e
-      );
+      matchingJwk = keys.find(isEligibleRsaSigJwk);
     } catch {
       return { ok: false, reason: 'JWKS_REFRESH_FAILED' };
     }
@@ -770,11 +886,42 @@ export async function verifyGoogleIdToken(
   }
 
   const aud = payload.aud;
+  const audIsArray = Array.isArray(aud);
   const audMatches =
     aud === opts.expectedAudience ||
-    (Array.isArray(aud) && aud.includes(opts.expectedAudience));
+    (audIsArray &&
+      aud.every((item) => typeof item === 'string') &&
+      aud.includes(opts.expectedAudience));
   if (!audMatches) {
     return { ok: false, reason: 'INVALID_AUDIENCE' };
+  }
+
+  // OIDC Core §3.1.3.7: Multi-audience tokens MUST include `azp === expectedAudience`,
+  // and whenever `azp` is present it MUST match `expectedAudience`.
+  if (audIsArray && aud.length > 1) {
+    if (
+      typeof payload.azp !== 'string' ||
+      payload.azp !== opts.expectedAudience
+    ) {
+      return { ok: false, reason: 'INVALID_AZP' };
+    }
+  } else if (payload.azp !== undefined) {
+    if (
+      typeof payload.azp !== 'string' ||
+      payload.azp !== opts.expectedAudience
+    ) {
+      return { ok: false, reason: 'INVALID_AZP' };
+    }
+  }
+
+  if (payload.nbf !== undefined) {
+    if (
+      typeof payload.nbf !== 'number' ||
+      !Number.isFinite(payload.nbf) ||
+      payload.nbf * 1000 > now + 30_000
+    ) {
+      return { ok: false, reason: 'TOKEN_NOT_YET_VALID' };
+    }
   }
 
   const exp = typeof payload.exp === 'number' ? payload.exp : 0;
@@ -2056,7 +2203,8 @@ export async function completeGoogleOAuthCallback(
 
 /**
  * Bounded periodic cleanup of expired or long-consumed `oauth_states` rows for Cron / maintenance.
- * Backed by `idx_oauth_states_expires_at` (migration 0011).
+ * Split into two indexed queries (`idx_oauth_states_expires_at` + `idx_oauth_states_consumed_at`)
+ * so D1/SQLite avoids full-table scans on OR filters.
  */
 export async function pruneExpiredOAuthStatesBatched(
   db: D1DatabaseLike | undefined,
@@ -2078,12 +2226,31 @@ export async function pruneExpiredOAuthStatesBatched(
            SELECT state_hash
            FROM oauth_states
            WHERE expires_at <= ?
-              OR (consumed_at IS NOT NULL AND consumed_at <= ?)
            ORDER BY expires_at ASC
            LIMIT ?
          )`
       )
-      .bind(cutoff, cutoff, batchSize)
+      .bind(cutoff, batchSize)
+      .run();
+
+    const deleted = Number(res.meta?.changes ?? 0);
+    totalDeleted += deleted;
+    if (deleted < batchSize) break;
+  }
+
+  for (let i = 0; i < maxBatches; i++) {
+    const res = await db
+      .prepare(
+        `DELETE FROM oauth_states
+         WHERE state_hash IN (
+           SELECT state_hash
+           FROM oauth_states
+           WHERE consumed_at IS NOT NULL AND consumed_at <= ?
+           ORDER BY consumed_at ASC
+           LIMIT ?
+         )`
+      )
+      .bind(cutoff, batchSize)
       .run();
 
     const deleted = Number(res.meta?.changes ?? 0);

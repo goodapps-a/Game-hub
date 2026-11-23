@@ -900,3 +900,79 @@ export async function cancelGameInvite(
     message: 'دعوت بازی لغو شد.',
   };
 }
+
+/**
+ * Bounded periodic maintenance for `game_invites` (Cron Trigger + Express maintenance):
+ * 1) Marks overdue `pending` invites as `'expired'` using `idx_game_invites_status_expires_at` (0012)
+ *    so stale pending rows never pollute the partial UNIQUE index even for inactive users.
+ * 2) Prunes old terminal invites (`expired` / `declined` / `canceled` / `accepted`) older than
+ *    `retentionGraceMs` (default 7 days) using `idx_game_invites_status_updated_at` (0012).
+ */
+export async function pruneExpiredGameInvitesBatched(
+  db: D1DatabaseLike | undefined,
+  options?: { now?: number; retentionGraceMs?: number; batchSize?: number; maxBatches?: number }
+): Promise<{ expiredMarked: number; deletedHistorical: number }> {
+  if (!db) {
+    return { expiredMarked: 0, deletedHistorical: 0 };
+  }
+  const now = options?.now ?? Date.now();
+  const retentionGraceMs = Math.max(
+    60_000,
+    options?.retentionGraceMs ?? 7 * 24 * 60 * 60 * 1000
+  );
+  const cutoff = now - retentionGraceMs;
+  const batchSize = Math.max(10, Math.min(500, options?.batchSize ?? 200));
+  const maxBatches = Math.max(1, Math.min(20, options?.maxBatches ?? 5));
+
+  let expiredMarked = 0;
+  for (let i = 0; i < maxBatches; i++) {
+    const res = await db
+      .prepare(
+        `UPDATE game_invites
+         SET status = 'expired', updated_at = ?
+         WHERE invite_id IN (
+           SELECT invite_id
+           FROM game_invites
+           WHERE status = 'pending' AND expires_at <= ?
+           ORDER BY expires_at ASC
+           LIMIT ?
+         )`
+      )
+      .bind(now, now, batchSize)
+      .run();
+    const changed = Number(res.meta?.changes ?? 0);
+    expiredMarked += changed;
+    if (changed < batchSize) break;
+  }
+
+  let deletedHistorical = 0;
+  const terminalStatuses: readonly GameInviteStatus[] = [
+    'expired',
+    'declined',
+    'canceled',
+    'accepted',
+  ];
+  for (const terminalStatus of terminalStatuses) {
+    for (let i = 0; i < maxBatches; i++) {
+      const res = await db
+        .prepare(
+          `DELETE FROM game_invites
+           WHERE invite_id IN (
+             SELECT invite_id
+             FROM game_invites
+             WHERE status = ? AND updated_at <= ?
+             ORDER BY updated_at ASC
+             LIMIT ?
+           )`
+        )
+        .bind(terminalStatus, cutoff, batchSize)
+        .run();
+      const deleted = Number(res.meta?.changes ?? 0);
+      deletedHistorical += deleted;
+      if (deleted < batchSize) break;
+    }
+  }
+
+  return { expiredMarked, deletedHistorical };
+}
+

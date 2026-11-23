@@ -38,7 +38,11 @@ import {
   parseSessionCookieFromHeader,
 } from './lib/sessionCookie';
 import { parseAuthCookieFromHeader } from './lib/auth/authCookie';
-import { verifyAuthSession } from './lib/auth/authService';
+import {
+  pruneExpiredAuthSessionsBatched,
+  verifyAuthSession,
+} from './lib/auth/authService';
+import { pruneExpiredAuthTokensBatched } from './lib/auth/c2Service';
 import {
   buildSetGuestCookieHeader,
   parseGuestCookieFromHeader,
@@ -57,6 +61,7 @@ import {
   resolveClientIp,
 } from './lib/auth/securityPolicy';
 import { handleSocialHttpRequest } from './lib/social/httpHandler';
+import { pruneExpiredGameInvitesBatched } from './lib/social/inviteService';
 import { pruneExpiredPresenceSessionsBatched } from './lib/social/socialService';
 import { RoomInviteCheckSummary } from './lib/social/types';
 
@@ -938,6 +943,33 @@ export default {
       } catch (err) {
         console.error(
           '[Worker] Scheduled oauth-state cleanup failed:',
+          err instanceof Error ? err.message : 'unknown'
+        );
+      }
+
+      try {
+        await pruneExpiredAuthSessionsBatched(env.EYVAN_DB, { now });
+      } catch (err) {
+        console.error(
+          '[Worker] Scheduled auth-session cleanup failed:',
+          err instanceof Error ? err.message : 'unknown'
+        );
+      }
+
+      try {
+        await pruneExpiredAuthTokensBatched(env.EYVAN_DB, { now });
+      } catch (err) {
+        console.error(
+          '[Worker] Scheduled auth-token cleanup failed:',
+          err instanceof Error ? err.message : 'unknown'
+        );
+      }
+
+      try {
+        await pruneExpiredGameInvitesBatched(env.EYVAN_DB, { now });
+      } catch (err) {
+        console.error(
+          '[Worker] Scheduled game-invite cleanup failed:',
           err instanceof Error ? err.message : 'unknown'
         );
       }

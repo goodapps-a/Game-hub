@@ -356,16 +356,19 @@ export async function revokeGuestSessionsForUser(
 
 /**
  * Bounded periodic cleanup of expired/revoked `guest_sessions` rows for Cron / maintenance.
+ * Uses ordered indexed subqueries (`idx_guest_sessions_expires_at` + `idx_guest_sessions_revoked_at`)
+ * so D1/SQLite deletes deterministically without full-table scans.
  */
 export async function pruneExpiredGuestSessionsBatched(
   db: D1DatabaseLike | undefined,
-  options?: { now?: number; batchSize?: number; maxBatches?: number }
+  options?: { now?: number; graceMs?: number; batchSize?: number; maxBatches?: number }
 ): Promise<number> {
   if (!db) return 0;
   const now = options?.now ?? Date.now();
+  const graceMs = Math.max(60_000, options?.graceMs ?? 7 * 24 * 60 * 60 * 1000);
+  const revokedGraceCutoff = now - graceMs;
   const batchSize = Math.max(10, Math.min(500, options?.batchSize ?? 200));
   const maxBatches = Math.max(1, Math.min(20, options?.maxBatches ?? 5));
-  const revokedGraceCutoff = now - 7 * 24 * 60 * 60 * 1000;
   let totalDeleted = 0;
 
   for (let i = 0; i < maxBatches; i++) {
@@ -376,11 +379,31 @@ export async function pruneExpiredGuestSessionsBatched(
            SELECT guest_session_id
            FROM guest_sessions
            WHERE expires_at <= ?
-              OR (revoked_at IS NOT NULL AND revoked_at <= ?)
+           ORDER BY expires_at ASC
            LIMIT ?
          )`
       )
-      .bind(now, revokedGraceCutoff, batchSize)
+      .bind(now, batchSize)
+      .run();
+
+    const deleted = Number(res.meta?.changes ?? 0);
+    totalDeleted += deleted;
+    if (deleted < batchSize) break;
+  }
+
+  for (let i = 0; i < maxBatches; i++) {
+    const res = await db
+      .prepare(
+        `DELETE FROM guest_sessions
+         WHERE guest_session_id IN (
+           SELECT guest_session_id
+           FROM guest_sessions
+           WHERE revoked_at IS NOT NULL AND revoked_at <= ?
+           ORDER BY revoked_at ASC
+           LIMIT ?
+         )`
+      )
+      .bind(revokedGraceCutoff, batchSize)
       .run();
 
     const deleted = Number(res.meta?.changes ?? 0);
