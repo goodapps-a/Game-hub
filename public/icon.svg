@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="40" y1="24" x2="472" y2="488" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#13294B" />
+      <stop offset="55%" stop-color="#0B182E" />
+      <stop offset="100%" stop-color="#07101F" />
+    </linearGradient>
+    <radialGradient id="aura" cx="50%" cy="46%" r="48%">
+      <stop offset="0%" stop-color="#148A8A" stop-opacity="0.34" />
+      <stop offset="65%" stop-color="#0D8A8A" stop-opacity="0.08" />
+      <stop offset="100%" stop-color="#07101F" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="gold" x1="120" y1="88" x2="392" y2="424" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F6DE9B" />
+      <stop offset="52%" stop-color="#D9B15A" />
+      <stop offset="100%" stop-color="#B8872C" />
+    </linearGradient>
+    <linearGradient id="teal" x1="168" y1="152" x2="344" y2="392" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2CC5BE" />
+      <stop offset="100%" stop-color="#0D8A8A" />
+    </linearGradient>
+  </defs>
+
+  <!-- Minimal royal lapis rounded tile -->
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="url(#bg)" />
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="url(#aura)" />
+
+  <!-- Crisp hairline architectural inner border -->
+  <rect x="30" y="30" width="452" height="452" rx="88" stroke="url(#gold)" stroke-width="6" stroke-opacity="0.42" />
+
+  <!-- Minimalist Persian Pointed Iwan Arch -->
+  <path
+    d="M126 396V248C126 174 184 122 256 94C328 122 386 174 386 248V396"
+    stroke="url(#gold)"
+    stroke-width="20"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <!-- Inner Turquoise Arch Sanctuary -->
+  <path
+    d="M168 396V258C168 204 206 164 256 142C306 164 344 204 344 258V396Z"
+    fill="url(#teal)"
+    fill-opacity="0.16"
+    stroke="url(#teal)"
+    stroke-width="10"
+    stroke-linejoin="round"
+  />
+
+  <!-- Crisp Geometric Eight-Pointed Shamsa Emblem -->
+  <path
+    d="M256 196L275 237L320 244L287 275L295 320L256 298L217 320L225 275L192 244L237 237L256 196Z"
+    fill="url(#gold)"
+  />
+  <circle cx="256" cy="264" r="18" fill="#0B182E" />
+  <circle cx="256" cy="264" r="7" fill="#2CC5BE" />
+
+  <!-- Architectural Base Plinth -->
+  <line
+    x1="104"
+    y1="396"
+    x2="408"
+    y2="396"
+    stroke="url(#gold)"
+    stroke-width="14"
+    stroke-linecap="round"
+  />
+</svg>

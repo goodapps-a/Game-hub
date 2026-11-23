@@ -17,6 +17,7 @@ export const GAME_REGISTRY: readonly GameModuleDescriptor[] = [
     accentColor: '#D4AE58',
     bgTint: '#0D1C34',
     artworkSrc: PLATFORM_ASSETS.hokmHero,
+    lightArtworkSrc: PLATFORM_ASSETS.hokmHeroLight,
   },
   {
     id: 'chess',
@@ -29,6 +30,7 @@ export const GAME_REGISTRY: readonly GameModuleDescriptor[] = [
     accentColor: '#D4AE58',
     bgTint: '#101C32',
     artworkSrc: PLATFORM_ASSETS.chessArt,
+    lightArtworkSrc: PLATFORM_ASSETS.chessArtLight,
   },
   {
     id: 'backgammon',
@@ -41,6 +43,7 @@ export const GAME_REGISTRY: readonly GameModuleDescriptor[] = [
     accentColor: '#D4AE58',
     bgTint: '#101C32',
     artworkSrc: PLATFORM_ASSETS.backgammonArt,
+    lightArtworkSrc: PLATFORM_ASSETS.backgammonArtLight,
   },
   {
     id: 'ludo',
@@ -53,6 +56,7 @@ export const GAME_REGISTRY: readonly GameModuleDescriptor[] = [
     accentColor: '#19A2A2',
     bgTint: '#101C32',
     artworkSrc: PLATFORM_ASSETS.ludoArt,
+    lightArtworkSrc: PLATFORM_ASSETS.ludoArtLight,
   },
   {
     id: 'pasoor',
@@ -65,5 +69,6 @@ export const GAME_REGISTRY: readonly GameModuleDescriptor[] = [
     accentColor: '#19A2A2',
     bgTint: '#101C32',
     artworkSrc: PLATFORM_ASSETS.pasoorArt,
+    lightArtworkSrc: PLATFORM_ASSETS.pasoorArtLight,
   },
 ];

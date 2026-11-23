@@ -25,6 +25,7 @@ import {
   parseAuthCookieFromHeader,
 } from './authCookie';
 import {
+  checkEmailExists,
   checkUsernameAvailability,
   listActiveAuthSessions,
   listLinkedAuthProviders,
@@ -1076,6 +1077,64 @@ export async function handleAuthHttpRequest(
           ok: false,
           code: 'DATABASE_ERROR',
           message: 'خطا در بررسی نام کاربری روی سرور.',
+        },
+        503,
+        env.corsHeaders
+      );
+    }
+  }
+
+  // 10b) POST /api/auth/check-email — Unified Email-First flow lookup (login vs register)
+  if (pathname === '/api/auth/check-email' && method === 'POST') {
+    const csrfErr = verifyMutatingCsrf(request, env, true);
+    if (csrfErr) return csrfErr;
+
+    const parsedBody = await parseJsonObjectBody(request, env.corsHeaders);
+    if (parsedBody.ok === false) return parsedBody.response;
+
+    try {
+      const result = await checkEmailExists(env.db, parsedBody.data.email, {
+        clientIp: env.clientIp,
+        userAgent: env.userAgent,
+        now,
+      });
+
+      if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: result.code,
+            message: result.message,
+          },
+          result.status,
+          env.corsHeaders,
+          extra
+        );
+      }
+
+      return buildAuthResponse(
+        {
+          ok: true,
+          exists: result.exists,
+          email: result.email,
+        },
+        result.status,
+        env.corsHeaders
+      );
+    } catch (err) {
+      console.error(
+        '[Auth] /api/auth/check-email error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      return buildAuthResponse(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'خطا در بررسی ایمیل روی سرور.',
         },
         503,
         env.corsHeaders

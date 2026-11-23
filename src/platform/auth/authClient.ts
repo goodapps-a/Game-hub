@@ -360,6 +360,32 @@ export async function checkUsernameAvailabilityRequest(
   );
 }
 
+export interface EmailCheckResponse {
+  readonly ok: boolean;
+  readonly exists?: boolean;
+  readonly email?: string;
+  readonly code?: string;
+  readonly message?: string;
+}
+
+export async function checkEmailExistsRequest(
+  email: string
+): Promise<EmailCheckResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/auth/check-email'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'eyvan-client',
+    },
+    body: JSON.stringify({ email }),
+  });
+  return parseAuthJson<EmailCheckResponse>(
+    res,
+    'خطا در بررسی ایمیل روی سرور.'
+  );
+}
+
 export async function updateAccountProfileRequest(input: {
   username: string;
   avatarCode: string;

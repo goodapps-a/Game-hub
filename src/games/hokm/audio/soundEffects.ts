@@ -50,6 +50,7 @@ const SFX_URLS: Record<SfxKey, string> = {
 
 const DEAL_KEYS: readonly SfxKey[] = ['deal1', 'deal2', 'deal3', 'deal4'];
 const PLAY_KEYS: readonly SfxKey[] = ['play1', 'play2', 'play3'];
+const MASTER_SFX_GAIN = 0.22; // Balanced, non-fatiguing loudness aligned with soft ambient BGM
 
 class HokmSoundEngine {
   private ctx: AudioContext | null = null;
@@ -66,12 +67,12 @@ class HokmSoundEngine {
     if (typeof window !== 'undefined') {
       const unlock = () => {
         this.hasUserGesture = true;
+        window.removeEventListener('pointerdown', unlock);
+        window.removeEventListener('keydown', unlock);
+        window.removeEventListener('touchstart', unlock);
         const ctx = this.ensureContext();
-        if (ctx) {
-          if (ctx.state === 'suspended') {
-            ctx.resume().catch(() => {});
-          }
-          this.preloadAll();
+        if (ctx && ctx.state === 'suspended') {
+          ctx.resume().catch(() => {});
         }
       };
       window.addEventListener('pointerdown', unlock, { passive: true });
@@ -198,7 +199,7 @@ class HokmSoundEngine {
         const jitter =
           pitchJitter > 0 ? (Math.random() * 2 - 1) * pitchJitter : 0;
         source.playbackRate.value = Math.max(0.5, baseRate + jitter);
-        gain.gain.value = volume;
+        gain.gain.value = Math.max(0, Math.min(1, volume * MASTER_SFX_GAIN));
         source.connect(gain);
         gain.connect(ctx.destination);
         source.start(delaySec > 0 ? ctx.currentTime + delaySec : 0);

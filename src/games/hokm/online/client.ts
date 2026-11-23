@@ -131,6 +131,7 @@ export async function createOnlineRoom(params: {
   username: string;
   avatarCode: string;
   targetMatchScore?: number;
+  isPublic?: boolean;
 }): Promise<CreateRoomResponse> {
   const res = await fetch(buildOnlineHttpUrl('/api/rooms'), {
     method: 'POST',
@@ -146,6 +147,35 @@ export async function createOnlineRoom(params: {
   >(res, 'ساخت اتاق ناموفق بود.');
   if (!res.ok) {
     throw new Error(data.message ?? data.error ?? 'ساخت اتاق ناموفق بود.');
+  }
+  return data;
+}
+
+export async function quickMatchOnlineRoom(params: {
+  username: string;
+  avatarCode: string;
+  targetMatchScore?: number;
+}): Promise<CreateRoomResponse & { matchedExisting?: boolean }> {
+  const res = await fetch(buildOnlineHttpUrl('/api/rooms/quick-match'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'eyvan-client',
+    },
+    body: JSON.stringify(params),
+  });
+  const data = await parseApiJson<
+    CreateRoomResponse & {
+      matchedExisting?: boolean;
+      error?: string;
+      message?: string;
+    }
+  >(res, 'جستجوی میز تصادفی ناموفق بود.');
+  if (!res.ok) {
+    throw new Error(
+      data.message ?? data.error ?? 'جستجوی میز تصادفی ناموفق بود.'
+    );
   }
   return data;
 }
@@ -319,6 +349,36 @@ export async function fetchMyOnlineStats(): Promise<PlayerOnlineStats | null> {
     return data.stats ?? null;
   } catch {
     return null;
+  }
+}
+
+export interface HokmLeaderboardRow {
+  readonly userId: string;
+  readonly username: string;
+  readonly avatarCode: string;
+  readonly matchesPlayed: number;
+  readonly wins: number;
+  readonly losses: number;
+  readonly kotWins: number;
+  readonly hakemKotWins: number;
+  readonly lastPlayedAt: number | null;
+}
+
+export async function fetchHokmLeaderboard(
+  limit = 20
+): Promise<HokmLeaderboardRow[]> {
+  try {
+    const res = await fetch(
+      buildOnlineHttpUrl(`/api/leaderboard/hokm?limit=${Math.max(1, Math.min(50, limit))}`)
+    );
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      ok?: boolean;
+      entries?: HokmLeaderboardRow[];
+    };
+    return Array.isArray(data.entries) ? data.entries : [];
+  } catch {
+    return [];
   }
 }
 

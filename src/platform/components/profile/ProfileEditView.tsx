@@ -13,7 +13,6 @@ import {
 import { validateUsernameFormat } from '../../data/guestDefaults';
 import { UserProfile } from '../../types/platform';
 import {
-  PROFILE_AVATAR_OPTIONS,
   applyLocalProfileEdit,
   applyServerProfileUpdate,
   normalizeAvatarCode,
@@ -332,10 +331,6 @@ export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
           }`}
         />
 
-        <p className="text-[11px] theme-muted leading-relaxed">
-          ۳ تا ۲۰ کاراکتر شامل حروف انگلیسی، عدد، نقطه یا زیرخط (شناسه ثابت حساب با تغییر نام عوض نمی‌شود).
-        </p>
-
         {formatError && (
           <div
             role="alert"
@@ -387,55 +382,6 @@ export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
             <span>{serverCheck.message}</span>
           </div>
         )}
-      </section>
-
-      {/* Avatar Picker */}
-      <section className="space-y-2">
-        <div className="text-xs font-extrabold theme-heading">
-          انتخاب تصویر یا نشان پروفایل
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          {PROFILE_AVATAR_OPTIONS.map((opt) => {
-            const selected = draftAvatar === opt.code;
-            return (
-              <button
-                key={opt.code}
-                type="button"
-                disabled={saving}
-                data-avatar-option={opt.code}
-                onClick={() => {
-                  setDraftAvatar(opt.code);
-                  setSubmitError(null);
-                  setSavedNotice(null);
-                }}
-                className={`min-h-[54px] px-3 py-2 rounded-xl border text-right flex items-center justify-between gap-2 cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--eyvan-teal)] ${
-                  selected
-                    ? 'bg-[#0D8A8A]/14 border-[var(--eyvan-teal)]'
-                    : 'theme-subcard hover:bg-black/5'
-                }`}
-              >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <ProfileAvatar
-                    avatarCode={opt.code}
-                    username={cleanedDraft || profile.username}
-                    size="sm"
-                  />
-                  <div className="min-w-0">
-                    <div className="text-xs font-bold theme-heading truncate">
-                      {opt.label}
-                    </div>
-                    <div className="text-[10px] theme-muted truncate">
-                      {opt.caption}
-                    </div>
-                  </div>
-                </div>
-                {selected && (
-                  <Check className="w-4 h-4 theme-accent-teal shrink-0" />
-                )}
-              </button>
-            );
-          })}
-        </div>
       </section>
 
       {/* Save / Error Feedback */}

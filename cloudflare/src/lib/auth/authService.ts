@@ -53,6 +53,7 @@ import {
 } from './rateLimit';
 import {
   validateAuthUsername,
+  validateEmail,
   validateLoginPayload,
   validateProfileUpdatePayload,
   validateRegisterPayload,
@@ -865,6 +866,78 @@ export async function checkUsernameAvailability(
     available: false,
     reason: 'taken',
     message: 'این نام کاربری قبلاً در سرور ثبت شده است.',
+  };
+}
+
+export type EmailCheckResponseResult =
+  | {
+      readonly ok: true;
+      readonly status: number;
+      readonly exists: boolean;
+      readonly email: string;
+    }
+  | {
+      readonly ok: false;
+      readonly status: number;
+      readonly code: 'INVALID_INPUT' | 'RATE_LIMITED';
+      readonly message: string;
+      readonly retryAfterSec?: number;
+    };
+
+/**
+ * Checks whether an email address already exists in `users.email_key` to power the
+ * unified Email-First auth flow (automatic routing to Password Login vs Registration).
+ * Protected with strict email validation, parameterized SQL, and IP rate limiting.
+ */
+export async function checkEmailExists(
+  db: D1DatabaseLike,
+  rawEmail: unknown,
+  ctx: AuthRequestContext
+): Promise<EmailCheckResponseResult> {
+  const now = ctx.now ?? Date.now();
+  const ipHash = await sha256Hex(`ip:${ctx.clientIp || 'unknown'}`);
+  const rl = await consumeRateLimitSlot(
+    db,
+    `email_check:ip:${ipHash}`,
+    USERNAME_CHECK_IP_RATE_LIMIT,
+    now
+  );
+  if (!rl.allowed) {
+    return {
+      ok: false,
+      status: 429,
+      code: 'RATE_LIMITED',
+      message: 'تعداد درخواست‌ها بیش از حد مجاز است. لطفاً کمی صبر کنید.',
+      retryAfterSec: rl.retryAfterSec,
+    };
+  }
+
+  const validated = validateEmail(rawEmail);
+  if (validated.ok === false) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'INVALID_INPUT',
+      message: validated.message,
+    };
+  }
+
+  const existing = await db
+    .prepare(
+      `SELECT user_id
+       FROM users
+       WHERE email_key = ?
+         AND account_status != 'deleted'
+       LIMIT 1`
+    )
+    .bind(validated.emailKey)
+    .first<{ user_id: string }>();
+
+  return {
+    ok: true,
+    status: 200,
+    exists: Boolean(existing),
+    email: validated.email,
   };
 }
 

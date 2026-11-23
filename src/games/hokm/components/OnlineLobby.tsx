@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import {
-  ArrowRight,
+  ArrowLeft,
   Check,
   CheckCircle2,
   Clock,
@@ -706,22 +706,22 @@ export const OnlineLobby: React.FC<OnlineLobbyProps> = ({
       <div className="relative z-10 w-full max-w-3xl mx-auto px-4 sm:px-6 py-5 sm:py-8 flex flex-col gap-5">
         {/* Top Bar */}
         <header className="flex items-center justify-between gap-3">
-          <button
-            type="button"
-            onClick={onBackToGames}
-            data-testid="lobby-back-games-btn"
-            className="min-h-[42px] px-3.5 rounded-xl bg-white/10 hover:bg-white/16 border border-[#D4AE58]/40 text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors"
-          >
-            <ArrowRight className="w-4 h-4" />
-            <span>بازگشت به بازی‌ها</span>
-          </button>
-
           <div className="flex items-center gap-2">
             <Crown className="w-5 h-5 text-[#F3D179]" />
             <h1 className="text-lg sm:text-xl font-black text-[#F3D179]">
               حکم ایوان
             </h1>
           </div>
+
+          <button
+            type="button"
+            onClick={onBackToGames}
+            data-testid="lobby-back-games-btn"
+            className="min-h-[42px] px-3.5 rounded-xl bg-white/10 hover:bg-white/16 border border-[#D4AE58]/40 text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors"
+          >
+            <span>بازگشت</span>
+            <ArrowLeft className="w-4 h-4 shrink-0" />
+          </button>
         </header>
 
         {/* Player Identity Strip (Central Verified Account or Guest Username + Avatar) */}

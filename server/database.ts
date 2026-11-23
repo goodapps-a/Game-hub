@@ -474,6 +474,62 @@ export class EyvanDatabase {
     };
   }
 
+  public getHokmLeaderboard(limit = 20): Array<{
+    userId: string;
+    username: string;
+    avatarCode: string;
+    matchesPlayed: number;
+    wins: number;
+    losses: number;
+    kotWins: number;
+    hakemKotWins: number;
+    lastPlayedAt: number | null;
+  }> {
+    const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+    const rows = this.db
+      .prepare(
+        `SELECT
+           u.user_id,
+           u.username,
+           u.avatar_code,
+           s.matches_played,
+           s.wins,
+           s.losses,
+           s.kot_wins,
+           s.hakem_kot_wins,
+           s.last_played_at
+         FROM user_game_stats s
+         INNER JOIN users u ON u.user_id = s.user_id
+         WHERE s.matches_played > 0
+           AND u.account_status != 'suspended'
+         ORDER BY s.wins DESC, (s.kot_wins * 2 + s.hakem_kot_wins * 3) DESC, s.matches_played DESC, s.last_played_at DESC
+         LIMIT ?`
+      )
+      .all(safeLimit) as Array<{
+      user_id: string;
+      username: string;
+      avatar_code: string | null;
+      matches_played: number;
+      wins: number;
+      losses: number;
+      kot_wins: number;
+      hakem_kot_wins: number;
+      last_played_at: number | null;
+    }>;
+
+    return rows.map((row) => ({
+      userId: row.user_id,
+      username: row.username,
+      avatarCode: row.avatar_code ?? 'portrait',
+      matchesPlayed: row.matches_played,
+      wins: row.wins,
+      losses: row.losses,
+      kotWins: row.kot_wins,
+      hakemKotWins: row.hakem_kot_wins,
+      lastPlayedAt: row.last_played_at,
+    }));
+  }
+
   public getD1Adapter(): D1DatabaseLike {
     return this.d1Adapter;
   }

@@ -79,6 +79,7 @@ export interface ExecutionContextLike {
 
 export interface CfWorkerEnv {
   HOKM_ROOM: DurableObjectNamespaceLike;
+  CHAT_CONVERSATION?: DurableObjectNamespaceLike;
   EYVAN_DB: D1DatabaseLike;
   EYVAN_ASSETS: R2BucketLike;
   DISCONNECT_GRACE_MS?: string;

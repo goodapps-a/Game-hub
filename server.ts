@@ -9,14 +9,20 @@ import {
   MAX_WS_PAYLOAD_BYTES,
 } from './src/games/hokm/online/protocol';
 import { parseSessionCookieFromHeader } from './cloudflare/src/lib/sessionCookie';
-import { pruneExpiredAuthSessionsBatched } from './cloudflare/src/lib/auth/authService';
+import { parseAuthCookieFromHeader } from './cloudflare/src/lib/auth/authCookie';
+import {
+  pruneExpiredAuthSessionsBatched,
+  verifyAuthSession,
+} from './cloudflare/src/lib/auth/authService';
 import { pruneExpiredAuthTokensBatched } from './cloudflare/src/lib/auth/c2Service';
 import { pruneExpiredOAuthStatesBatched } from './cloudflare/src/lib/auth/googleOAuthService';
 import { pruneExpiredGuestSessionsBatched } from './cloudflare/src/lib/auth/guestSession';
 import { pruneExpiredRateLimitsBatched } from './cloudflare/src/lib/auth/rateLimit';
+import { authorizeConversationRealtimeAccess } from './cloudflare/src/lib/social/chatService';
 import { pruneExpiredGameInvitesBatched } from './cloudflare/src/lib/social/inviteService';
 import { pruneExpiredPresenceSessionsBatched } from './cloudflare/src/lib/social/socialService';
 import { validateProductionAuthConfig } from './cloudflare/src/lib/auth/securityPolicy';
+import { ExpressChatRealtimeHub } from './server/chatRealtimeHub';
 import { createEyvanExpressApp } from './server/createExpressApp';
 import { EyvanDatabase } from './server/database';
 import { HokmRoomManager } from './server/roomManager';
@@ -35,6 +41,7 @@ const DISCONNECT_GRACE_MS =
   Number(process.env.DISCONNECT_GRACE_MS) || DEFAULT_DISCONNECT_GRACE_MS;
 
 const WS_ROOM_PATH_RE = /^\/ws\/rooms\/([A-Za-z0-9]{4,8})$/;
+const WS_CHAT_PATH_RE = /^\/ws\/social\/chat\/(cnv_[a-zA-Z0-9_-]{8,64})$/;
 
 async function startServer() {
   const db = new EyvanDatabase(DB_PATH);
@@ -42,10 +49,12 @@ async function startServer() {
     db,
     disconnectGraceMs: DISCONNECT_GRACE_MS,
   });
+  const chatRealtimeHub = new ExpressChatRealtimeHub();
 
   const { app, isRequestOriginAllowed } = createEyvanExpressApp({
     db,
     roomManager,
+    chatRealtimePublisher: chatRealtimeHub,
     config: {
       isProduction: IS_PROD,
       allowedOrigins: process.env.ALLOWED_ORIGINS,
@@ -123,46 +132,99 @@ async function startServer() {
       return;
     }
 
-    const match = WS_ROOM_PATH_RE.exec(pathname);
-    if (!match) {
-      socket.destroy();
-      return;
-    }
+    const roomMatch = WS_ROOM_PATH_RE.exec(pathname);
+    if (roomMatch) {
+      if (!isRequestOriginAllowed(request)) {
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+      }
 
-    if (!isRequestOriginAllowed(request)) {
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
+      const roomCode = roomMatch[1].toUpperCase();
+      const parsedCookie = parseSessionCookieFromHeader(request.headers.cookie);
+      if (!parsedCookie || parsedCookie.roomCode !== roomCode) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
 
-    const roomCode = match[1].toUpperCase();
-    const parsedCookie = parseSessionCookieFromHeader(request.headers.cookie);
-    if (!parsedCookie || parsedCookie.roomCode !== roomCode) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    const verified = roomManager.resumeSession(
-      roomCode,
-      parsedCookie.playerId,
-      parsedCookie.sessionToken
-    );
-    if (verified.ok === false) {
-      const code = verified.status === 404 ? '404 Not Found' : '401 Unauthorized';
-      socket.write(`HTTP/1.1 ${code}\r\n\r\n`);
-      socket.destroy();
-      return;
-    }
-
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      roomManager.attachAuthenticatedWebSocket(
+      const verified = roomManager.resumeSession(
         roomCode,
         parsedCookie.playerId,
-        parsedCookie.sessionToken,
-        ws
+        parsedCookie.sessionToken
       );
-    });
+      if (verified.ok === false) {
+        const code = verified.status === 404 ? '404 Not Found' : '401 Unauthorized';
+        socket.write(`HTTP/1.1 ${code}\r\n\r\n`);
+        socket.destroy();
+        return;
+      }
+
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        roomManager.attachAuthenticatedWebSocket(
+          roomCode,
+          parsedCookie.playerId,
+          parsedCookie.sessionToken,
+          ws
+        );
+      });
+      return;
+    }
+
+    const chatMatch = WS_CHAT_PATH_RE.exec(pathname);
+    if (chatMatch) {
+      if (!isRequestOriginAllowed(request)) {
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      const conversationId = chatMatch[1];
+      const rawAuthToken = parseAuthCookieFromHeader(request.headers.cookie);
+      if (!rawAuthToken) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      void (async () => {
+        try {
+          const d1 = db.getD1Adapter();
+          const verified = await verifyAuthSession(d1, rawAuthToken);
+          if (!verified.authenticated || !verified.user || !verified.session) {
+            socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+            socket.destroy();
+            return;
+          }
+          const access = await authorizeConversationRealtimeAccess(
+            d1,
+            conversationId,
+            verified.user.userId
+          );
+          if (access.ok === false) {
+            const statusText =
+              access.status === 400 ? '400 Bad Request' : '403 Forbidden';
+            socket.write(`HTTP/1.1 ${statusText}\r\n\r\n`);
+            socket.destroy();
+            return;
+          }
+          wss.handleUpgrade(request, socket, head, (ws) => {
+            chatRealtimeHub.attachSocket({
+              ws,
+              userId: verified.user!.userId,
+              authSessionId: verified.session!.sessionId,
+              conversationId,
+            });
+          });
+        } catch {
+          socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+          socket.destroy();
+        }
+      })();
+      return;
+    }
+
+    socket.destroy();
   });
 
   // Low-cost periodic cleanup of expired auth_rate_limits & user_presence_sessions (mirrors Worker Cron Trigger)
@@ -222,6 +284,7 @@ async function startServer() {
 
   const shutdown = () => {
     clearInterval(maintenanceCleanupTimer);
+    chatRealtimeHub.dispose();
     roomManager.dispose();
     db.close();
     httpServer.close(() => process.exit(0));

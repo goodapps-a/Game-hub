@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, PackageOpen, Sparkles } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ChevronLeft, Lock, PackageOpen, Sparkles } from 'lucide-react';
 import { SHOP_ITEMS_DEMO, SHOP_SECTIONS } from '../data/shopCatalog';
 import { toPersianDigits } from '../theme/tokens';
 import { ShopItem } from '../types/platform';
@@ -16,14 +16,38 @@ import { ShopProductDetails } from '../components/shop/ShopProductDetails';
 interface ShopPageProps {
   userCoins: number;
   userGems: number;
+  isAuthenticated?: boolean;
+  ownedItemIds?: readonly string[];
+  equippedTableSkinId?: string;
+  equippedBannerCode?: string;
+  onPurchaseItem?: (item: ShopItem) => void;
+  onEquipItem?: (item: ShopItem) => void;
+  onRequireAuth?: () => void;
+  initialCategory?: ShopCategoryFilter;
+  onBack?: () => void;
 }
 
-export const ShopPage: React.FC<ShopPageProps> = ({ userCoins, userGems }) => {
+export const ShopPage: React.FC<ShopPageProps> = ({
+  userCoins,
+  userGems,
+  isAuthenticated = false,
+  ownedItemIds = [],
+  equippedTableSkinId = 'tt-traditional',
+  equippedBannerCode = 'royal',
+  onPurchaseItem,
+  onEquipItem,
+  onRequireAuth,
+  initialCategory = 'all',
+  onBack,
+}) => {
   const [activeCategory, setActiveCategory] =
-    useState<ShopCategoryFilter>('all');
+    useState<ShopCategoryFilter>(initialCategory);
   const [selectedItem, setSelectedItem] = useState<ShopItem | null>(null);
-  const savedScrollYRef = useRef<number>(0);
-  const pendingRestoreScrollRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setActiveCategory(initialCategory);
+    setSelectedItem(null);
+  }, [initialCategory]);
 
   const activeSectionMeta = useMemo(
     () =>
@@ -43,65 +67,73 @@ export const ShopPage: React.FC<ShopPageProps> = ({ userCoins, userGems }) => {
     [activeCategory]
   );
 
-  // Restore exact previous scroll position cleanly after leaving Product Details
-  useEffect(() => {
-    if (selectedItem === null && pendingRestoreScrollRef.current !== null) {
-      const targetY = pendingRestoreScrollRef.current;
-      pendingRestoreScrollRef.current = null;
-      window.requestAnimationFrame(() => {
-        window.scrollTo({ top: targetY, behavior: 'auto' });
-      });
-    }
-  }, [selectedItem]);
-
   const handleOpenProduct = (item: ShopItem) => {
-    if (typeof window !== 'undefined') {
-      savedScrollYRef.current = window.scrollY;
-    }
     setSelectedItem(item);
-    if (typeof window !== 'undefined') {
-      window.requestAnimationFrame(() => {
-        window.scrollTo({ top: 0, behavior: 'auto' });
-      });
-    }
   };
 
   const handleCloseProduct = () => {
-    pendingRestoreScrollRef.current = savedScrollYRef.current;
     setSelectedItem(null);
   };
 
-  if (selectedItem) {
-    const itemSection = SHOP_SECTIONS.find(
-      (s) => s.id === selectedItem.section
-    );
-    return (
-      <div className="space-y-4 sm:space-y-5 max-w-5xl mx-auto" data-testid="shop-page">
-        <ShopHeader
-          userCoins={userCoins}
-          userGems={userGems}
-          activeCategoryTitle={itemSection?.title ?? 'فروشگاه ایوان'}
-          activeCategorySubtitle="مشخصات کامل و پیش‌نمایش آیتم"
-        />
-        <ShopProductDetails
-          item={selectedItem}
-          sectionMeta={itemSection}
-          userCoins={userCoins}
-          userGems={userGems}
-          onBack={handleCloseProduct}
-        />
-      </div>
-    );
-  }
+  const selectedItemSection = selectedItem
+    ? SHOP_SECTIONS.find((s) => s.id === selectedItem.section)
+    : undefined;
 
   return (
-    <div className="space-y-4 sm:space-y-5 max-w-5xl mx-auto" data-testid="shop-page">
+    <div
+      className="space-y-4 sm:space-y-5 max-w-5xl mx-auto"
+      data-testid="shop-page"
+    >
       <ShopHeader
         userCoins={userCoins}
         userGems={userGems}
         activeCategoryTitle={activeSectionMeta?.title ?? null}
         activeCategorySubtitle={activeSectionMeta?.subtitle ?? null}
+        onBack={onBack}
       />
+
+      {/* Guest Purchase Info Bar */}
+      {!isAuthenticated && onRequireAuth && (
+        <div
+          data-testid="shop-guest-banner"
+          className="eyvan-card rounded-2xl px-4 py-3 border-[var(--eyvan-gold-border)] flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-9 h-9 rounded-xl bg-[var(--eyvan-gold)]/15 border border-[var(--eyvan-gold-border)] flex items-center justify-center shrink-0">
+              <Lock className="w-4 h-4 theme-accent-gold" />
+            </span>
+            <p className="text-xs font-bold theme-heading leading-relaxed">
+              برای خرید آیتم‌ها، پوسته‌های میز حکم و بنرهای پروفایل وارد حساب خود شوید.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onRequireAuth}
+            data-testid="shop-banner-auth-btn"
+            className="min-h-[38px] px-4 rounded-xl bg-gradient-to-b from-[#F5D98E] to-[#C89634] hover:brightness-105 text-[#0B1628] text-xs font-black whitespace-nowrap shrink-0 cursor-pointer transition-all"
+          >
+            ورود
+          </button>
+        </div>
+      )}
+
+      {/* Floating Compact Product Modal Overlay */}
+      {selectedItem && (
+        <ShopProductDetails
+          item={selectedItem}
+          sectionMeta={selectedItemSection}
+          userCoins={userCoins}
+          userGems={userGems}
+          isAuthenticated={isAuthenticated}
+          ownedItemIds={ownedItemIds}
+          equippedTableSkinId={equippedTableSkinId}
+          equippedBannerCode={equippedBannerCode}
+          onPurchaseItem={onPurchaseItem}
+          onEquipItem={onEquipItem}
+          onRequireAuth={onRequireAuth}
+          onBack={handleCloseProduct}
+        />
+      )}
 
       {/* 1-Tap Category Switcher */}
       <ShopCategories
@@ -112,7 +144,7 @@ export const ShopPage: React.FC<ShopPageProps> = ({ userCoins, userGems }) => {
 
       {activeCategory === 'all' ? (
         <div className="space-y-6">
-          {/* Featured Highlight Section (پیشنهادهای ویژه امروز) */}
+          {/* Featured Highlight Section */}
           {featuredItems.length > 0 && (
             <section
               data-shop-section="daily_deals"

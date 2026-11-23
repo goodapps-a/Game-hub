@@ -371,20 +371,34 @@ export function collectCompletedTrick(state: HokmState): HokmState {
 }
 
 /**
+ * Authentic Iranian Hokm Hakem continuity rule:
+ * - If the Hakem's team wins the hand, the same player remains Hakem.
+ * - If the Hakem's team loses the hand, Hakem passes counter-clockwise to the next player.
+ */
+export function resolveNextHakem(state: HokmState): Seat {
+  if (!state.handOutcome) return state.hakem;
+  const hakemTeam = getTeamForSeat(state.hakem);
+  return state.handOutcome.winningTeam === hakemTeam
+    ? state.hakem
+    : getNextSeat(state.hakem);
+}
+
+/**
  * Starts the next hand in an ongoing match (preserves matchScores and increments handNumber).
- * Hakem is NOT arbitrarily rotated; caller supplies the configured Hakem (defaulting to current state.hakem).
+ * Defaults to authentic Iranian Hokm Hakem rotation via `resolveNextHakem(state)`.
  */
 export function startNextHand(
   state: HokmState,
   hakemForNextHand?: Seat,
   rng: RandomFn = Math.random
 ): HokmState {
+  const nextHakem = hakemForNextHand ?? resolveNextHakem(state);
   const nextState: HokmState = {
     ...state,
     handNumber: state.handNumber + 1,
     handOutcome: null,
   };
-  return startShufflingHand(nextState, hakemForNextHand ?? state.hakem, rng);
+  return startShufflingHand(nextState, nextHakem, rng);
 }
 
 /**

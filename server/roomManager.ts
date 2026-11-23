@@ -38,6 +38,8 @@ interface ManagedRoom {
   nextHandTimer: ReturnType<typeof setTimeout> | null;
   closedAt: number | null;
   createdAt: number;
+  isPublic: boolean;
+  targetMatchScore: number;
 }
 
 interface SocketRateState {
@@ -248,6 +250,7 @@ export class HokmRoomManager {
     userId?: string | null;
     avatarCode?: unknown;
     targetMatchScore?: unknown;
+    isPublic?: boolean;
   }):
     | { ok: true; response: CreateRoomResponse; sessionToken: string }
     | { ok: false; status: number; code: OnlineErrorCode; message: string } {
@@ -310,6 +313,8 @@ export class HokmRoomManager {
       nextHandTimer: null,
       closedAt: null,
       createdAt: Date.now(),
+      isPublic: Boolean(input.isPublic),
+      targetMatchScore: rawTarget,
     };
     this.rooms.set(roomCode, managed);
 
@@ -333,6 +338,84 @@ export class HokmRoomManager {
         canonicalSeat: joinRes.member.canonicalSeat,
         wsPath: `/ws/rooms/${roomCode}`,
       },
+    };
+  }
+
+  /**
+   * Quick-match for random opponents:
+   * Joins the oldest open public WAITING room with matching targetMatchScore and available seats,
+   * or creates a new public room automatically if none is currently open.
+   */
+  public quickMatchRoom(input: {
+    username: unknown;
+    userId?: string | null;
+    avatarCode?: unknown;
+    targetMatchScore?: unknown;
+  }):
+    | { ok: true; matchedExisting: boolean; response: CreateRoomResponse; sessionToken: string }
+    | { ok: false; status: number; code: OnlineErrorCode; message: string } {
+    const username = sanitizeUsername(input.username);
+    if (!username) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'INVALID_MESSAGE',
+        message: 'نام کاربری نامعتبر است (۳ تا ۲۰ کاراکتر انگلیسی، عدد یا _).',
+      };
+    }
+
+    const desiredTarget =
+      typeof input.targetMatchScore === 'number' &&
+      Number.isInteger(input.targetMatchScore) &&
+      input.targetMatchScore >= 1 &&
+      input.targetMatchScore <= 7
+        ? input.targetMatchScore
+        : 3;
+
+    const candidates = Array.from(this.rooms.entries())
+      .filter(([, managed]) => {
+        if (!managed.isPublic || managed.closedAt !== null) return false;
+        if (managed.targetMatchScore !== desiredTarget) return false;
+        const summary = managed.controller.getPublicSummary();
+        return (
+          summary.status === 'WAITING' &&
+          summary.playerCount > 0 &&
+          summary.playerCount < summary.maxPlayers
+        );
+      })
+      .sort((a, b) => a[1].createdAt - b[1].createdAt);
+
+    for (const [code] of candidates) {
+      const joined = this.joinRoom(code, {
+        username,
+        userId: input.userId ?? null,
+        avatarCode: input.avatarCode,
+      });
+      if (joined.ok) {
+        return {
+          ok: true,
+          matchedExisting: true,
+          sessionToken: joined.sessionToken,
+          response: joined.response,
+        };
+      }
+    }
+
+    const created = this.createRoom({
+      username,
+      userId: input.userId ?? null,
+      avatarCode: input.avatarCode,
+      targetMatchScore: desiredTarget,
+      isPublic: true,
+    });
+    if (created.ok === false) {
+      return created;
+    }
+    return {
+      ok: true,
+      matchedExisting: false,
+      sessionToken: created.sessionToken,
+      response: created.response,
     };
   }
 

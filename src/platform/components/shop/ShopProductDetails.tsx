@@ -1,8 +1,8 @@
 import React, { useEffect } from 'react';
-import { ArrowRight, Check, Info, Lock } from 'lucide-react';
+import { Check, Lock, Sparkles, UserPlus, X } from 'lucide-react';
 import { toPersianDigits } from '../../theme/tokens';
 import { ShopItem, ShopSectionMeta } from '../../types/platform';
-import { SHOP_RARITY_META, getShopItemAvailability } from '../../utils/shopHelpers';
+import { SHOP_RARITY_META } from '../../utils/shopHelpers';
 import { GoldCoinSvg, PurpleGemSvg } from '../TopBar';
 import { ShopItemArtwork } from './ShopItemArtwork';
 
@@ -11,24 +11,53 @@ interface ShopProductDetailsProps {
   sectionMeta: ShopSectionMeta | undefined;
   userCoins: number;
   userGems: number;
+  isAuthenticated?: boolean;
+  ownedItemIds?: readonly string[];
+  equippedTableSkinId?: string;
+  equippedBannerCode?: string;
+  onPurchaseItem?: (item: ShopItem) => void;
+  onEquipItem?: (item: ShopItem) => void;
+  onRequireAuth?: () => void;
   onBack: () => void;
 }
 
+const BANNER_ID_TO_CODE: Record<string, 'royal' | 'garden' | 'ruby'> = {
+  'af-banner-royal': 'royal',
+  'af-banner-garden': 'garden',
+  'af-banner-ruby': 'ruby',
+};
+
 /**
- * Full Product Detail View (PDP): shows large artwork, description, rarity,
- * real wallet comparison, honest server availability notice (zero fake purchase),
- * and predictable Back action that preserves category & scroll position.
+ * Compact Floating Shop Product Modal (NOT full-screen).
+ * Displays concise artwork, rarity, brief description, price, and instant Buy / Equip actions.
  */
 export const ShopProductDetails: React.FC<ShopProductDetailsProps> = ({
   item,
   sectionMeta,
   userCoins,
   userGems,
+  isAuthenticated = false,
+  ownedItemIds = [],
+  equippedTableSkinId = 'tt-traditional',
+  equippedBannerCode = 'royal',
+  onPurchaseItem,
+  onEquipItem,
+  onRequireAuth,
   onBack,
 }) => {
   const rarity = SHOP_RARITY_META[item.rarity];
-  const availability = getShopItemAvailability(item, userCoins, userGems, false);
+  const isOwned = Boolean(item.isDefaultOwned || ownedItemIds.includes(item.id));
   const currentBalance = item.currency === 'gems' ? userGems : userCoins;
+  const canAfford = currentBalance >= item.price;
+  const currencyLabel = item.currency === 'gems' ? 'الماس' : 'سکه';
+
+  const isTableTheme = item.section === 'table_themes';
+  const bannerCodeForItem = BANNER_ID_TO_CODE[item.id];
+  const isEquipped = isTableTheme
+    ? equippedTableSkinId === item.id
+    : bannerCodeForItem
+      ? equippedBannerCode === bannerCodeForItem
+      : false;
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -41,156 +70,164 @@ export const ShopProductDetails: React.FC<ShopProductDetailsProps> = ({
   }, [onBack]);
 
   return (
-    <section
+    <div
+      role="dialog"
+      aria-modal="true"
       aria-label={`جزئیات ${item.name}`}
       data-testid="shop-product-details"
-      className="space-y-4"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/68 backdrop-blur-sm"
+      onClick={onBack}
     >
-      {/* Top Return Bar */}
-      <div className="flex items-center justify-between gap-3">
-        <button
-          type="button"
-          onClick={onBack}
-          data-testid="shop-detail-back-btn"
-          className="min-h-[44px] px-3.5 py-2 rounded-xl theme-btn-secondary border text-xs sm:text-sm font-extrabold inline-flex items-center gap-2 cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--eyvan-teal)]"
-        >
-          <ArrowRight className="w-4 h-4 shrink-0" />
-          <span>بازگشت به فروشگاه</span>
-        </button>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="relative w-full max-w-[388px] rounded-[24px] theme-drawer border border-[var(--eyvan-gold-border)] shadow-[0_24px_64px_rgba(0,0,0,0.58)] overflow-hidden"
+      >
+        {/* Top Compact Artwork Header */}
+        <div className="relative">
+          <div className="h-[184px] w-full overflow-hidden">
+            <ShopItemArtwork item={item} variant="card" />
+          </div>
 
-        {sectionMeta && (
-          <span className="text-xs font-bold theme-muted truncate">
-            {sectionMeta.title}
+          <button
+            type="button"
+            onClick={onBack}
+            data-testid="shop-detail-back-btn"
+            aria-label="بستن جزئیات محصول"
+            className="absolute top-3 left-3 w-9 h-9 rounded-full bg-black/60 hover:bg-black/80 text-white border border-white/15 flex items-center justify-center backdrop-blur-xs cursor-pointer transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
+
+          <span
+            className={`absolute top-3 right-3 px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold border backdrop-blur-xs bg-black/60 ${rarity.accentBorder} text-white`}
+          >
+            {rarity.label}
           </span>
-        )}
-      </div>
-
-      {/* Main Split PDP Card */}
-      <div className="eyvan-card rounded-2xl p-4 sm:p-6 grid grid-cols-1 md:grid-cols-12 gap-5 sm:gap-6 items-start">
-        <div className="md:col-span-5 relative">
-          <ShopItemArtwork item={item} variant="detail" />
-          {item.badge && (
-            <span className="absolute top-3 right-3 px-2.5 py-1 rounded-lg text-xs font-extrabold bg-[#0B1528]/90 text-[#F3D179] border border-[#D4AE58]/45">
-              {item.badge}
-            </span>
-          )}
         </div>
 
-        <div className="md:col-span-7 space-y-4">
-          <div className="space-y-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <span
-                className={`px-2.5 py-0.5 rounded-md text-xs font-extrabold border ${rarity.accentBorder} ${rarity.softBg} ${rarity.textAccent}`}
+        {/* Concise Product Info Body */}
+        <div className="p-4 sm:p-5 space-y-3.5">
+          <div className="space-y-1">
+            <div className="flex items-center justify-between gap-2">
+              <h2
+                data-testid="shop-detail-title"
+                className="text-base sm:text-lg font-black theme-heading leading-snug truncate"
               >
-                سطح کمیابی: {rarity.label}
-              </span>
+                {item.name}
+              </h2>
               {sectionMeta && (
-                <span className="text-xs font-semibold theme-muted">
-                  دسته: {sectionMeta.title}
+                <span className="text-[11px] font-bold theme-muted shrink-0">
+                  {sectionMeta.title}
                 </span>
               )}
             </div>
-
-            <h2
-              data-testid="shop-detail-title"
-              className="text-xl sm:text-2xl font-extrabold theme-heading leading-snug"
-            >
-              {item.name}
-            </h2>
-            <p className="text-xs sm:text-sm font-semibold theme-accent-teal">
-              {item.subtitle}
-            </p>
-            <p className="text-xs sm:text-sm theme-muted leading-relaxed pt-1">
+            <p className="text-xs theme-muted leading-relaxed line-clamp-2">
               {item.description}
             </p>
           </div>
 
-          {/* Pricing & Balance Breakdown */}
-          <div className="rounded-xl theme-subcard border p-4 space-y-3">
-            <div className="flex items-center justify-between gap-2 text-xs sm:text-sm">
-              <span className="theme-muted font-semibold">وضعیت آیتم:</span>
-              <span
-                data-testid="shop-detail-status"
-                className={`font-extrabold ${
-                  availability.status === 'owned_default'
-                    ? 'theme-win'
-                    : availability.status === 'preview_insufficient'
-                      ? 'theme-loss'
-                      : 'theme-heading'
-                }`}
-              >
-                {availability.statusLabel}
+          {/* Compact Price / Balance Row */}
+          {!isOwned && (
+            <div className="rounded-xl theme-subcard border px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs">
+              <span className="font-bold theme-muted">قیمت</span>
+              <span className="inline-flex items-center gap-1.5 font-black theme-heading tabular-nums text-sm">
+                {item.currency === 'gems' ? (
+                  <PurpleGemSvg size={18} />
+                ) : (
+                  <GoldCoinSvg size={18} />
+                )}
+                <span>
+                  {toPersianDigits(item.price.toLocaleString())} {currencyLabel}
+                </span>
               </span>
             </div>
+          )}
 
-            {!item.isDefaultOwned && (
-              <>
-                <div className="flex items-center justify-between gap-2 text-xs sm:text-sm pt-2 border-t border-[var(--eyvan-line)]">
-                  <span className="theme-muted font-semibold">ارزش کاتالوگ:</span>
-                  <span className="inline-flex items-center gap-1.5 font-extrabold theme-heading tabular-nums">
-                    {item.currency === 'gems' ? (
-                      <PurpleGemSvg size={16} />
-                    ) : (
-                      <GoldCoinSvg size={16} />
-                    )}
+          {/* Direct Action CTA */}
+          <div className="pt-0.5">
+            {isOwned ? (
+              isTableTheme || bannerCodeForItem ? (
+                isEquipped ? (
+                  <div
+                    data-testid="shop-item-equipped-badge"
+                    className="w-full min-h-[44px] px-4 rounded-xl bg-[#0D8A8A]/15 border border-[#0D8A8A]/45 theme-win text-xs sm:text-sm font-black flex items-center justify-center gap-2"
+                  >
+                    <Check className="w-4 h-4 shrink-0" />
                     <span>
-                      {toPersianDigits(item.price.toLocaleString())}{' '}
-                      {availability.currencyLabel}
+                      {isTableTheme ? 'فعال روی میز حکم' : 'فعال روی پروفایل'}
                     </span>
-                  </span>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    data-testid="shop-equip-btn"
+                    onClick={() => {
+                      onEquipItem?.(item);
+                      onBack();
+                    }}
+                    className="w-full min-h-[44px] px-4 rounded-xl bg-gradient-to-b from-[#19A2A2] to-[#0D7A7A] hover:brightness-105 text-white text-xs sm:text-sm font-black flex items-center justify-center gap-2 cursor-pointer transition-all shadow-xs"
+                  >
+                    <Sparkles className="w-4 h-4 shrink-0" />
+                    <span>
+                      {isTableTheme
+                        ? 'فعال‌سازی روی میز حکم'
+                        : 'انتخاب به‌عنوان بنر پروفایل'}
+                    </span>
+                  </button>
+                )
+              ) : (
+                <div className="w-full min-h-[44px] px-4 rounded-xl bg-[#0D8A8A]/14 border border-[#0D8A8A]/40 theme-win text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2">
+                  <Check className="w-4 h-4 shrink-0" />
+                  <span>در مجموعه شما فعال است</span>
                 </div>
-
-                <div className="flex items-center justify-between gap-2 text-xs sm:text-sm pt-2 border-t border-[var(--eyvan-line)]">
-                  <span className="theme-muted font-semibold">
-                    موجودی فعلی شما:
-                  </span>
-                  <span className="font-bold theme-heading tabular-nums">
-                    {toPersianDigits(currentBalance.toLocaleString())}{' '}
-                    {availability.currencyLabel}
-                  </span>
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* Honest System Status Notice */}
-          <div
-            data-testid="shop-detail-notice"
-            className={`p-3.5 rounded-xl border flex items-start gap-2.5 text-xs leading-relaxed ${
-              availability.status === 'owned_default'
-                ? 'bg-[#0D8A8A]/10 border-[#0D8A8A]/35 theme-win font-semibold'
-                : 'bg-[var(--eyvan-surface-muted)] border-[var(--eyvan-line)] theme-muted font-medium'
-            }`}
-          >
-            {availability.status === 'owned_default' ? (
-              <Check className="w-4 h-4 shrink-0 mt-0.5" />
-            ) : (
-              <Info className="w-4 h-4 theme-accent-teal shrink-0 mt-0.5" />
-            )}
-            <span>{availability.detailNotice}</span>
-          </div>
-
-          {/* Action Row (honest non-fake state) */}
-          <div className="flex flex-col sm:flex-row gap-2.5 pt-1">
-            {availability.status === 'owned_default' ? (
-              <div className="flex-1 min-h-[46px] px-4 rounded-xl bg-[#0D8A8A]/14 border border-[#0D8A8A]/40 theme-win text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2">
-                <Check className="w-4 h-4 shrink-0" />
-                <span>{availability.actionLabel}</span>
-              </div>
+              )
+            ) : !isAuthenticated && onRequireAuth ? (
+              <button
+                type="button"
+                onClick={() => {
+                  onBack();
+                  onRequireAuth();
+                }}
+                data-testid="shop-guest-auth-btn"
+                className="w-full min-h-[44px] px-4 rounded-xl bg-gradient-to-b from-[#F5D98E] via-[#DDA942] to-[#B77E1E] hover:brightness-105 text-[#0B1628] text-xs sm:text-sm font-black flex items-center justify-center gap-2 cursor-pointer transition-all"
+              >
+                <UserPlus className="w-4 h-4 shrink-0" />
+                <span>ورود برای خرید</span>
+              </button>
+            ) : canAfford && onPurchaseItem ? (
+              <button
+                type="button"
+                data-testid="shop-buy-btn"
+                onClick={() => {
+                  onPurchaseItem(item);
+                  onBack();
+                }}
+                className="w-full min-h-[44px] px-4 rounded-xl bg-gradient-to-b from-[#F5D98E] via-[#DDA942] to-[#B77E1E] hover:brightness-105 text-[#0B1628] text-xs sm:text-sm font-black flex items-center justify-center gap-2 cursor-pointer transition-all shadow-xs"
+              >
+                <Sparkles className="w-4 h-4 shrink-0" />
+                <span>
+                  {isTableTheme || bannerCodeForItem
+                    ? 'خرید و فعال‌سازی'
+                    : 'خرید آیتم'}
+                </span>
+              </button>
             ) : (
               <button
                 type="button"
                 disabled
                 data-testid="shop-detail-action-disabled"
-                className="flex-1 min-h-[46px] px-4 rounded-xl bg-[var(--eyvan-surface-muted)] border border-[var(--eyvan-line)] theme-muted text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 opacity-80 cursor-not-allowed"
+                className="w-full min-h-[44px] px-4 rounded-xl bg-[var(--eyvan-surface-muted)] border border-[var(--eyvan-line)] theme-muted text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 opacity-80 cursor-not-allowed"
               >
                 <Lock className="w-4 h-4 shrink-0" />
-                <span>{availability.actionLabel}</span>
+                <span>
+                  موجودی کافی نیست ({toPersianDigits(currentBalance.toLocaleString())}{' '}
+                  {currencyLabel})
+                </span>
               </button>
             )}
           </div>
         </div>
       </div>
-    </section>
+    </div>
   );
 };

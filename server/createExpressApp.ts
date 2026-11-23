@@ -21,8 +21,10 @@ import {
   resolveOrCreateGuestIdentity,
 } from '../cloudflare/src/lib/auth/guestSession';
 import { handleAuthHttpRequest } from '../cloudflare/src/lib/auth/httpHandler';
+import { listUserActiveDirectConversationIds } from '../cloudflare/src/lib/social/chatService';
 import { handleSocialHttpRequest } from '../cloudflare/src/lib/social/httpHandler';
 import { RoomInviteCheckSummary } from '../cloudflare/src/lib/social/types';
+import { ChatRealtimePublisher } from '../src/platform/social/chatRealtimeProtocol';
 import {
   EmailSender,
   createEmailSender,
@@ -62,6 +64,7 @@ export interface CreateEyvanExpressAppDeps {
   readonly roomManager: HokmRoomManager;
   readonly config: ExpressAppConfig;
   readonly emailSender?: EmailSender;
+  readonly chatRealtimePublisher?: ChatRealtimePublisher;
 }
 
 function mapSummaryToInviteCheck(
@@ -328,6 +331,29 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
         { isProduction: config.isProduction }
       );
 
+      const isAuthRevokePath =
+        method === 'POST' &&
+        (req.path === '/api/auth/logout' ||
+          req.path === '/api/auth/logout-all' ||
+          req.path === '/api/auth/sessions/revoke');
+      let preRevokeSession: { userId: string; sessionId: string } | null = null;
+      if (isAuthRevokePath && deps.chatRealtimePublisher) {
+        const rawAuthTok = parseAuthCookieFromHeader(req.headers.cookie);
+        if (rawAuthTok) {
+          try {
+            const v = await verifyAuthSession(db.getD1Adapter(), rawAuthTok);
+            if (v.authenticated && v.user && v.session) {
+              preRevokeSession = {
+                userId: v.user.userId,
+                sessionId: v.session.sessionId,
+              };
+            }
+          } catch {
+            // Non-fatal
+          }
+        }
+      }
+
       const webRes = await handleAuthHttpRequest(webReq, req.path, {
         db: db.getD1Adapter(),
         corsHeaders: {},
@@ -351,6 +377,34 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
       if (!webRes) {
         res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'مسیر یافت نشد.' });
         return;
+      }
+
+      if (webRes.ok && preRevokeSession && deps.chatRealtimePublisher) {
+        try {
+          const convIds = await listUserActiveDirectConversationIds(
+            db.getD1Adapter(),
+            preRevokeSession.userId
+          );
+          if (req.path === '/api/auth/logout-all') {
+            await deps.chatRealtimePublisher.disconnectUser?.(
+              convIds,
+              preRevokeSession.userId
+            );
+          } else {
+            const bodySessionId =
+              req.path === '/api/auth/sessions/revoke' &&
+              typeof (req.body as Record<string, unknown> | undefined)?.sessionId ===
+                'string'
+                ? String((req.body as Record<string, unknown>).sessionId).trim()
+                : '';
+            await deps.chatRealtimePublisher.disconnectSession?.(
+              convIds,
+              bodySessionId || preRevokeSession.sessionId
+            );
+          }
+        } catch {
+          // Best-effort realtime eviction
+        }
       }
 
       forwardWebHeadersToExpress(webRes.headers, res);
@@ -413,6 +467,7 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
         cookieOptions: cookieOpts,
         originAllowed: isRequestOriginAllowed(req),
         clientIp: extractClientIp(req),
+        chatRealtimePublisher: deps.chatRealtimePublisher,
         roomLookup: async (roomCode: string) => {
           const summary = roomManager.getRoomSummary(roomCode);
           return summary ? mapSummaryToInviteCheck(summary) : null;
@@ -487,6 +542,7 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
           : null,
       avatarCode: verifiedUser ? verifiedUser.avatarCode : body.avatarCode,
       targetMatchScore: body.targetMatchScore,
+      isPublic: body.isPublic === true,
     });
     if (result.ok === false) {
       res.status(result.status).json({
@@ -520,6 +576,72 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
       );
     }
     res.status(201).json(result.response);
+  });
+
+  app.post('/api/rooms/quick-match', async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const verifiedUser = await resolveOptionalVerifiedAuthUser(req);
+    let guestIdentity: Awaited<ReturnType<typeof resolveOrCreateGuestIdentity>> =
+      null;
+    if (!verifiedUser && sanitizeUsername(body.username)) {
+      try {
+        guestIdentity = await resolveOrCreateGuestIdentity(
+          db.getD1Adapter(),
+          parseGuestCookieFromHeader(req.headers.cookie),
+          body.username,
+          body.avatarCode
+        );
+      } catch {
+        guestIdentity = null;
+      }
+    }
+
+    const result = roomManager.quickMatchRoom({
+      username: verifiedUser ? verifiedUser.username : body.username,
+      userId: verifiedUser
+        ? verifiedUser.userId
+        : guestIdentity
+          ? guestIdentity.userId
+          : null,
+      avatarCode: verifiedUser ? verifiedUser.avatarCode : body.avatarCode,
+      targetMatchScore: body.targetMatchScore,
+    });
+    if (result.ok === false) {
+      res.status(result.status).json({
+        error: result.code,
+        message: result.message,
+      });
+      return;
+    }
+
+    const secure = isSecureIncomingReq(req);
+    res.append(
+      'Set-Cookie',
+      buildSetSessionCookieHeader(
+        {
+          roomCode: result.response.roomCode,
+          playerId: result.response.playerId,
+          sessionToken: result.sessionToken,
+        },
+        secure,
+        cookieOpts
+      )
+    );
+    if (guestIdentity?.issuedNewCookie && guestIdentity.rawGuestToken) {
+      res.append(
+        'Set-Cookie',
+        buildSetGuestCookieHeader(
+          guestIdentity.rawGuestToken,
+          secure,
+          guestIdentity.ttlSec,
+          cookieOpts
+        )
+      );
+    }
+    res.status(result.matchedExisting ? 200 : 201).json({
+      ...result.response,
+      matchedExisting: result.matchedExisting,
+    });
   });
 
   app.get('/api/rooms/:code', (req: Request, res: Response) => {
@@ -679,6 +801,17 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
     const limit = Number.isFinite(rawLimit) ? rawLimit : 10;
     const matches = db.getRecentMatches(limit);
     res.json({ matches });
+  });
+
+  app.get('/api/leaderboard/hokm', (req: Request, res: Response) => {
+    const rawLimit = Number(req.query.limit ?? 20);
+    const limit = Number.isFinite(rawLimit) ? rawLimit : 20;
+    const entries = db.getHokmLeaderboard(limit);
+    res.json({
+      ok: true,
+      gameId: 'hokm',
+      entries,
+    });
   });
 
   app.get('/api/stats/me', async (req: Request, res: Response) => {

@@ -19,11 +19,24 @@ import {
 } from '../../src/games/hokm/online/protocol';
 import {
   CfWorkerEnv,
+  DurableObjectNamespaceLike,
   ExecutionContextLike,
   ScheduledControllerLike,
 } from './lib/types';
 import { HokmRoomDO, INTERNAL_SESSION_TOKEN_HEADER } from './HokmRoomDO';
 import {
+  CHAT_INTERNAL_ACTION_HEADER,
+  CHAT_VERIFIED_CONVERSATION_HEADER,
+  CHAT_VERIFIED_SESSION_HEADER,
+  CHAT_VERIFIED_USER_HEADER,
+  ChatConversationDO,
+} from './ChatConversationDO';
+import {
+  ChatRealtimePublisher,
+  ChatWireMessage,
+} from '../../src/platform/social/chatRealtimeProtocol';
+import {
+  fetchHokmLeaderboardFromD1,
   fetchPlayerStatsByUserIdFromD1,
   fetchPlayerStatsFromD1,
   fetchRecentMatchesFromD1,
@@ -37,7 +50,10 @@ import {
   isHttpsRequest,
   parseSessionCookieFromHeader,
 } from './lib/sessionCookie';
-import { parseAuthCookieFromHeader } from './lib/auth/authCookie';
+import {
+  buildClearAuthCookieHeader,
+  parseAuthCookieFromHeader,
+} from './lib/auth/authCookie';
 import {
   pruneExpiredAuthSessionsBatched,
   verifyAuthSession,
@@ -60,12 +76,16 @@ import {
   evaluateOriginPolicy,
   resolveClientIp,
 } from './lib/auth/securityPolicy';
+import {
+  authorizeConversationRealtimeAccess,
+  listUserActiveDirectConversationIds,
+} from './lib/social/chatService';
 import { handleSocialHttpRequest } from './lib/social/httpHandler';
 import { pruneExpiredGameInvitesBatched } from './lib/social/inviteService';
 import { pruneExpiredPresenceSessionsBatched } from './lib/social/socialService';
 import { RoomInviteCheckSummary } from './lib/social/types';
 
-export { HokmRoomDO };
+export { HokmRoomDO, ChatConversationDO };
 
 const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const MAX_HTTP_BODY_BYTES = 16 * 1024;
@@ -218,6 +238,83 @@ function mapPublicSummaryToInviteCheck(
   };
 }
 
+function createWorkerChatRealtimePublisher(
+  ns: DurableObjectNamespaceLike | undefined
+): ChatRealtimePublisher | undefined {
+  if (!ns) return undefined;
+
+  const postToConversation = async (
+    conversationId: string,
+    path: string,
+    action: string,
+    body: Record<string, unknown>
+  ): Promise<void> => {
+    const id = ns.idFromName(conversationId);
+    const stub = ns.get(id);
+    await stub.fetch(
+      new Request(`https://chat.internal${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          [CHAT_INTERNAL_ACTION_HEADER]: action,
+        },
+        body: JSON.stringify(body),
+      })
+    );
+  };
+
+  return {
+    async publishMessage(conversationId: string, message: ChatWireMessage) {
+      await postToConversation(
+        conversationId,
+        '/broadcast/message',
+        'broadcast_message',
+        { conversationId, message }
+      );
+    },
+    async publishRead(payload) {
+      await postToConversation(
+        payload.conversationId,
+        '/broadcast/read',
+        'broadcast_read',
+        payload
+      );
+    },
+    async revokeConversation(conversationId, reason) {
+      await postToConversation(
+        conversationId,
+        '/disconnect/conversation',
+        'disconnect_conversation',
+        { conversationId, reason }
+      );
+    },
+    async disconnectSession(conversationIds, authSessionId) {
+      await Promise.allSettled(
+        conversationIds.map((conversationId) =>
+          postToConversation(
+            conversationId,
+            '/disconnect/session',
+            'disconnect_session',
+            { authSessionId }
+          )
+        )
+      );
+    },
+    async disconnectUser(conversationIds, userId) {
+      await Promise.allSettled(
+        conversationIds.map((conversationId) =>
+          postToConversation(
+            conversationId,
+            '/disconnect/user',
+            'disconnect_user',
+            { userId }
+          )
+        )
+      );
+    },
+  };
+}
+
 export default {
   async fetch(request: Request, env: CfWorkerEnv): Promise<Response> {
     const url = new URL(request.url);
@@ -237,7 +334,9 @@ export default {
     // Enforce Origin check on mutating API routes & WebSocket upgrades
     const isMutatingApi =
       url.pathname.startsWith('/api/') && request.method !== 'GET';
-    const isWsUpgrade = url.pathname.startsWith('/ws/rooms/');
+    const isWsUpgrade =
+      url.pathname.startsWith('/ws/rooms/') ||
+      url.pathname.startsWith('/ws/social/chat/');
     if ((isMutatingApi || isWsUpgrade) && !isOriginAllowed(request, env)) {
       return Response.json(
         { code: 'FORBIDDEN_ORIGIN', message: 'مبدا درخواست مجاز نیست.' },
@@ -278,7 +377,44 @@ export default {
         request.url,
         { isProduction: isProd }
       );
-      const authRes = await handleAuthHttpRequest(request, url.pathname, {
+      // Capture authenticated session before logout/revocation so active chat WebSockets disconnect immediately
+      const isAuthRevokePath =
+        request.method === 'POST' &&
+        (url.pathname === '/api/auth/logout' ||
+          url.pathname === '/api/auth/logout-all' ||
+          url.pathname === '/api/auth/sessions/revoke');
+      let preRevokeSession: { userId: string; sessionId: string } | null = null;
+      let revokedTargetSessionId: string | null = null;
+      let requestForAuth = request;
+      if (isAuthRevokePath && env.CHAT_CONVERSATION) {
+        const rawAuthTok = parseAuthCookieFromHeader(request.headers.get('Cookie'));
+        if (rawAuthTok) {
+          try {
+            const v = await verifyAuthSession(env.EYVAN_DB, rawAuthTok);
+            if (v.authenticated && v.user && v.session) {
+              preRevokeSession = {
+                userId: v.user.userId,
+                sessionId: v.session.sessionId,
+              };
+            }
+          } catch {
+            // Non-fatal
+          }
+        }
+        if (url.pathname === '/api/auth/sessions/revoke') {
+          try {
+            const cloned = request.clone();
+            const parsed = (await cloned.json()) as Record<string, unknown>;
+            if (typeof parsed?.sessionId === 'string' && parsed.sessionId.trim()) {
+              revokedTargetSessionId = parsed.sessionId.trim();
+            }
+          } catch {
+            // Ignore malformed JSON; auth handler will validate and respond cleanly
+          }
+        }
+      }
+
+      const authRes = await handleAuthHttpRequest(requestForAuth, url.pathname, {
         db: env.EYVAN_DB,
         corsHeaders: cors,
         secureCookie,
@@ -297,7 +433,39 @@ export default {
           fetchImpl: env.GOOGLE_OAUTH_FETCH,
         },
       });
-      if (authRes) return authRes;
+      if (authRes) {
+        if (authRes.ok && preRevokeSession && env.CHAT_CONVERSATION) {
+          const chatPublisher = createWorkerChatRealtimePublisher(
+            env.CHAT_CONVERSATION
+          );
+          if (chatPublisher) {
+            try {
+              const convIds = await listUserActiveDirectConversationIds(
+                env.EYVAN_DB,
+                preRevokeSession.userId
+              );
+              if (convIds.length > 0) {
+                if (url.pathname === '/api/auth/logout-all') {
+                  await chatPublisher.disconnectUser?.(
+                    convIds,
+                    preRevokeSession.userId
+                  );
+                } else {
+                  const sidToDrop =
+                    url.pathname === '/api/auth/sessions/revoke' &&
+                    revokedTargetSessionId
+                      ? revokedTargetSessionId
+                      : preRevokeSession.sessionId;
+                  await chatPublisher.disconnectSession?.(convIds, sidToDrop);
+                }
+              }
+            } catch {
+              // Best-effort realtime eviction
+            }
+          }
+        }
+        return authRes;
+      }
     }
 
     // 1c) Social, Online Presence, Private Chat (D2) & Real-Room Game Invites (D3) (`/api/social/*`)
@@ -305,6 +473,9 @@ export default {
       const clientIp = resolveClientIp({
         cfConnectingIp: request.headers.get('CF-Connecting-IP'),
       });
+      const chatRealtimePublisher = createWorkerChatRealtimePublisher(
+        env.CHAT_CONVERSATION
+      );
       const socialRes = await handleSocialHttpRequest(request, url.pathname, {
         db: env.EYVAN_DB,
         corsHeaders: cors,
@@ -312,6 +483,7 @@ export default {
         cookieOptions: cookieOpts,
         originAllowed: isOriginAllowed(request, env),
         clientIp,
+        chatRealtimePublisher,
         roomLookup: async (roomCode: string) => {
           try {
             const id = env.HOKM_ROOM.idFromName(roomCode);
@@ -416,6 +588,106 @@ export default {
       );
     }
 
+    // 3b) Cookie-Authenticated Private Chat WebSocket upgrade -> verify auth + membership + friendship + non-blocked, then forward to ChatConversationDO
+    const chatWsMatch = url.pathname.match(
+      /^\/ws\/social\/chat\/(cnv_[a-zA-Z0-9_-]{8,64})$/
+    );
+    if (chatWsMatch) {
+      if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
+        return new Response('Expected WebSocket upgrade', { status: 426 });
+      }
+      if (!env.CHAT_CONVERSATION) {
+        return buildJsonResponse(
+          JSON.stringify({
+            ok: false,
+            code: 'REALTIME_UNAVAILABLE',
+            message: 'سرویس لحظه‌ای چت در این محیط فعال نیست.',
+          }),
+          503,
+          cors
+        );
+      }
+
+      const conversationId = chatWsMatch[1];
+      const rawAuthToken = parseAuthCookieFromHeader(request.headers.get('Cookie'));
+      if (!rawAuthToken) {
+        return buildJsonResponse(
+          JSON.stringify({
+            ok: false,
+            code: 'UNAUTHORIZED',
+            message: 'برای اتصال لحظه‌ای چت ابتدا وارد حساب کاربری شوید.',
+          }),
+          401,
+          cors
+        );
+      }
+
+      let verified: Awaited<ReturnType<typeof verifyAuthSession>>;
+      try {
+        verified = await verifyAuthSession(env.EYVAN_DB, rawAuthToken);
+      } catch {
+        return buildJsonResponse(
+          JSON.stringify({
+            ok: false,
+            code: 'DATABASE_ERROR',
+            message: 'خطا در بررسی نشست کاربری.',
+          }),
+          503,
+          cors
+        );
+      }
+
+      if (!verified.authenticated || !verified.user || !verified.session) {
+        return buildJsonResponse(
+          JSON.stringify({
+            ok: false,
+            code: 'UNAUTHORIZED',
+            message: 'نشست کاربری معتبر نیست یا منقضی شده است.',
+          }),
+          401,
+          cors,
+          buildClearAuthCookieHeader(secureCookie, cookieOpts)
+        );
+      }
+
+      const access = await authorizeConversationRealtimeAccess(
+        env.EYVAN_DB,
+        conversationId,
+        verified.user.userId
+      );
+      if (access.ok === false) {
+        return buildJsonResponse(
+          JSON.stringify({
+            ok: false,
+            code: access.code,
+            message: access.message,
+          }),
+          access.status,
+          cors
+        );
+      }
+
+      // Strip ALL untrusted client X-Eyvan-* headers and inject strictly server-verified identity
+      const forwardHeaders = new Headers();
+      request.headers.forEach((value, key) => {
+        if (!key.toLowerCase().startsWith('x-eyvan-')) {
+          forwardHeaders.set(key, value);
+        }
+      });
+      forwardHeaders.set(CHAT_VERIFIED_USER_HEADER, verified.user.userId);
+      forwardHeaders.set(CHAT_VERIFIED_SESSION_HEADER, verified.session.sessionId);
+      forwardHeaders.set(CHAT_VERIFIED_CONVERSATION_HEADER, conversationId);
+
+      const id = env.CHAT_CONVERSATION.idFromName(conversationId);
+      const stub = env.CHAT_CONVERSATION.get(id);
+      return stub.fetch(
+        new Request('https://chat.internal/connect', {
+          method: 'GET',
+          headers: forwardHeaders,
+        })
+      );
+    }
+
     // 4) Server-verified HttpOnly session resume (CSRF-protected via Origin + X-Requested-With)
     if (url.pathname === '/api/session/resume' && request.method === 'POST') {
       if (request.headers.get('X-Requested-With') !== 'eyvan-client') {
@@ -512,8 +784,13 @@ export default {
       );
     }
 
-    // 6) Create room (streaming UTF-8 byte bound + room-code collision retries + HttpOnly session cookie)
-    if (url.pathname === '/api/rooms' && request.method === 'POST') {
+    // 6) Create room or Quick-Match open room (streaming UTF-8 byte bound + room-code collision retries + HttpOnly session cookie)
+    if (
+      (url.pathname === '/api/rooms' ||
+        url.pathname === '/api/rooms/quick-match') &&
+      request.method === 'POST'
+    ) {
+      const isQuickMatch = url.pathname === '/api/rooms/quick-match';
       const bodyRead = await readBoundedUtf8Body(request, MAX_HTTP_BODY_BYTES);
       if (bodyRead.ok === false) {
         return Response.json(
@@ -635,6 +912,19 @@ export default {
             }
             if (!verifiedUser && guestSetCookie) {
               setCookies.push(guestSetCookie);
+            }
+          }
+          if (isQuickMatch && res.ok) {
+            try {
+              const parsed = JSON.parse(text) as Record<string, unknown>;
+              return buildJsonResponse(
+                JSON.stringify({ ...parsed, matchedExisting: false }),
+                res.status,
+                cors,
+                setCookies
+              );
+            } catch {
+              // Fall through to raw response
             }
           }
           return buildJsonResponse(text, res.status, cors, setCookies);
@@ -808,6 +1098,29 @@ export default {
             code: 'DATABASE_ERROR',
             message: 'خطا در خواندن تاریخچه مسابقات.',
             matches: [],
+          },
+          { status: 503, headers: cors }
+        );
+      }
+    }
+
+    // 8b) D1 Hokm Leaderboard
+    if (url.pathname === '/api/leaderboard/hokm' && request.method === 'GET') {
+      const limit = Number(url.searchParams.get('limit')) || 20;
+      try {
+        const entries = await fetchHokmLeaderboardFromD1(env.EYVAN_DB, limit);
+        return Response.json(
+          { ok: true, gameId: 'hokm', entries },
+          { headers: cors }
+        );
+      } catch (err) {
+        console.error('[Worker] D1 /api/leaderboard/hokm query failed:', err);
+        return Response.json(
+          {
+            ok: false,
+            code: 'DATABASE_ERROR',
+            message: 'خطا در خواندن جدول برترین‌ها.',
+            entries: [],
           },
           { status: 503, headers: cors }
         );

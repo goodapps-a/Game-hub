@@ -351,7 +351,14 @@ export async function openOrCreateDirectConversation(
        WHERE m.conversation_id = ?
          AND m.sender_id != ?
          AND m.deleted_at IS NULL
-         AND m.created_at > COALESCE(rs.last_read_at, 0)`
+         AND (
+           m.created_at > COALESCE(rs.last_read_at, 0)
+           OR (
+             m.created_at = COALESCE(rs.last_read_at, 0)
+             AND rs.last_read_message_id IS NOT NULL
+             AND m.message_id > rs.last_read_message_id
+           )
+         )`
     )
     .bind(ctx.actorUserId, existing.conversation_id, ctx.actorUserId)
     .first<{ cnt: number }>();
@@ -423,7 +430,14 @@ export async function listDirectConversations(
            WHERE m.conversation_id = c.conversation_id
              AND m.sender_id != ?
              AND m.deleted_at IS NULL
-             AND m.created_at > COALESCE(rs.last_read_at, 0)
+             AND (
+               m.created_at > COALESCE(rs.last_read_at, 0)
+               OR (
+                 m.created_at = COALESCE(rs.last_read_at, 0)
+                 AND rs.last_read_message_id IS NOT NULL
+                 AND m.message_id > rs.last_read_message_id
+               )
+             )
          ) AS unread_count
        FROM conversations c
        INNER JOIN conversation_members cm_self
@@ -504,11 +518,148 @@ export type ListMessagesResult =
       readonly hasMore: boolean;
       readonly nextBefore: number | null;
       readonly partnerLastReadAt: number | null;
+      readonly partnerLastReadMessageId: string | null;
+    }
+  | SocialErrorResult;
+
+export interface ListMessagesDeltaOptions {
+  readonly after?: unknown;
+  readonly afterMessageId?: unknown;
+}
+
+export type RealtimeAccessAuthResult =
+  | {
+      readonly ok: true;
+      readonly conversationId: string;
+      readonly partnerUserId: string;
     }
   | SocialErrorResult;
 
 /**
+ * Authorizes WebSocket realtime access to a 1-on-1 direct conversation.
+ * Strictly checks valid conversation ID, active membership, active accepted friendship,
+ * active verified partner account, and zero bidirectional blocks.
+ */
+export async function authorizeConversationRealtimeAccess(
+  db: D1DatabaseLike,
+  rawConversationId: string,
+  actorUserId: string
+): Promise<RealtimeAccessAuthResult> {
+  const conversationId = rawConversationId.trim();
+  if (!CONVERSATION_ID_RE.test(conversationId)) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'INVALID_INPUT',
+      message: 'شناسه گفتگو نامعتبر است.',
+    };
+  }
+
+  const membership = await findDirectConversationPartner(
+    db,
+    conversationId,
+    actorUserId
+  );
+  if (!membership.isMember || !membership.partnerUserId) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'FORBIDDEN',
+      message: 'شما مجوز دسترسی لحظه‌ای به این گفتگو را ندارید.',
+    };
+  }
+
+  const [blocked, friends, partnerActive] = await Promise.all([
+    isBlockedEitherWay(db, actorUserId, membership.partnerUserId),
+    areAcceptedFriends(db, actorUserId, membership.partnerUserId),
+    db
+      .prepare(
+        `SELECT 1 AS ok
+         FROM users
+         WHERE user_id = ? AND account_status = 'active' AND email_verified = 1
+         LIMIT 1`
+      )
+      .bind(membership.partnerUserId)
+      .first<{ ok: number }>(),
+  ]);
+
+  if (blocked) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'USER_BLOCKED',
+      message: 'دسترسی به این گفتگو به دلیل مسدودیت غیرفعال است.',
+    };
+  }
+
+  if (!friends || !partnerActive) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'NOT_FRIENDS',
+      message: 'اتصال لحظه‌ای گفتگو فقط برای دوستان تأییدشده مجاز است.',
+    };
+  }
+
+  return {
+    ok: true,
+    conversationId,
+    partnerUserId: membership.partnerUserId,
+  };
+}
+
+/**
+ * Looks up the existing direct conversation ID for a user pair (used for realtime revocation
+ * when a user blocks or removes a friend).
+ */
+export async function findDirectConversationIdByPair(
+  db: D1DatabaseLike,
+  userA: string,
+  userB: string
+): Promise<string | null> {
+  const pairKey = buildCanonicalPairKey(userA, userB);
+  const row = await db
+    .prepare(
+      `SELECT conversation_id
+       FROM conversations
+       WHERE direct_pair_key = ?
+       LIMIT 1`
+    )
+    .bind(pairKey)
+    .first<{ conversation_id: string }>();
+  return row?.conversation_id ?? null;
+}
+
+/**
+ * Lists active direct conversation IDs for a user (used to close active chat WebSockets
+ * immediately on logout / session revocation).
+ */
+export async function listUserActiveDirectConversationIds(
+  db: D1DatabaseLike,
+  userId: string
+): Promise<string[]> {
+  const res = await db
+    .prepare(
+      `SELECT c.conversation_id
+       FROM conversations c
+       INNER JOIN conversation_members cm
+         ON cm.conversation_id = c.conversation_id
+        AND cm.user_id = ?
+        AND cm.left_at IS NULL
+       WHERE c.type = 'direct'
+       ORDER BY COALESCE(c.last_message_at, c.created_at) DESC
+       LIMIT 50`
+    )
+    .bind(userId)
+    .all<{ conversation_id: string }>();
+  return (res.results ?? []).map((r) => r.conversation_id);
+}
+
+/**
  * Fetches paginated messages for a direct conversation (chronological ascending inside page).
+ * Supports BOTH:
+ * - `before` pagination for older history (unchanged), AND
+ * - `after` + optional `afterMessageId` lightweight incremental delta sync for reconnect/fallback.
  * Enforces strict membership & bidirectional block checks.
  */
 export async function listConversationMessages(
@@ -516,7 +667,8 @@ export async function listConversationMessages(
   rawConversationId: string,
   rawBefore: unknown,
   rawLimit: unknown,
-  ctx: SocialRequestContext
+  ctx: SocialRequestContext,
+  deltaOpts?: ListMessagesDeltaOptions
 ): Promise<ListMessagesResult> {
   const conversationId = rawConversationId.trim();
   if (!CONVERSATION_ID_RE.test(conversationId)) {
@@ -570,28 +722,81 @@ export async function listConversationMessages(
   const hasBefore =
     parsedBefore !== null && Number.isFinite(parsedBefore) && parsedBefore > 0;
 
-  const query = hasBefore
-    ? db
-        .prepare(
-          `SELECT message_id, conversation_id, sender_id, kind, body, client_msg_id, created_at
-           FROM messages
-           WHERE conversation_id = ?
-             AND deleted_at IS NULL
-             AND created_at < ?
-           ORDER BY created_at DESC, message_id DESC
-           LIMIT ?`
-        )
-        .bind(conversationId, Math.floor(parsedBefore!), limit + 1)
-    : db
-        .prepare(
-          `SELECT message_id, conversation_id, sender_id, kind, body, client_msg_id, created_at
-           FROM messages
-           WHERE conversation_id = ?
-             AND deleted_at IS NULL
-           ORDER BY created_at DESC, message_id DESC
-           LIMIT ?`
-        )
-        .bind(conversationId, limit + 1);
+  const rawAfter = deltaOpts?.after;
+  const parsedAfter =
+    !hasBefore &&
+    rawAfter !== undefined &&
+    rawAfter !== null &&
+    String(rawAfter).trim() !== ''
+      ? Number(rawAfter)
+      : null;
+  const hasAfter =
+    parsedAfter !== null && Number.isFinite(parsedAfter) && parsedAfter > 0;
+
+  const rawAfterMsgId =
+    typeof deltaOpts?.afterMessageId === 'string'
+      ? deltaOpts.afterMessageId.trim()
+      : '';
+  const validAfterMsgId =
+    hasAfter && rawAfterMsgId && MESSAGE_ID_RE.test(rawAfterMsgId)
+      ? rawAfterMsgId
+      : null;
+
+  const query = hasAfter
+    ? validAfterMsgId
+      ? db
+          .prepare(
+            `SELECT message_id, conversation_id, sender_id, kind, body, client_msg_id, created_at
+             FROM messages
+             WHERE conversation_id = ?
+               AND deleted_at IS NULL
+               AND (
+                 created_at > ?
+                 OR (created_at = ? AND message_id > ?)
+               )
+             ORDER BY created_at ASC, message_id ASC
+             LIMIT ?`
+          )
+          .bind(
+            conversationId,
+            Math.floor(parsedAfter!),
+            Math.floor(parsedAfter!),
+            validAfterMsgId,
+            limit + 1
+          )
+      : db
+          .prepare(
+            `SELECT message_id, conversation_id, sender_id, kind, body, client_msg_id, created_at
+             FROM messages
+             WHERE conversation_id = ?
+               AND deleted_at IS NULL
+               AND created_at > ?
+             ORDER BY created_at ASC, message_id ASC
+             LIMIT ?`
+          )
+          .bind(conversationId, Math.floor(parsedAfter!), limit + 1)
+    : hasBefore
+      ? db
+          .prepare(
+            `SELECT message_id, conversation_id, sender_id, kind, body, client_msg_id, created_at
+             FROM messages
+             WHERE conversation_id = ?
+               AND deleted_at IS NULL
+               AND created_at < ?
+             ORDER BY created_at DESC, message_id DESC
+             LIMIT ?`
+          )
+          .bind(conversationId, Math.floor(parsedBefore!), limit + 1)
+      : db
+          .prepare(
+            `SELECT message_id, conversation_id, sender_id, kind, body, client_msg_id, created_at
+             FROM messages
+             WHERE conversation_id = ?
+               AND deleted_at IS NULL
+             ORDER BY created_at DESC, message_id DESC
+             LIMIT ?`
+          )
+          .bind(conversationId, limit + 1);
 
   const [msgRes, partnerReadRow] = await Promise.all([
     query.all<{
@@ -606,31 +811,30 @@ export async function listConversationMessages(
     membership.partnerUserId
       ? db
           .prepare(
-            `SELECT last_read_at
+            `SELECT last_read_message_id, last_read_at
              FROM message_read_states
              WHERE conversation_id = ? AND user_id = ?
              LIMIT 1`
           )
           .bind(conversationId, membership.partnerUserId)
-          .first<{ last_read_at: number }>()
+          .first<{ last_read_message_id: string | null; last_read_at: number }>()
       : Promise.resolve(null),
   ]);
 
   const rawRows = msgRes.results ?? [];
   const hasMore = rawRows.length > limit;
   const sliced = hasMore ? rawRows.slice(0, limit) : rawRows;
-  // Return oldest -> newest within the page for natural chat rendering
-  const chronological: ChatMessageItem[] = sliced
-    .reverse()
-    .map((r) => ({
-      messageId: r.message_id,
-      conversationId: r.conversation_id,
-      senderId: r.sender_id,
-      kind: r.kind,
-      body: r.body,
-      clientMsgId: r.client_msg_id,
-      createdAt: r.created_at,
-    }));
+  // Delta queries already return ASC; before/latest queries return DESC and are reversed to oldest -> newest
+  const orderedRows = hasAfter ? sliced : sliced.reverse();
+  const chronological: ChatMessageItem[] = orderedRows.map((r) => ({
+    messageId: r.message_id,
+    conversationId: r.conversation_id,
+    senderId: r.sender_id,
+    kind: r.kind,
+    body: r.body,
+    clientMsgId: r.client_msg_id,
+    createdAt: r.created_at,
+  }));
 
   return {
     ok: true,
@@ -638,8 +842,10 @@ export async function listConversationMessages(
     conversationId,
     messages: chronological,
     hasMore,
-    nextBefore: chronological.length > 0 ? chronological[0].createdAt : null,
+    nextBefore:
+      !hasAfter && chronological.length > 0 ? chronological[0].createdAt : null,
     partnerLastReadAt: partnerReadRow?.last_read_at ?? null,
+    partnerLastReadMessageId: partnerReadRow?.last_read_message_id ?? null,
   };
 }
 
@@ -856,9 +1062,17 @@ export async function sendDirectMessage(
              conversation_id, user_id, last_read_message_id, last_read_at
            ) VALUES (?, ?, ?, ?)
            ON CONFLICT(conversation_id, user_id) DO UPDATE SET
-             last_read_message_id = excluded.last_read_message_id,
+             last_read_message_id = CASE
+               WHEN excluded.last_read_at > message_read_states.last_read_at
+                 OR (
+                   excluded.last_read_at = message_read_states.last_read_at
+                   AND excluded.last_read_message_id > COALESCE(message_read_states.last_read_message_id, '')
+                 )
+                 THEN excluded.last_read_message_id
+               ELSE message_read_states.last_read_message_id
+             END,
              last_read_at = CASE
-               WHEN excluded.last_read_at >= message_read_states.last_read_at
+               WHEN excluded.last_read_at > message_read_states.last_read_at
                  THEN excluded.last_read_at
                ELSE message_read_states.last_read_at
              END`
@@ -954,12 +1168,22 @@ export type MarkReadResult =
       readonly ok: true;
       readonly status: 200;
       readonly conversationId: string;
+      readonly readerUserId: string;
+      readonly lastReadMessageId: string | null;
       readonly lastReadAt: number;
+      readonly advanced: boolean;
     }
   | SocialErrorResult;
 
 /**
- * Marks messages in `conversationId` as read up to `lastReadMessageId` (or `now`).
+ * Marks messages in `conversationId` as read up to the exact ordered message cursor
+ * `(created_at, message_id)` of `lastReadMessageId` (or the latest persisted message
+ * if omitted).
+ *
+ * Strictly monotonic & exact:
+ * - Never substitutes `now` over `msgRow.created_at` so newer unread messages arriving
+ *   after `lastReadMessageId` are NEVER falsely marked as read!
+ * - Never moves the saved read cursor backward on out-of-order or duplicate requests.
  */
 export async function markConversationRead(
   db: D1DatabaseLike,
@@ -1024,8 +1248,8 @@ export async function markConversationRead(
     }
   }
 
-  let lastReadMessageId: string | null = null;
-  let readTimestamp = now;
+  let candidateMessageId: string | null = null;
+  let candidateReadAt = now;
   if (
     payload.lastReadMessageId !== undefined &&
     payload.lastReadMessageId !== null &&
@@ -1060,8 +1284,54 @@ export async function markConversationRead(
         message: 'پیام مورد نظر در این گفتگو یافت نشد.',
       };
     }
-    lastReadMessageId = msgRow.message_id;
-    readTimestamp = Math.max(now, msgRow.created_at);
+    // Anchor strictly to the target message's persisted server timestamp (NEVER `now`)
+    candidateMessageId = msgRow.message_id;
+    candidateReadAt = msgRow.created_at;
+  } else {
+    // Anchor to the latest existing message in the conversation if available
+    const latestMsg = await db
+      .prepare(
+        `SELECT message_id, created_at
+         FROM messages
+         WHERE conversation_id = ? AND deleted_at IS NULL
+         ORDER BY created_at DESC, message_id DESC
+         LIMIT 1`
+      )
+      .bind(conversationId)
+      .first<{ message_id: string; created_at: number }>();
+    if (latestMsg) {
+      candidateMessageId = latestMsg.message_id;
+      candidateReadAt = latestMsg.created_at;
+    }
+  }
+
+  const existing = await db
+    .prepare(
+      `SELECT last_read_message_id, last_read_at
+       FROM message_read_states
+       WHERE conversation_id = ? AND user_id = ?
+       LIMIT 1`
+    )
+    .bind(conversationId, ctx.actorUserId)
+    .first<{ last_read_message_id: string | null; last_read_at: number }>();
+
+  const shouldAdvance =
+    !existing ||
+    candidateReadAt > existing.last_read_at ||
+    (candidateReadAt === existing.last_read_at &&
+      candidateMessageId !== null &&
+      candidateMessageId > (existing.last_read_message_id ?? ''));
+
+  if (!shouldAdvance && existing) {
+    return {
+      ok: true,
+      status: 200,
+      conversationId,
+      readerUserId: ctx.actorUserId,
+      lastReadMessageId: existing.last_read_message_id,
+      lastReadAt: existing.last_read_at,
+      advanced: false,
+    };
   }
 
   await db
@@ -1070,20 +1340,50 @@ export async function markConversationRead(
          conversation_id, user_id, last_read_message_id, last_read_at
        ) VALUES (?, ?, ?, ?)
        ON CONFLICT(conversation_id, user_id) DO UPDATE SET
-         last_read_message_id = COALESCE(excluded.last_read_message_id, message_read_states.last_read_message_id),
+         last_read_message_id = CASE
+           WHEN excluded.last_read_at > message_read_states.last_read_at
+             OR (
+               excluded.last_read_at = message_read_states.last_read_at
+               AND excluded.last_read_message_id IS NOT NULL
+               AND excluded.last_read_message_id > COALESCE(message_read_states.last_read_message_id, '')
+             )
+             THEN excluded.last_read_message_id
+           ELSE message_read_states.last_read_message_id
+         END,
          last_read_at = CASE
-           WHEN excluded.last_read_at >= message_read_states.last_read_at
+           WHEN excluded.last_read_at > message_read_states.last_read_at
              THEN excluded.last_read_at
            ELSE message_read_states.last_read_at
          END`
     )
-    .bind(conversationId, ctx.actorUserId, lastReadMessageId, readTimestamp)
+    .bind(conversationId, ctx.actorUserId, candidateMessageId, candidateReadAt)
     .run();
+
+  const updated = await db
+    .prepare(
+      `SELECT last_read_message_id, last_read_at
+       FROM message_read_states
+       WHERE conversation_id = ? AND user_id = ?
+       LIMIT 1`
+    )
+    .bind(conversationId, ctx.actorUserId)
+    .first<{ last_read_message_id: string | null; last_read_at: number }>();
+
+  const effectiveMessageId = updated?.last_read_message_id ?? candidateMessageId;
+  const effectiveReadAt = updated?.last_read_at ?? candidateReadAt;
+  const advanced =
+    !existing ||
+    effectiveReadAt > existing.last_read_at ||
+    (effectiveReadAt === existing.last_read_at &&
+      effectiveMessageId !== existing.last_read_message_id);
 
   return {
     ok: true,
     status: 200,
     conversationId,
-    lastReadAt: readTimestamp,
+    readerUserId: ctx.actorUserId,
+    lastReadMessageId: effectiveMessageId,
+    lastReadAt: effectiveReadAt,
+    advanced,
   };
 }

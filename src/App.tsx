@@ -1,12 +1,19 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   GameId,
   PlatformTabId,
+  ProfileBannerCode,
+  ShopItem,
   ThemeMode,
   UserProfile,
 } from './platform/types/platform';
-import { PLATFORM_ASSETS } from './platform/data/assets';
-import { createInitialGuestProfile } from './platform/data/guestDefaults';
+import { PLATFORM_ASSETS, preloadPlatformAssets } from './platform/data/assets';
+import { eyvanBgMusic } from './platform/audio/bgMusic';
+import {
+  DEFAULT_OWNED_SHOP_IDS,
+  createInitialGuestProfile,
+  saveLocalCosmetics,
+} from './platform/data/guestDefaults';
 import {
   AuthUserSummary,
   PendingAuthUrlAction,
@@ -14,16 +21,30 @@ import {
   fetchCurrentAuthSession,
 } from './platform/auth/authClient';
 import { TopBar } from './platform/components/TopBar';
-import { BottomNav } from './platform/components/BottomNav';
-import { ProfileDrawer } from './platform/components/ProfileDrawer';
+import { AuthModal, AuthModalMode } from './platform/components/AuthModal';
+import {
+  ProfileDrawer,
+  ProfileInitialAuthMode,
+} from './platform/components/ProfileDrawer';
+import { ProfileSubView } from './platform/components/profile/ProfileOverview';
 import { ShopPage } from './platform/pages/ShopPage';
+import { ShopCategoryFilter } from './platform/utils/shopHelpers';
 import { GamesPage } from './platform/pages/GamesPage';
+import {
+  GameDetailPage,
+  GameHubLaunchRequest,
+  HokmHubSubView,
+} from './platform/pages/GameDetailPage';
 import { FriendsPage } from './platform/pages/FriendsPage';
 import { HokmGame } from './games/hokm/HokmGame';
-import { OnlineHokmGame } from './games/hokm/OnlineHokmGame';
+import {
+  OnlineHokmGame,
+  OnlineHokmLaunchAction,
+} from './games/hokm/OnlineHokmGame';
 import { fetchMyOnlineStats } from './games/hokm/online/client';
 import { hokmSound } from './games/hokm/audio/soundEffects';
-import { preloadCardArtwork } from './games/hokm/components/PlayingCard';
+import { OfflineIndicator } from './platform/components/OfflineIndicator';
+import { BottomNav } from './platform/components/BottomNav';
 import {
   getOrCreateTabDeviceId,
   sendPresenceHeartbeat,
@@ -36,7 +57,9 @@ function getInitialRoomCodeFromQuery(): string {
   if (typeof window === 'undefined') return '';
   const params = new URLSearchParams(window.location.search);
   const code = params.get('room');
-  return code ? code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) : '';
+  return code
+    ? code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8)
+    : '';
 }
 
 function getInitialGameFromQuery(): ActiveGameView {
@@ -78,11 +101,26 @@ function isEditableElement(el: EventTarget | null): boolean {
   return el.isContentEditable;
 }
 
+function resolveBannerCodeFromShopItem(itemId: string): ProfileBannerCode | null {
+  if (itemId === 'af-banner-garden') return 'garden';
+  if (itemId === 'af-banner-ruby') return 'ruby';
+  if (itemId === 'af-banner-royal') return 'royal';
+  return null;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<PlatformTabId>('games');
+  const [shopInitialCategory, setShopInitialCategory] =
+    useState<ShopCategoryFilter>('all');
+  const [selectedGameHub, setSelectedGameHub] = useState<GameId | null>(null);
+  const [hokmHubSubView, setHokmHubSubView] =
+    useState<HokmHubSubView>('hub');
   const [activeGame, setActiveGame] = useState<ActiveGameView>(
     getInitialGameFromQuery
   );
+  const [hokmTargetScore, setHokmTargetScore] = useState<number>(3);
+  const [onlineLaunchAction, setOnlineLaunchAction] =
+    useState<OnlineHokmLaunchAction>(null);
   const [initialRoomCode, setInitialRoomCode] = useState<string>(
     getInitialRoomCodeFromQuery
   );
@@ -94,10 +132,49 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [pendingAuthAction, setPendingAuthAction] =
     useState<PendingAuthUrlAction | null>(null);
+
+  // Floating Profile Modal state
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [profileInitialView, setProfileInitialView] =
+    useState<ProfileSubView>('overview');
+  const [profileInitialAuthMode, setProfileInitialAuthMode] =
+    useState<ProfileInitialAuthMode>('login');
+
+  // Dedicated Standalone Auth-Only Modal state
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authModalMode, setAuthModalMode] = useState<AuthModalMode>('login');
+  const [authModalReason, setAuthModalReason] = useState<string | null>(null);
+
   const [isTyping, setIsTyping] = useState(false);
 
+  // Double-back-to-exit toast on Games Main Menu root
+  const [exitToastVisible, setExitToastVisible] = useState(false);
+  const exitToastTimerRef = useRef<number | null>(null);
+  const lastRootBackPressRef = useRef<number>(0);
+
   const themeMode = profile.appSettings.themeMode;
+
+  const updateProfile = useCallback(
+    (updater: UserProfile | ((prev: UserProfile) => UserProfile)) => {
+      setProfile((prev) => {
+        const next =
+          typeof updater === 'function'
+            ? (updater as (p: UserProfile) => UserProfile)(prev)
+            : updater;
+        saveLocalCosmetics({
+          bannerCode: next.bannerCode,
+          customAvatarUrl: next.customAvatarUrl ?? null,
+          customBannerUrl: next.customBannerUrl ?? null,
+          equippedTableSkinId: next.equippedTableSkinId ?? 'tt-traditional',
+          ownedShopItemIds: next.ownedShopItemIds ?? [...DEFAULT_OWNED_SHOP_IDS],
+          coins: next.coins,
+          gems: next.gems,
+        });
+        return next;
+      });
+    },
+    []
+  );
 
   const applyAuthenticatedUser = (user: AuthUserSummary | null) => {
     setAuthUser(user);
@@ -172,7 +249,7 @@ export default function App() {
     };
   }, [authUser?.userId, authUser?.username, activeGame]);
 
-  // Real multi-device online presence lifecycle (30s heartbeat, 75s server lease TTL, instant offline on tab close)
+  // Real multi-device online presence lifecycle (30s heartbeat, 75s server lease TTL)
   useEffect(() => {
     if (!authUser) return;
     const deviceId = getOrCreateTabDeviceId();
@@ -184,7 +261,7 @@ export default function App() {
           ? 'away'
           : 'online';
       void sendPresenceHeartbeat(deviceId, state).catch(() => {
-        // Ignore transient network errors; lease expires safely on server if offline
+        // Ignore transient network errors
       });
     };
 
@@ -217,13 +294,15 @@ export default function App() {
     };
   }, [authUser?.userId]);
 
-  // Capture & immediately scrub `#verify-email=` / `#reset-password=` tokens from URL
+  // Capture & immediately scrub `#verify-email=` / `#reset-password=` tokens from URL -> open AuthModal directly
   useEffect(() => {
     const syncAuthHashAction = () => {
       const action = consumeAuthActionFromUrlHash();
       if (action) {
         setPendingAuthAction(action);
-        setIsProfileOpen(true);
+        setIsProfileOpen(false);
+        setAuthModalReason(null);
+        setIsAuthModalOpen(true);
       }
     };
     syncAuthHashAction();
@@ -233,24 +312,17 @@ export default function App() {
     };
   }, []);
 
-  // Pre-decode court/ace card artwork gently after initial paint so home preview opens immediately
+  // Preload ONLY active-theme home artwork immediately; secondary assets warm up after window.load
   useEffect(() => {
-    const runPreload = () => {
-      preloadCardArtwork();
-    };
-    const w = window as unknown as {
-      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
-      cancelIdleCallback?: (id: number) => void;
-    };
-    if (typeof w.requestIdleCallback === 'function') {
-      const id = w.requestIdleCallback(runPreload, { timeout: 1200 });
-      return () => w.cancelIdleCallback?.(id);
-    }
-    const tid = window.setTimeout(runPreload, 450);
-    return () => window.clearTimeout(tid);
+    preloadPlatformAssets(themeMode);
+  }, [themeMode]);
+
+  // Initialize seamless looping background soundtrack
+  useEffect(() => {
+    eyvanBgMusic.init();
   }, []);
 
-  // Hide mobile bottom navigation automatically whenever the user is typing in any input/textarea
+  // Track active text input so floating FAB stays out of the way of mobile keyboard
   useEffect(() => {
     if (typeof window === 'undefined') return;
     let blurTimer: number | null = null;
@@ -301,11 +373,133 @@ export default function App() {
 
   useEffect(() => {
     hokmSound.setEnabled(profile.appSettings.soundEnabled);
+    eyvanBgMusic.setEnabled(profile.appSettings.soundEnabled);
   }, [profile.appSettings.soundEnabled]);
 
   useEffect(() => {
     document.body.dataset.state = activeGame ? 'playing' : 'platform';
+    // Automatically halve the reduced background music level when entering an active game
+    eyvanBgMusic.setInGame(activeGame !== null);
   }, [activeGame]);
+
+  // =========================================================================
+  // DETERMINISTIC HARDWARE / BROWSER BACK BUTTON STACK + DOUBLE-BACK EXIT
+  // =========================================================================
+  const navStateRef = useRef({
+    activeGame,
+    isAuthModalOpen,
+    isProfileOpen,
+    selectedGameHub,
+    hokmHubSubView,
+    activeTab,
+  });
+  navStateRef.current = {
+    activeGame,
+    isAuthModalOpen,
+    isProfileOpen,
+    selectedGameHub,
+    hokmHubSubView,
+    activeTab,
+  };
+
+  const pushHistoryGuard = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.history.pushState(
+        { eyvanNavGuard: true },
+        '',
+        window.location.href
+      );
+    } catch {
+      // Ignore history restrictions in sandboxed frames
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    pushHistoryGuard();
+
+    const handlePopState = () => {
+      const cur = navStateRef.current;
+
+      // Active offline Hokm game has its own forfeit-confirm popstate guard
+      if (cur.activeGame === 'hokm-offline') {
+        return;
+      }
+
+      // Online Hokm lobby/table: exit cleanly back to Hokm Hub
+      if (cur.activeGame === 'hokm-online') {
+        pushHistoryGuard();
+        setInitialRoomCode('');
+        setAutoJoinInviteRoom(false);
+        setOnlineLaunchAction(null);
+        setActiveGame(null);
+        setActiveTab('games');
+        setSelectedGameHub('hokm');
+        setHokmHubSubView('hub');
+        return;
+      }
+
+      // Close topmost floating modal first
+      if (cur.isAuthModalOpen) {
+        pushHistoryGuard();
+        setIsAuthModalOpen(false);
+        setAuthModalReason(null);
+        return;
+      }
+
+      if (cur.isProfileOpen) {
+        pushHistoryGuard();
+        setIsProfileOpen(false);
+        return;
+      }
+
+      // Inside Hokm full-screen Hub: step back from subview -> hub -> Games menu
+      if (cur.selectedGameHub !== null) {
+        pushHistoryGuard();
+        if (cur.hokmHubSubView !== 'hub') {
+          setHokmHubSubView('hub');
+        } else {
+          setSelectedGameHub(null);
+        }
+        return;
+      }
+
+      // Inside Shop or Friends tab -> return to Games Main Menu
+      if (cur.activeTab !== 'games') {
+        pushHistoryGuard();
+        setActiveTab('games');
+        return;
+      }
+
+      // On Games Main Menu root: Double-Back-to-Exit pattern
+      const now = Date.now();
+      if (now - lastRootBackPressRef.current < 2200) {
+        setExitToastVisible(false);
+        lastRootBackPressRef.current = 0;
+        // Allow actual browser/device back navigation on second press
+        return;
+      }
+
+      lastRootBackPressRef.current = now;
+      pushHistoryGuard();
+      setExitToastVisible(true);
+      if (exitToastTimerRef.current) {
+        window.clearTimeout(exitToastTimerRef.current);
+      }
+      exitToastTimerRef.current = window.setTimeout(() => {
+        setExitToastVisible(false);
+      }, 2200);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+      if (exitToastTimerRef.current) {
+        window.clearTimeout(exitToastTimerRef.current);
+      }
+    };
+  }, [pushHistoryGuard]);
 
   const handleToggleTheme = () => {
     setProfile((prev) => ({
@@ -318,30 +512,154 @@ export default function App() {
   };
 
   const handleSelectTab = (tab: PlatformTabId) => {
+    setSelectedGameHub(null);
+    setHokmHubSubView('hub');
+    if (tab === 'shop') {
+      setShopInitialCategory('all');
+    }
     if (tab !== activeTab) {
       setActiveTab(tab);
     }
   };
 
-  const handleLaunchGame = (gameId: GameId) => {
+  const openAuthModal = (
+    mode: AuthModalMode = 'login',
+    reason: string | null = null
+  ) => {
+    setIsProfileOpen(false);
+    setAuthModalMode(mode);
+    setAuthModalReason(reason);
+    setIsAuthModalOpen(true);
+  };
+
+  const openProfileModal = (
+    initialView: ProfileSubView = 'overview',
+    initialAuthMode: ProfileInitialAuthMode = 'login'
+  ) => {
+    setIsAuthModalOpen(false);
+    setProfileInitialView(initialView);
+    setProfileInitialAuthMode(initialAuthMode);
+    setIsProfileOpen(true);
+  };
+
+  const handleOpenGameHub = (gameId: GameId) => {
     if (gameId === 'hokm') {
       setIsProfileOpen(false);
-      setActiveGame('hokm-online');
+      setIsAuthModalOpen(false);
+      setActiveTab('games');
+      setSelectedGameHub('hokm');
+      setHokmHubSubView('hub');
     }
   };
 
+  const handlePurchaseShopItem = useCallback(
+    (item: ShopItem) => {
+      updateProfile((prev) => {
+        const owned = new Set(prev.ownedShopItemIds ?? DEFAULT_OWNED_SHOP_IDS);
+        if (owned.has(item.id)) return prev;
+
+        const nextCoins =
+          item.currency === 'coins' ? prev.coins - item.price : prev.coins;
+        const nextGems =
+          item.currency === 'gems' ? prev.gems - item.price : prev.gems;
+        if (nextCoins < 0 || nextGems < 0) return prev;
+
+        owned.add(item.id);
+        const bannerFromItem = resolveBannerCodeFromShopItem(item.id);
+
+        return {
+          ...prev,
+          coins: nextCoins,
+          gems: nextGems,
+          ownedShopItemIds: Array.from(owned),
+          equippedTableSkinId:
+            item.section === 'table_themes'
+              ? item.id
+              : prev.equippedTableSkinId,
+          bannerCode: bannerFromItem ?? prev.bannerCode,
+          customBannerUrl: bannerFromItem ? null : prev.customBannerUrl,
+        };
+      });
+    },
+    [updateProfile]
+  );
+
+  const handleEquipShopItem = useCallback(
+    (item: ShopItem) => {
+      updateProfile((prev) => {
+        if (item.section === 'table_themes') {
+          return {
+            ...prev,
+            equippedTableSkinId: item.id,
+          };
+        }
+        const bannerFromItem = resolveBannerCodeFromShopItem(item.id);
+        if (bannerFromItem) {
+          return {
+            ...prev,
+            bannerCode: bannerFromItem,
+            customBannerUrl: null,
+          };
+        }
+        return prev;
+      });
+    },
+    [updateProfile]
+  );
+
+  const handleLaunchFromGameHub = (req: GameHubLaunchRequest) => {
+    setIsProfileOpen(false);
+    setIsAuthModalOpen(false);
+    setHokmTargetScore(req.targetMatchScore);
+
+    if (req.mode === 'offline') {
+      setOnlineLaunchAction(null);
+      setInitialRoomCode('');
+      setAutoJoinInviteRoom(false);
+      setActiveGame('hokm-offline');
+      return;
+    }
+
+    if (req.mode === 'random') {
+      setInitialRoomCode('');
+      setAutoJoinInviteRoom(false);
+      setOnlineLaunchAction('quick_match');
+      setActiveGame('hokm-online');
+      return;
+    }
+
+    if (req.mode === 'friends_create') {
+      setInitialRoomCode('');
+      setAutoJoinInviteRoom(false);
+      setOnlineLaunchAction('create_friends');
+      setActiveGame('hokm-online');
+      return;
+    }
+
+    setInitialRoomCode(req.roomCode ?? '');
+    setAutoJoinInviteRoom(false);
+    setOnlineLaunchAction('join_room');
+    setActiveGame('hokm-online');
+  };
+
+  // =========================================================================
+  // ACTIVE GAME VIEWS (Full-Screen)
+  // =========================================================================
   if (activeGame === 'hokm-online') {
     return (
       <OnlineHokmGame
         username={profile.username}
         avatarCode={profile.avatarCode}
+        tableSkinId={profile.equippedTableSkinId}
         isAuthenticated={Boolean(authUser)}
         initialRoomCode={initialRoomCode}
         autoJoinRoom={autoJoinInviteRoom}
+        targetMatchScore={hokmTargetScore}
+        initialLaunchAction={onlineLaunchAction}
         soundEnabled={profile.appSettings.soundEnabled}
         reducedMotionPreference={profile.appSettings.reducedMotion}
         onChangeUsername={(nextUsername) =>
-          setProfile((prev) => ({
+          updateProfile((prev) => ({
             ...prev,
             username: nextUsername,
           }))
@@ -355,17 +673,23 @@ export default function App() {
             nextAvatar === 'lapis'
               ? nextAvatar
               : 'portrait';
-          setProfile((prev) => ({
+          updateProfile((prev) => ({
             ...prev,
             avatarCode: validAvatar,
           }));
         }}
-        onLaunchOffline={() => setActiveGame('hokm-offline')}
+        onLaunchOffline={() => {
+          setOnlineLaunchAction(null);
+          setActiveGame('hokm-offline');
+        }}
         onBackToGames={() => {
           setInitialRoomCode('');
           setAutoJoinInviteRoom(false);
+          setOnlineLaunchAction(null);
           setActiveGame(null);
           setActiveTab('games');
+          setSelectedGameHub('hokm');
+          setHokmHubSubView('hub');
         }}
       />
     );
@@ -375,6 +699,8 @@ export default function App() {
     return (
       <HokmGame
         playerName={profile.username}
+        tableSkinId={profile.equippedTableSkinId}
+        targetMatchScore={hokmTargetScore}
         soundEnabled={profile.appSettings.soundEnabled}
         animationSpeed={profile.appSettings.animationSpeed}
         reducedMotionPreference={profile.appSettings.reducedMotion}
@@ -399,12 +725,71 @@ export default function App() {
         onBackToGames={() => {
           setActiveGame(null);
           setActiveTab('games');
+          setSelectedGameHub('hokm');
+          setHokmHubSubView('hub');
         }}
       />
     );
   }
 
-  const hideBottomNav = isTyping;
+  // =========================================================================
+  // FULL-SCREEN GAME HUB (No TopBar, No Rounded Box — Full Edge-to-Edge!)
+  // =========================================================================
+  if (activeTab === 'games' && selectedGameHub !== null) {
+    return (
+      <>
+        <OfflineIndicator />
+        <GameDetailPage
+          gameId={selectedGameHub}
+          themeMode={themeMode}
+          subView={hokmHubSubView}
+          onSubViewChange={setHokmHubSubView}
+          currentUserId={authUser?.userId ?? null}
+          userCoins={profile.coins}
+          userGems={profile.gems}
+          isAuthenticated={Boolean(authUser)}
+          ownedItemIds={profile.ownedShopItemIds}
+          equippedTableSkinId={profile.equippedTableSkinId}
+          equippedBannerCode={profile.bannerCode}
+          onPurchaseItem={handlePurchaseShopItem}
+          onEquipItem={handleEquipShopItem}
+          onRequireAuth={() => openAuthModal('login', null)}
+          onBack={() => {
+            setSelectedGameHub(null);
+            setHokmHubSubView('hub');
+          }}
+          onLaunchHokm={handleLaunchFromGameHub}
+          onOpenFullShop={() => {
+            setSelectedGameHub(null);
+            setHokmHubSubView('hub');
+            setShopInitialCategory('all');
+            setActiveTab('shop');
+          }}
+        />
+
+        {/* Standalone Auth Modal when triggered from Hokm Shop */}
+        <AuthModal
+          isOpen={isAuthModalOpen}
+          onClose={() => {
+            setIsAuthModalOpen(false);
+            setAuthModalReason(null);
+          }}
+          authUser={authUser}
+          authLoading={authLoading}
+          onAuthChange={applyAuthenticatedUser}
+          initialMode={authModalMode}
+          reasonMessage={authModalReason}
+          pendingAuthAction={pendingAuthAction}
+          onClearPendingAuthAction={() => setPendingAuthAction(null)}
+          reducedMotion={profile.appSettings.reducedMotion}
+        />
+      </>
+    );
+  }
+
+  // =========================================================================
+  // MAIN PLATFORM SHELL (Floating Frosted Pill Bottom Dock)
+  // =========================================================================
 
   return (
     <div className="min-h-[100dvh] flex flex-col bg-[var(--eyvan-bg)] text-[var(--eyvan-text)] relative overflow-x-hidden transition-colors duration-200">
@@ -419,7 +804,6 @@ export default function App() {
           alt=""
           decoding="sync"
           loading="eager"
-          referrerPolicy="no-referrer"
           className="w-full h-full object-cover object-top"
           style={{ opacity: 'var(--eyvan-backdrop-opacity)' }}
         />
@@ -430,36 +814,58 @@ export default function App() {
       </div>
 
       <div className="relative z-10 flex flex-col min-h-[100dvh]">
+        <OfflineIndicator />
         <TopBar
           activeTab={activeTab}
           onSelectTab={handleSelectTab}
           profile={profile}
+          isAuthenticated={Boolean(authUser)}
           themeMode={themeMode}
           onToggleTheme={handleToggleTheme}
           isProfileOpen={isProfileOpen}
           onToggleProfile={() => {
-            setIsProfileOpen((prev) => !prev);
+            if (isProfileOpen) {
+              setIsProfileOpen(false);
+            } else {
+              openProfileModal('overview', 'login');
+            }
           }}
+          onOpenAuth={(mode) => openAuthModal(mode, null)}
         />
 
-        <main
-          className={`flex-1 w-full max-w-5xl mx-auto px-3.5 sm:px-6 pt-3 sm:pt-5 ${
-            hideBottomNav ? 'pb-3 md:pb-6' : 'pb-24 md:pb-12'
-          }`}
-        >
+        <main className="flex-1 w-full max-w-5xl mx-auto px-3.5 sm:px-6 pt-3 sm:pt-5 pb-24 sm:pb-24">
           {activeTab === 'shop' && (
-            <ShopPage userCoins={profile.coins} userGems={profile.gems} />
+            <ShopPage
+              userCoins={profile.coins}
+              userGems={profile.gems}
+              isAuthenticated={Boolean(authUser)}
+              ownedItemIds={profile.ownedShopItemIds}
+              equippedTableSkinId={profile.equippedTableSkinId}
+              equippedBannerCode={profile.bannerCode}
+              onPurchaseItem={handlePurchaseShopItem}
+              onEquipItem={handleEquipShopItem}
+              initialCategory={shopInitialCategory}
+              onRequireAuth={() => openAuthModal('login', null)}
+              onBack={() => handleSelectTab('games')}
+            />
           )}
           {activeTab === 'games' && (
-            <GamesPage onSelectGame={handleLaunchGame} />
+            <GamesPage
+              onSelectGame={handleOpenGameHub}
+              themeMode={themeMode}
+            />
           )}
           {activeTab === 'friends' && (
             <FriendsPage
               authUser={authUser}
               authLoading={authLoading}
-              onOpenAccount={() => setIsProfileOpen(true)}
+              onOpenAccount={() => openAuthModal('login', null)}
+              onBack={() => handleSelectTab('games')}
               onJoinInvitedRoom={(roomCode) => {
                 setIsProfileOpen(false);
+                setIsAuthModalOpen(false);
+                setSelectedGameHub(null);
+                setOnlineLaunchAction('join_room');
                 setInitialRoomCode(roomCode);
                 setAutoJoinInviteRoom(true);
                 setActiveGame('hokm-online');
@@ -468,20 +874,64 @@ export default function App() {
           )}
         </main>
 
-        {!hideBottomNav && (
-          <BottomNav activeTab={activeTab} onSelectTab={handleSelectTab} />
+        {/* Floating Frosted Pill Bottom Dock */}
+        {!isTyping && (
+          <BottomNav
+            activeTab={activeTab}
+            onSelectTab={handleSelectTab}
+            themeMode={themeMode}
+          />
         )}
 
+        {/* Double-Back-to-Exit Toast on Main Menu */}
+        {exitToastVisible && (
+          <div
+            role="status"
+            aria-live="polite"
+            data-testid="exit-back-toast"
+            className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[80] px-4 py-2.5 rounded-2xl bg-[#0B172A]/94 border border-[#F3D179]/45 text-[#F8FAFC] text-xs font-extrabold shadow-[0_14px_36px_rgba(0,0,0,0.45)] backdrop-blur-md whitespace-nowrap"
+          >
+            برای خروج، دکمه بازگشت را یک‌بار دیگر بزنید
+          </div>
+        )}
+
+        {/* Floating Centered Profile Modal */}
         <ProfileDrawer
           isOpen={isProfileOpen}
           onClose={() => setIsProfileOpen(false)}
           profile={profile}
-          onUpdateProfile={setProfile}
+          onUpdateProfile={updateProfile}
           authUser={authUser}
           authLoading={authLoading}
           onAuthChange={applyAuthenticatedUser}
           pendingAuthAction={pendingAuthAction}
           onClearPendingAuthAction={() => setPendingAuthAction(null)}
+          initialView={profileInitialView}
+          initialAuthMode={profileInitialAuthMode}
+          onOpenAuthModal={(mode) => openAuthModal(mode, null)}
+          onOpenBannerShop={() => {
+            setIsProfileOpen(false);
+            setSelectedGameHub(null);
+            setShopInitialCategory('avatars_frames');
+            setActiveTab('shop');
+          }}
+        />
+
+        {/* Dedicated Standalone Auth-Only Modal (Unified Email-First Flow) */}
+        <AuthModal
+          isOpen={isAuthModalOpen}
+          onClose={() => {
+            setIsAuthModalOpen(false);
+            setAuthModalReason(null);
+          }}
+          authUser={authUser}
+          authLoading={authLoading}
+          onAuthChange={applyAuthenticatedUser}
+          initialMode={authModalMode}
+          reasonMessage={authModalReason}
+          pendingAuthAction={pendingAuthAction}
+          onClearPendingAuthAction={() => setPendingAuthAction(null)}
+          reducedMotion={profile.appSettings.reducedMotion}
         />
       </div>
     </div>

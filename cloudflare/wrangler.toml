@@ -28,9 +28,17 @@ EMAIL_FROM = ""
 name = "HOKM_ROOM"
 class_name = "HokmRoomDO"
 
+[[durable_objects.bindings]]
+name = "CHAT_CONVERSATION"
+class_name = "ChatConversationDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["HokmRoomDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["ChatConversationDO"]
 
 [[d1_databases]]
 binding = "EYVAN_DB"

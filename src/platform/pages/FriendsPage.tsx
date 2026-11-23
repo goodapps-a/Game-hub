@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  ArrowLeft,
   Ban,
   Check,
   Clock,
@@ -22,6 +23,14 @@ import {
 } from 'lucide-react';
 import { AuthUserSummary } from '../auth/authClient';
 import { PrivateChatPanel } from '../components/PrivateChatPanel';
+import {
+  EyvanBotAvatar,
+  EyvanBotChatPanel,
+} from '../components/EyvanBotChatPanel';
+import {
+  EYVAN_OFFICIAL_BOT,
+  getEyvanBotUnreadCount,
+} from '../social/eyvanBot';
 import { ProfileAvatar } from '../components/TopBar';
 import { toPersianDigits } from '../theme/tokens';
 import { UserProfile } from '../types/platform';
@@ -59,6 +68,7 @@ interface FriendsPageProps {
   authLoading: boolean;
   onOpenAccount: () => void;
   onJoinInvitedRoom?: (roomCode: string) => void;
+  onBack?: () => void;
 }
 
 type SocialSubTab = 'friends' | 'incoming' | 'outgoing' | 'blocked';
@@ -84,6 +94,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
   authLoading,
   onOpenAccount,
   onJoinInvitedRoom,
+  onBack,
 }) => {
   const [activeTab, setActiveTab] = useState<SocialSubTab>('friends');
 
@@ -95,6 +106,10 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
   const [conversations, setConversations] = useState<ChatConversationItem[]>([]);
   const [activeConversation, setActiveConversation] =
     useState<ChatConversationItem | null>(null);
+  const [eyvanBotChatOpen, setEyvanBotChatOpen] = useState(false);
+  const [eyvanBotUnread, setEyvanBotUnread] = useState<number>(() =>
+    getEyvanBotUnreadCount()
+  );
   const [incomingInvites, setIncomingInvites] = useState<GameInviteItem[]>([]);
   const [privacy, setPrivacy] = useState<SocialPrivacySettings | null>(null);
   const [initialLoading, setInitialLoading] = useState(false);
@@ -197,6 +212,17 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
       setRefreshing(false);
     }
   }, [showToast]);
+
+  const refreshConversationsOnly = useCallback(async () => {
+    try {
+      const convsRes = await fetchChatConversationsRequest();
+      if (convsRes.ok && Array.isArray(convsRes.conversations)) {
+        setConversations(convsRes.conversations);
+      }
+    } catch {
+      // Non-fatal
+    }
+  }, []);
 
   // Reset and load whenever authenticated user changes
   useEffect(() => {
@@ -507,6 +533,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
         showToast('error', res.message ?? 'باز کردن گفتگوی خصوصی انجام نشد.');
         return;
       }
+      setEyvanBotChatOpen(false);
       setActiveConversation(res.conversation);
     } catch {
       showToast('error', 'خطا در برقراری ارتباط برای شروع گفتگو.');
@@ -622,15 +649,80 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
     );
   }
 
+  const renderEyvanFriendRow = () => (
+    <div
+      data-testid="friend-row-eyvan-bot"
+      data-presence="online"
+      className="px-4 py-3.5 flex flex-wrap items-center justify-between gap-3"
+    >
+      <div className="flex items-center gap-3 min-w-0">
+        <div className="relative shrink-0">
+          <EyvanBotAvatar size="md" />
+          <span
+            aria-label="آنلاین"
+            className="absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full border-2 border-[var(--eyvan-surface)] bg-[#22C55E]"
+          />
+        </div>
+
+        <div className="min-w-0">
+          <div className="text-sm sm:text-[15px] font-extrabold theme-heading truncate">
+            {EYVAN_OFFICIAL_BOT.displayName}
+          </div>
+          <div className="text-xs font-bold mt-0.5 flex items-center gap-1.5 text-[#22C55E]">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#22C55E]" />
+            <span>{EYVAN_OFFICIAL_BOT.statusLabel}</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+        <button
+          type="button"
+          onClick={() => {
+            setActiveConversation(null);
+            setEyvanBotChatOpen(true);
+          }}
+          data-testid="open-chat-btn-eyvan-bot"
+          className="min-h-[36px] px-3 rounded-xl bg-[#0D8A8A] hover:bg-[#11A3A3] text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+        >
+          <MessageSquare className="w-3.5 h-3.5" />
+          <span>گفتگو</span>
+          {eyvanBotUnread > 0 && (
+            <span
+              data-testid="eyvan-bot-unread-badge"
+              className="min-w-[18px] h-[18px] px-1 rounded-full bg-[#F3D179] text-[#0B1628] text-[10px] font-black inline-flex items-center justify-center tabular-nums"
+            >
+              {toPersianDigits(eyvanBotUnread)}
+            </span>
+          )}
+        </button>
+      </div>
+    </div>
+  );
+
   // =========================================================================
-  // LOGGED-OUT GATE (Central Account Required — Zero Fake/Demo Data)
+  // LOGGED-OUT GATE (Central Account Required)
   // =========================================================================
   if (!authUser) {
     return (
       <div
-        className="max-w-xl mx-auto pt-4 sm:pt-8"
+        className="max-w-xl mx-auto pt-2 sm:pt-6 space-y-3.5"
         data-testid="friends-auth-required"
       >
+        {onBack && (
+          <div className="flex items-center justify-end">
+            <button
+              type="button"
+              onClick={onBack}
+              data-testid="friends-back-btn"
+              className="min-h-[40px] px-3.5 rounded-xl theme-btn-secondary border text-xs sm:text-sm font-extrabold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
+            >
+              <span>بازگشت</span>
+              <ArrowLeft className="w-4 h-4 shrink-0" />
+            </button>
+          </div>
+        )}
+
         <section className="eyvan-card rounded-2xl p-6 sm:p-8 text-center space-y-5">
           <div className="w-16 h-16 mx-auto rounded-2xl bg-[#0D8A8A]/16 border border-[#0D8A8A]/40 flex items-center justify-center">
             <Users className="w-8 h-8 theme-accent-teal" />
@@ -682,7 +774,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
             className="w-full sm:w-auto min-h-[46px] px-7 rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] hover:from-[#F8DD94] hover:to-[#D4AE58] text-[#0B1628] text-sm font-black inline-flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer"
           >
             <UserPlus className="w-4 h-4" />
-            <span>ورود یا ساخت حساب کاربری</span>
+            <span>ورود به حساب</span>
           </button>
         </section>
       </div>
@@ -747,6 +839,19 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                 className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`}
               />
             </button>
+
+            {onBack && (
+              <button
+                type="button"
+                onClick={onBack}
+                data-testid="friends-back-btn"
+                aria-label="بازگشت به بازی‌ها"
+                className="min-h-[40px] px-3 rounded-xl theme-btn-secondary border text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+              >
+                <span>بازگشت</span>
+                <ArrowLeft className="w-4 h-4 shrink-0" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -892,6 +997,14 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
         </section>
       )}
 
+      {/* Eyvan One-Way Friend Chat Panel */}
+      {eyvanBotChatOpen && (
+        <EyvanBotChatPanel
+          onClose={() => setEyvanBotChatOpen(false)}
+          onMarkedRead={() => setEyvanBotUnread(0)}
+        />
+      )}
+
       {/* Active Private 1-on-1 Direct Chat Panel (Stage D2) */}
       {activeConversation && (
         <PrivateChatPanel
@@ -899,9 +1012,9 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
           conversation={activeConversation}
           onClose={() => {
             setActiveConversation(null);
-            void loadSocialSnapshot(true);
+            void refreshConversationsOnly();
           }}
-          onConversationActivity={() => void loadSocialSnapshot(true)}
+          onConversationActivity={refreshConversationsOnly}
         />
       )}
 
@@ -1269,20 +1382,22 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
             <span>در حال بارگذاری اطلاعات...</span>
           </div>
         ) : activeTab === 'friends' ? (
-          sortedFriends.length === 0 ? (
-            <div
-              className="px-5 py-10 text-center space-y-2"
-              data-testid="friends-empty-state"
-            >
-              <p className="text-sm font-bold theme-heading">
-                هنوز دوستی در لیست شما ثبت نشده است.
-              </p>
-              <p className="text-xs theme-muted">
-                نام کاربری دوستان خود را در کادر بالا جستجو کنید و درخواست دوستی بفرستید.
-              </p>
-            </div>
-          ) : (
-            sortedFriends.map((friend) => {
+          <>
+            {renderEyvanFriendRow()}
+            {sortedFriends.length === 0 ? (
+              <div
+                className="px-5 py-10 text-center space-y-2"
+                data-testid="friends-empty-state"
+              >
+                <p className="text-sm font-bold theme-heading">
+                  هنوز دوستی در لیست شما ثبت نشده است.
+                </p>
+                <p className="text-xs theme-muted">
+                  نام کاربری دوستان خود را در کادر بالا جستجو کنید و درخواست دوستی بفرستید.
+                </p>
+              </div>
+            ) : (
+              sortedFriends.map((friend) => {
               const isConfirmingRemove = confirmRemoveUserId === friend.userId;
               const isConfirmingBlock = confirmBlockUserId === friend.userId;
               const isRemoving = busyKey === `rem:${friend.userId}`;
@@ -1453,7 +1568,8 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                 </div>
               );
             })
-          )
+            )}
+          </>
         ) : activeTab === 'incoming' ? (
           incoming.length === 0 ? (
             <div

@@ -12,11 +12,18 @@ export type GameId = 'hokm' | 'chess' | 'backgammon' | 'ludo' | 'pasoor';
 
 export type ThemeMode = 'dark' | 'light';
 
+export type ProfileBannerCode = 'royal' | 'garden' | 'ruby' | 'none';
+
 export interface UserProfile {
   /** Unique English username acts as the player's sole ID across the platform */
   id: string;
   username: string;
   avatarCode: 'portrait' | 'shamsa' | 'turquoise' | 'lapis' | 'jade';
+  customAvatarUrl?: string | null;
+  bannerCode?: ProfileBannerCode;
+  customBannerUrl?: string | null;
+  equippedTableSkinId?: string;
+  ownedShopItemIds?: string[];
   level: number;
   xp: number;
   xpToNextLevel: number;
@@ -121,4 +128,5 @@ export interface GameModuleDescriptor {
   accentColor: string;
   bgTint: string;
   artworkSrc: string;
+  readonly lightArtworkSrc?: string;
 }

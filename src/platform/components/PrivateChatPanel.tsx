@@ -1,10 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
-  ArrowRight,
+  ArrowLeft,
+  Check,
   CheckCheck,
+  Clock,
   Loader2,
   MessageSquare,
+  RotateCcw,
   Send,
   WifiOff,
 } from 'lucide-react';
@@ -12,8 +15,24 @@ import { ProfileAvatar } from './TopBar';
 import { toPersianDigits } from '../theme/tokens';
 import { UserProfile } from '../types/platform';
 import {
+  CHAT_FALLBACK_POLL_INTERVAL_MS,
+  CHAT_WS_CLOSE_FORBIDDEN,
+  CHAT_WS_CLOSE_UNAUTHORIZED,
+  ChatReadCursor,
+  ChatUiMessage,
+  advanceReadCursorMonotonic,
+  compareMessageCursor,
+  computeReconnectDelayMs,
+  getLatestConfirmedCursor,
+  getLatestPartnerConfirmedMessage,
+  isMessageReadByPartner,
+  mergeChatMessages,
+  parseChatWsServerEvent,
+  toConfirmedUiMessage,
+} from '../social/chatRealtimeProtocol';
+import {
   ChatConversationItem,
-  ChatMessageItem,
+  buildChatWebSocketUrl,
   fetchChatMessagesRequest,
   markChatReadApi,
   sendChatMessageApi,
@@ -26,7 +45,6 @@ interface PrivateChatPanelProps {
   onConversationActivity?: () => void;
 }
 
-const CHAT_POLL_INTERVAL_MS = 4500;
 const MAX_CHAT_CHARS = 2000;
 
 function toValidAvatarCode(code: string): UserProfile['avatarCode'] {
@@ -66,21 +84,9 @@ function formatMessageTime(ts: number): string {
   }
 }
 
-function mergeMessagesUnique(
-  existing: ChatMessageItem[],
-  incoming: ChatMessageItem[]
-): ChatMessageItem[] {
-  const byId = new Map<string, ChatMessageItem>();
-  for (const m of existing) {
-    byId.set(m.messageId, m);
-  }
-  for (const m of incoming) {
-    byId.set(m.messageId, m);
-  }
-  return Array.from(byId.values()).sort((a, b) => {
-    if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
-    return a.messageId.localeCompare(b.messageId);
-  });
+function isPageVisible(): boolean {
+  if (typeof document === 'undefined') return true;
+  return document.visibilityState === 'visible';
 }
 
 export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
@@ -89,24 +95,44 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
   onClose,
   onConversationActivity,
 }) => {
-  const [messages, setMessages] = useState<ChatMessageItem[]>([]);
+  const [messages, setMessages] = useState<ChatUiMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [nextBefore, setNextBefore] = useState<number | null>(null);
-  const [partnerLastReadAt, setPartnerLastReadAt] = useState<number | null>(null);
+  const [partnerReadCursor, setPartnerReadCursor] = useState<ChatReadCursor | null>(
+    null
+  );
   const [draft, setDraft] = useState('');
-  const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [revoked, setRevoked] = useState(false);
+  const [wsConnected, setWsConnected] = useState(false);
   const [offline, setOffline] = useState(
     typeof navigator !== 'undefined' ? !navigator.onLine : false
   );
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  const lastReadMarkedRef = useRef<string | null>(null);
-  const pendingClientMsgIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
-  const inFlightPollRef = useRef(false);
+  const messagesRef = useRef<ChatUiMessage[]>([]);
+  const lastReadMarkedRef = useRef<{ createdAt: number; messageId: string } | null>(
+    null
+  );
+  const readInFlightRef = useRef(false);
+  const deltaInFlightRef = useRef(false);
+  const wsConnectedRef = useRef(false);
+  const revokedRef = useRef(false);
+  const activeConvIdRef = useRef(conversation.conversationId);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const hadConnectedOnceRef = useRef(false);
+  const prevMsgCountRef = useRef(0);
+  const onConversationActivityRef = useRef(onConversationActivity);
+  const readCooldownUntilRef = useRef(0);
+
+  messagesRef.current = messages;
+  activeConvIdRef.current = conversation.conversationId;
+  onConversationActivityRef.current = onConversationActivity;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -115,102 +141,421 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
     };
   }, []);
 
-  useEffect(() => {
-    const handleOnline = () => setOffline(false);
-    const handleOffline = () => setOffline(true);
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, []);
+  /**
+   * Marks the latest confirmed message from the partner as read ONLY when:
+   * - This chat panel is open for the exact conversationId,
+   * - The page/tab is genuinely visible (`document.visibilityState === 'visible'`),
+   * - The partner message is strictly newer than the last marked cursor.
+   */
+  const maybeMarkPartnerMessagesRead = useCallback(
+    async (items: readonly ChatUiMessage[]) => {
+      if (!mountedRef.current || revokedRef.current || !isPageVisible()) return;
+      const targetConvId = activeConvIdRef.current;
+      const latestPartnerMsg = getLatestPartnerConfirmedMessage(items, currentUserId);
+      if (!latestPartnerMsg) return;
 
-  const markLatestRead = useCallback(
-    async (items: ChatMessageItem[]) => {
-      const latest = items[items.length - 1];
-      if (!latest || latest.messageId === lastReadMarkedRef.current) return;
-      lastReadMarkedRef.current = latest.messageId;
-      try {
-        await markChatReadApi(conversation.conversationId, latest.messageId);
-        onConversationActivity?.();
-      } catch {
-        // Non-fatal
+      const prevMarked = lastReadMarkedRef.current;
+      if (
+        prevMarked &&
+        compareMessageCursor(
+          {
+            createdAt: latestPartnerMsg.createdAt,
+            messageId: latestPartnerMsg.messageId,
+          },
+          prevMarked
+        ) <= 0
+      ) {
+        return;
       }
-    },
-    [conversation.conversationId, onConversationActivity]
-  );
 
-  const loadLatestMessages = useCallback(
-    async (silent = false) => {
-      if (silent && inFlightPollRef.current) return;
-      if (silent) {
-        inFlightPollRef.current = true;
-      } else {
-        setLoading(true);
-        setErrorMsg(null);
-      }
-      const targetConvId = conversation.conversationId;
+      if (readInFlightRef.current || Date.now() < readCooldownUntilRef.current) return;
+      readInFlightRef.current = true;
+      const attemptCursor = {
+        createdAt: latestPartnerMsg.createdAt,
+        messageId: latestPartnerMsg.messageId,
+      };
       try {
-        const res = await fetchChatMessagesRequest(targetConvId, undefined, 30);
-        if (!mountedRef.current) return;
-        if (!res.ok) {
-          if (!silent) {
-            setErrorMsg(res.message ?? 'خطا در دریافت پیام‌های گفتگو.');
-          }
-          return;
-        }
-        const fetched = Array.isArray(res.messages) ? res.messages : [];
-        setMessages((prev) =>
-          silent ? mergeMessagesUnique(prev, fetched) : fetched
-        );
-        if (!silent) {
-          setHasMore(Boolean(res.hasMore));
-          setNextBefore(res.nextBefore ?? null);
-        }
-        setPartnerLastReadAt(res.partnerLastReadAt ?? null);
-        if (fetched.length > 0) {
-          void markLatestRead(fetched);
+        const res = await markChatReadApi(targetConvId, latestPartnerMsg.messageId);
+        if (!mountedRef.current || activeConvIdRef.current !== targetConvId) return;
+        if (res.ok) {
+          lastReadMarkedRef.current = attemptCursor;
+          readCooldownUntilRef.current = 0;
+          onConversationActivityRef.current?.();
+        } else {
+          readCooldownUntilRef.current = Date.now() + 2500;
         }
       } catch {
-        if (!silent && mountedRef.current) {
-          setErrorMsg('ارتباط با سرور برای دریافت پیام‌ها برقرار نشد.');
-        }
+        readCooldownUntilRef.current = Date.now() + 2500;
+        // Non-fatal; will retry on next message/focus/sync
       } finally {
-        if (silent) {
-          inFlightPollRef.current = false;
-        } else if (mountedRef.current) {
-          setLoading(false);
-        }
+        readInFlightRef.current = false;
       }
     },
-    [conversation.conversationId, markLatestRead]
+    [currentUserId]
   );
 
+  /**
+   * Initial history load (fetches latest 30 messages + initial partner read cursor).
+   */
+  const loadInitialMessages = useCallback(async () => {
+    const targetConvId = conversation.conversationId;
+    setLoading(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetchChatMessagesRequest(targetConvId, undefined, 30);
+      if (!mountedRef.current || activeConvIdRef.current !== targetConvId) return;
+      if (!res.ok) {
+        setErrorMsg(res.message ?? 'خطا در دریافت پیام‌های گفتگو.');
+        if (res.code === 'USER_BLOCKED' || res.code === 'FORBIDDEN' || res.code === 'NOT_FRIENDS') {
+          revokedRef.current = true;
+          setRevoked(true);
+        }
+        return;
+      }
+      const fetched = Array.isArray(res.messages)
+        ? res.messages.map(toConfirmedUiMessage)
+        : [];
+      setMessages((prev) => mergeChatMessages(prev, fetched));
+      setHasMore(Boolean(res.hasMore));
+      setNextBefore(res.nextBefore ?? null);
+      if (typeof res.partnerLastReadAt === 'number' && res.partnerLastReadAt > 0) {
+        setPartnerReadCursor((prev) =>
+          advanceReadCursorMonotonic(prev, {
+            lastReadAt: res.partnerLastReadAt!,
+            lastReadMessageId: res.partnerLastReadMessageId ?? null,
+          })
+        );
+      }
+      if (fetched.length > 0) {
+        void maybeMarkPartnerMessagesRead(fetched);
+      }
+    } catch {
+      if (mountedRef.current && activeConvIdRef.current === targetConvId) {
+        setErrorMsg('ارتباط با سرور برای دریافت پیام‌ها برقرار نشد.');
+      }
+    } finally {
+      if (mountedRef.current && activeConvIdRef.current === targetConvId) {
+        setLoading(false);
+      }
+    }
+  }, [conversation.conversationId, maybeMarkPartnerMessagesRead]);
+
+  /**
+   * Lightweight incremental HTTP delta sync:
+   * - Fetches ONLY messages strictly after the latest confirmed `(createdAt, messageId)`
+   *   plus the latest `partnerLastReadAt` / `partnerLastReadMessageId` cursor.
+   * - Used ONLY on WebSocket reconnect recovery OR while WebSocket is disconnected (fallback).
+   * - Never refetches 30 old messages on every tick.
+   */
+  const syncDeltaMessages = useCallback(async () => {
+    if (deltaInFlightRef.current || revokedRef.current) return;
+    const targetConvId = conversation.conversationId;
+    deltaInFlightRef.current = true;
+    try {
+      const latestCursor = getLatestConfirmedCursor(messagesRef.current);
+      const res = await fetchChatMessagesRequest(
+        targetConvId,
+        undefined,
+        30,
+        undefined,
+        latestCursor
+          ? {
+              after: latestCursor.createdAt,
+              afterMessageId: latestCursor.messageId,
+            }
+          : undefined
+      );
+      if (!mountedRef.current || activeConvIdRef.current !== targetConvId) return;
+      if (!res.ok) {
+        if (
+          res.code === 'USER_BLOCKED' ||
+          res.code === 'FORBIDDEN' ||
+          res.code === 'NOT_FRIENDS' ||
+          res.code === 'UNAUTHORIZED'
+        ) {
+          revokedRef.current = true;
+          setRevoked(true);
+          setErrorMsg(res.message ?? 'دسترسی به این گفتگو دیگر فعال نیست.');
+        }
+        return;
+      }
+
+      const incoming = Array.isArray(res.messages)
+        ? res.messages.map(toConfirmedUiMessage)
+        : [];
+      if (incoming.length > 0) {
+        const merged = mergeChatMessages(messagesRef.current, incoming);
+        setMessages(merged);
+        void maybeMarkPartnerMessagesRead(merged);
+      }
+
+      if (typeof res.partnerLastReadAt === 'number' && res.partnerLastReadAt > 0) {
+        setPartnerReadCursor((prev) =>
+          advanceReadCursorMonotonic(prev, {
+            lastReadAt: res.partnerLastReadAt!,
+            lastReadMessageId: res.partnerLastReadMessageId ?? null,
+          })
+        );
+      }
+    } catch {
+      // Non-fatal transient network failure; next backoff/fallback cycle will retry
+    } finally {
+      deltaInFlightRef.current = false;
+    }
+  }, [conversation.conversationId, maybeMarkPartnerMessagesRead]);
+
+  // Reset state & perform single initial load when conversation changes
   useEffect(() => {
     setMessages([]);
     setHasMore(false);
     setNextBefore(null);
-    setPartnerLastReadAt(null);
+    setPartnerReadCursor(null);
     setErrorMsg(null);
+    setRevoked(false);
+    setWsConnected(false);
+    wsConnectedRef.current = false;
+    revokedRef.current = false;
     lastReadMarkedRef.current = null;
-    void loadLatestMessages(false);
-  }, [conversation.conversationId, loadLatestMessages]);
+    readCooldownUntilRef.current = 0;
+    hadConnectedOnceRef.current = false;
+    reconnectAttemptRef.current = 0;
+    prevMsgCountRef.current = 0;
+    void loadInitialMessages();
+  }, [conversation.conversationId, loadInitialMessages]);
 
+  // Real-time WebSocket lifecycle with capped Exponential Backoff reconnect
   useEffect(() => {
-    const id = window.setInterval(() => {
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+    const targetConvId = conversation.conversationId;
+    let disposed = false;
+
+    const clearReconnectTimer = () => {
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (disposed || revokedRef.current) return;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+      clearReconnectTimer();
+      const delayMs = computeReconnectDelayMs(reconnectAttemptRef.current);
+      reconnectAttemptRef.current = Math.min(10, reconnectAttemptRef.current + 1);
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        if (!disposed && !revokedRef.current) {
+          connectSocket();
+        }
+      }, delayMs);
+    };
+
+    const connectSocket = () => {
+      if (disposed || revokedRef.current) return;
+      if (typeof WebSocket === 'undefined') return;
+      clearReconnectTimer();
+
+      let wsUrl: string;
+      try {
+        wsUrl = buildChatWebSocketUrl(targetConvId);
+      } catch {
         return;
       }
-      void loadLatestMessages(true);
-    }, CHAT_POLL_INTERVAL_MS);
-    return () => window.clearInterval(id);
-  }, [loadLatestMessages]);
 
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(wsUrl);
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (disposed || wsRef.current !== ws) {
+          try {
+            ws.close(1000, 'panel_closed');
+          } catch {
+            // Ignore
+          }
+          return;
+        }
+        wsConnectedRef.current = true;
+        setWsConnected(true);
+        reconnectAttemptRef.current = 0;
+
+        // Recover any missed messages/read updates after a disconnect/reconnect
+        if (hadConnectedOnceRef.current) {
+          void syncDeltaMessages();
+        }
+        hadConnectedOnceRef.current = true;
+      };
+
+      ws.onmessage = (event) => {
+        if (disposed || wsRef.current !== ws || typeof event.data !== 'string') {
+          return;
+        }
+        const parsed = parseChatWsServerEvent(event.data);
+        if (!parsed) return;
+
+        if (
+          parsed.type === 'message:new' &&
+          parsed.conversationId === targetConvId
+        ) {
+          const confirmed = toConfirmedUiMessage(parsed.message);
+          const merged = mergeChatMessages(messagesRef.current, [confirmed]);
+          setMessages(merged);
+          if (confirmed.senderId !== currentUserId) {
+            void maybeMarkPartnerMessagesRead(merged);
+          }
+          return;
+        }
+
+        if (
+          parsed.type === 'read:updated' &&
+          parsed.conversationId === targetConvId &&
+          parsed.readerUserId !== currentUserId
+        ) {
+          setPartnerReadCursor((prev) =>
+            advanceReadCursorMonotonic(prev, {
+              lastReadAt: parsed.lastReadAt,
+              lastReadMessageId: parsed.lastReadMessageId,
+            })
+          );
+          return;
+        }
+
+        if (
+          parsed.type === 'conversation:revoked' &&
+          (!parsed.conversationId || parsed.conversationId === targetConvId)
+        ) {
+          revokedRef.current = true;
+          wsConnectedRef.current = false;
+          setRevoked(true);
+          setWsConnected(false);
+          clearReconnectTimer();
+          setErrorMsg(
+            parsed.reason === 'blocked'
+              ? 'دسترسی به این گفتگو به دلیل مسدودیت قطع شد.'
+              : parsed.reason === 'unfriended'
+                ? 'این گفتگو دیگر فعال نیست زیرا دوستی حذف شده است.'
+                : parsed.reason === 'session_revoked'
+                  ? 'نشست کاربری شما خاتمه یافت. لطفاً دوباره وارد شوید.'
+                  : 'دسترسی به این گفتگو غیرفعال شد.'
+          );
+        }
+      };
+
+      ws.onerror = () => {
+        // Close handler manages reconnect & fallback transition
+      };
+
+      ws.onclose = (closeEvent) => {
+        if (wsRef.current === ws) {
+          wsRef.current = null;
+        }
+        wsConnectedRef.current = false;
+        if (!disposed) {
+          setWsConnected(false);
+        }
+        if (disposed) return;
+
+        if (
+          closeEvent.code === CHAT_WS_CLOSE_UNAUTHORIZED ||
+          closeEvent.code === CHAT_WS_CLOSE_FORBIDDEN
+        ) {
+          revokedRef.current = true;
+          setRevoked(true);
+          clearReconnectTimer();
+          setErrorMsg(
+            closeEvent.code === CHAT_WS_CLOSE_UNAUTHORIZED
+              ? 'نشست کاربری معتبر نیست یا منقضی شده است.'
+              : 'دسترسی به این گفتگو مجاز نیست.'
+          );
+          return;
+        }
+
+        scheduleReconnect();
+      };
+    };
+
+    connectSocket();
+
+    const handleOnline = () => {
+      setOffline(false);
+      if (disposed || revokedRef.current) return;
+      reconnectAttemptRef.current = 0;
+      if (!wsConnectedRef.current) {
+        connectSocket();
+        void syncDeltaMessages();
+      }
+    };
+
+    const handleOffline = () => {
+      setOffline(true);
+      clearReconnectTimer();
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      disposed = true;
+      clearReconnectTimer();
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      wsConnectedRef.current = false;
+      const activeWs = wsRef.current;
+      wsRef.current = null;
+      if (activeWs) {
+        try {
+          activeWs.close(1000, 'panel_closed');
+        } catch {
+          // Ignore
+        }
+      }
+    };
+  }, [
+    conversation.conversationId,
+    currentUserId,
+    maybeMarkPartnerMessagesRead,
+    syncDeltaMessages,
+  ]);
+
+  // Fallback incremental HTTP polling — strictly DISABLED while WebSocket is connected
   useEffect(() => {
-    if (!loading && messages.length > 0) {
+    if (wsConnected || loading || revoked || offline) return;
+
+    const timerId = window.setInterval(() => {
+      if (wsConnectedRef.current || revokedRef.current || !isPageVisible()) {
+        return;
+      }
+      void syncDeltaMessages();
+    }, CHAT_FALLBACK_POLL_INTERVAL_MS);
+
+    return () => window.clearInterval(timerId);
+  }, [wsConnected, loading, revoked, offline, syncDeltaMessages]);
+
+  // Mark unread partner messages as read ONLY when the user brings the tab/window into focus
+  useEffect(() => {
+    const handleVisibilityOrFocus = () => {
+      if (isPageVisible() && messagesRef.current.length > 0) {
+        void maybeMarkPartnerMessagesRead(messagesRef.current);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+    };
+  }, [maybeMarkPartnerMessagesRead]);
+
+  // Auto-scroll smoothly when new messages arrive
+  useEffect(() => {
+    if (!loading && messages.length > prevMsgCountRef.current) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
+    prevMsgCountRef.current = messages.length;
   }, [messages.length, loading]);
 
   const handleLoadOlder = async () => {
@@ -227,8 +572,10 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
         setErrorMsg(res.message ?? 'خطا در بارگذاری پیام‌های قدیمی‌تر.');
         return;
       }
-      const older = Array.isArray(res.messages) ? res.messages : [];
-      setMessages((prev) => mergeMessagesUnique(older, prev));
+      const older = Array.isArray(res.messages)
+        ? res.messages.map(toConfirmedUiMessage)
+        : [];
+      setMessages((prev) => mergeChatMessages(older, prev));
       setHasMore(Boolean(res.hasMore));
       setNextBefore(res.nextBefore ?? null);
     } catch {
@@ -238,9 +585,80 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
     }
   };
 
+  /**
+   * Sends (or retries) a message using strict `clientMsgId` idempotency.
+   * Shows Optimistic UI (`sending`, NO tick) immediately and upgrades to 1 tick
+   * ONLY after the server commits to D1 and returns success.
+   */
+  const dispatchMessageSend = useCallback(
+    async (bodyText: string, clientMsgId: string, existingOptimisticId?: string) => {
+      const targetConvId = conversation.conversationId;
+      const optimisticId = existingOptimisticId ?? `opt_${clientMsgId}`;
+      const optimisticItem: ChatUiMessage = {
+        messageId: optimisticId,
+        conversationId: targetConvId,
+        senderId: currentUserId,
+        kind: 'text',
+        body: bodyText,
+        clientMsgId,
+        createdAt: Date.now(),
+        localStatus: 'sending',
+      };
+
+      setErrorMsg(null);
+      setMessages((prev) => mergeChatMessages(prev, [optimisticItem]));
+
+      try {
+        const res = await sendChatMessageApi(targetConvId, bodyText, clientMsgId);
+        if (!mountedRef.current || activeConvIdRef.current !== targetConvId) return;
+
+        if (!res.ok || !res.message || typeof res.message === 'string') {
+          const reason =
+            typeof res.message === 'string'
+              ? res.message
+              : 'ارسال پیام انجام نشد.';
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.clientMsgId === clientMsgId && m.localStatus !== 'sent'
+                ? { ...m, localStatus: 'failed', errorText: reason }
+                : m
+            )
+          );
+          if (
+            res.code === 'USER_BLOCKED' ||
+            res.code === 'NOT_FRIENDS' ||
+            res.code === 'FORBIDDEN'
+          ) {
+            revokedRef.current = true;
+            setRevoked(true);
+            setErrorMsg(reason);
+          }
+          return;
+        }
+
+        const confirmed = toConfirmedUiMessage(res.message);
+        setMessages((prev) => mergeChatMessages(prev, [confirmed]));
+      } catch {
+        if (!mountedRef.current || activeConvIdRef.current !== targetConvId) return;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.clientMsgId === clientMsgId && m.localStatus !== 'sent'
+              ? {
+                  ...m,
+                  localStatus: 'failed',
+                  errorText: 'ارسال نشد. برای تلاش مجدد کلیک کنید.',
+                }
+              : m
+          )
+        );
+      }
+    },
+    [conversation.conversationId, currentUserId]
+  );
+
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (sending) return;
+    if (revoked) return;
     const trimmed = draft.trim();
     if (!trimmed) return;
     if (trimmed.length > MAX_CHAT_CHARS) {
@@ -248,36 +666,15 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
       return;
     }
 
-    setSending(true);
-    setErrorMsg(null);
-    // Preserve clientMsgId across retries of the same draft for strict idempotency
-    const clientMsgId = pendingClientMsgIdRef.current ?? generateClientMsgId();
-    pendingClientMsgIdRef.current = clientMsgId;
+    const clientMsgId = generateClientMsgId();
+    setDraft('');
+    await dispatchMessageSend(trimmed, clientMsgId);
+  };
 
-    try {
-      const res = await sendChatMessageApi(
-        conversation.conversationId,
-        trimmed,
-        clientMsgId
-      );
-      if (!res.ok || !res.message || typeof res.message === 'string') {
-        setErrorMsg(
-          typeof res.message === 'string'
-            ? res.message
-            : 'ارسال پیام انجام نشد.'
-        );
-        return;
-      }
-      const sentItem = res.message;
-      pendingClientMsgIdRef.current = null;
-      setDraft('');
-      setMessages((prev) => mergeMessagesUnique(prev, [sentItem]));
-      onConversationActivity?.();
-    } catch {
-      setErrorMsg('ارسال پیام با خطا مواجه شد. می‌توانید دوباره ارسال کنید.');
-    } finally {
-      setSending(false);
-    }
+  const handleRetryFailed = (msg: ChatUiMessage) => {
+    if (revoked || msg.localStatus !== 'failed') return;
+    const retryClientMsgId = msg.clientMsgId ?? generateClientMsgId();
+    void dispatchMessageSend(msg.body, retryClientMsgId, msg.messageId);
   };
 
   return (
@@ -288,16 +685,6 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
       {/* Chat Header */}
       <header className="px-4 py-3 border-b border-[var(--eyvan-line)] flex items-center justify-between gap-3 bg-black/15">
         <div className="flex items-center gap-3 min-w-0">
-          <button
-            type="button"
-            onClick={onClose}
-            data-testid="chat-close-btn"
-            aria-label="بازگشت به لیست دوستان"
-            className="w-9 h-9 rounded-xl theme-btn-secondary border flex items-center justify-center shrink-0 cursor-pointer"
-          >
-            <ArrowRight className="w-4 h-4" />
-          </button>
-
           <div className="relative shrink-0">
             <ProfileAvatar
               avatarCode={toValidAvatarCode(conversation.partner.avatarCode)}
@@ -329,10 +716,23 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
           </div>
         </div>
 
-        <span className="inline-flex items-center gap-1.5 text-[11px] font-bold theme-accent-teal shrink-0">
-          <MessageSquare className="w-3.5 h-3.5" />
-          <span>گفتگوی خصوصی</span>
-        </span>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="hidden sm:inline-flex items-center gap-1.5 text-[11px] font-bold theme-accent-teal shrink-0">
+            <MessageSquare className="w-3.5 h-3.5" />
+            <span>گفتگوی خصوصی</span>
+          </span>
+
+          <button
+            type="button"
+            onClick={onClose}
+            data-testid="chat-close-btn"
+            aria-label="بازگشت به لیست دوستان"
+            className="min-h-[36px] px-2.5 rounded-xl theme-btn-secondary border inline-flex items-center gap-1 text-xs font-extrabold shrink-0 cursor-pointer"
+          >
+            <span>بازگشت</span>
+            <ArrowLeft className="w-4 h-4 shrink-0" />
+          </button>
+        </div>
       </header>
 
       {/* Offline banner */}
@@ -396,30 +796,61 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
           messages.map((msg) => {
             const isMine = msg.senderId === currentUserId;
             const isReadByPartner =
-              isMine &&
-              partnerLastReadAt !== null &&
-              partnerLastReadAt >= msg.createdAt;
+              isMine && isMessageReadByPartner(msg, partnerReadCursor);
 
             return (
               <div
-                key={msg.messageId}
+                key={msg.clientMsgId && msg.localStatus !== 'sent' ? msg.clientMsgId : msg.messageId}
                 data-testid={`chat-msg-${isMine ? 'mine' : 'theirs'}`}
                 className={`flex ${isMine ? 'justify-start' : 'justify-end'}`}
               >
                 <div
                   className={`max-w-[82%] rounded-2xl px-3.5 py-2.5 text-xs sm:text-sm leading-relaxed break-words whitespace-pre-wrap border ${
                     isMine
-                      ? 'bg-[#0D8A8A]/22 border-[#0D8A8A]/45 theme-heading rounded-tr-sm'
+                      ? msg.localStatus === 'failed'
+                        ? 'bg-red-500/12 border-red-500/40 theme-heading rounded-tr-sm'
+                        : 'bg-[#0D8A8A]/22 border-[#0D8A8A]/45 theme-heading rounded-tr-sm'
                       : 'theme-subcard border-[var(--eyvan-line)] theme-heading rounded-tl-sm'
                   }`}
                 >
                   <div>{msg.body}</div>
+
+                  {msg.localStatus === 'failed' && (
+                    <div className="mt-1.5 pt-1.5 border-t border-red-500/25 flex items-center justify-between gap-2 text-[11px] text-red-400">
+                      <span>{msg.errorText ?? 'ارسال نشد'}</span>
+                      <button
+                        type="button"
+                        onClick={() => handleRetryFailed(msg)}
+                        data-testid="chat-retry-btn"
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-red-500/15 hover:bg-red-500/25 text-red-300 font-bold cursor-pointer shrink-0"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        <span>تلاش مجدد</span>
+                      </button>
+                    </div>
+                  )}
+
                   <div className="mt-1 flex items-center justify-end gap-1 text-[10px] theme-muted">
                     <span>{formatMessageTime(msg.createdAt)}</span>
-                    {isReadByPartner && (
+                    {isMine && msg.localStatus === 'sending' && (
+                      <Clock
+                        className="w-3 h-3 opacity-70"
+                        data-testid="chat-tick-sending"
+                        aria-label="در حال ارسال"
+                      />
+                    )}
+                    {isMine && msg.localStatus === 'sent' && !isReadByPartner && (
+                      <Check
+                        className="w-3.5 h-3.5 opacity-80"
+                        data-testid="chat-tick-sent"
+                        aria-label="ارسال‌شده"
+                      />
+                    )}
+                    {isMine && msg.localStatus === 'sent' && isReadByPartner && (
                       <CheckCheck
                         className="w-3.5 h-3.5 text-[#34D399]"
-                        aria-label="خوانده شده"
+                        data-testid="chat-tick-read"
+                        aria-label="خوانده‌شده"
                       />
                     )}
                   </div>
@@ -439,10 +870,8 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
         <div className="flex-1 min-w-0">
           <textarea
             value={draft}
-            onChange={(e) => {
-              setDraft(e.target.value);
-              pendingClientMsgIdRef.current = null;
-            }}
+            disabled={revoked}
+            onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -451,9 +880,13 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
             }}
             rows={1}
             maxLength={MAX_CHAT_CHARS}
-            placeholder="پیام خود را بنویسید..."
+            placeholder={
+              revoked
+                ? 'امکان ارسال پیام در این گفتگو فعال نیست.'
+                : 'پیام خود را بنویسید...'
+            }
             data-testid="chat-message-input"
-            className="w-full min-h-[42px] max-h-[110px] px-3 py-2.5 rounded-xl theme-input border text-xs sm:text-sm focus:outline-none focus:border-[#0D8A8A] resize-none"
+            className="w-full min-h-[42px] max-h-[110px] px-3 py-2.5 rounded-xl theme-input border text-xs sm:text-sm focus:outline-none focus:border-[#0D8A8A] resize-none disabled:opacity-50"
           />
           {draft.length > 1600 && (
             <div className="text-[10px] theme-muted text-left mt-0.5 px-1">
@@ -464,15 +897,11 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
 
         <button
           type="submit"
-          disabled={sending || draft.trim().length === 0 || offline}
+          disabled={draft.trim().length === 0 || offline || revoked}
           data-testid="chat-send-btn"
           className="min-h-[42px] px-4 rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] hover:from-[#F8DD94] hover:to-[#D4AE58] disabled:opacity-50 text-[#0B1628] text-xs font-extrabold inline-flex items-center gap-1.5 shrink-0 cursor-pointer"
         >
-          {sending ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <Send className="w-4 h-4" />
-          )}
+          <Send className="w-4 h-4" />
           <span>ارسال</span>
         </button>
       </form>

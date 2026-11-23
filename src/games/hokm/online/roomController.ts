@@ -14,6 +14,7 @@ import {
   dealRemainingEight,
   playCard,
   resetMatch,
+  resolveNextHakem,
   startNextHand,
   startShufflingHand,
 } from '../engine/gameEngine';
@@ -1127,12 +1128,7 @@ export class HokmRoomController {
       return { ok: false, shouldBroadcast: false };
     }
 
-    const outcome = this.gameState.handOutcome;
-    const hakemWon =
-      outcome && outcome.winningTeam === getTeamForSeat(this.gameState.hakem);
-    const nextHakem = hakemWon
-      ? this.gameState.hakem
-      : getNextSeat(this.gameState.hakem);
+    const nextHakem = resolveNextHakem(this.gameState);
 
     const shuffled = startNextHand(this.gameState, nextHakem, this.rng);
     const dealt5 = dealInitialFive(shuffled);

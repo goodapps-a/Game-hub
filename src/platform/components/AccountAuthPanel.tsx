@@ -1,14 +1,21 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
-  ArrowRight,
+  ArrowLeft,
+  AtSign,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Eye,
+  EyeOff,
   KeyRound,
   Link2,
+  Loader2,
+  Lock,
   LogIn,
   LogOut,
+  Mail,
   MailCheck,
   Monitor,
   RefreshCw,
@@ -21,6 +28,8 @@ import {
   AuthUserSummary,
   LinkedAuthProvider,
   PendingAuthUrlAction,
+  checkEmailExistsRequest,
+  checkUsernameAvailabilityRequest,
   fetchActiveAuthSessions,
   fetchCurrentAuthSession,
   fetchGoogleOAuthConfig,
@@ -35,7 +44,9 @@ import {
   revokeAuthSessionByIdRequest,
   verifyEmailWithTokenRequest,
 } from '../auth/authClient';
+import { validateUsernameFormat } from '../data/guestDefaults';
 import { toPersianDigits } from '../theme/tokens';
+import { computePasswordStrength } from '../utils/gameHubHelpers';
 
 interface AccountAuthPanelProps {
   authUser: AuthUserSummary | null;
@@ -43,15 +54,45 @@ interface AccountAuthPanelProps {
   onAuthChange: (user: AuthUserSummary | null) => void;
   pendingAuthAction?: PendingAuthUrlAction | null;
   onClearPendingAuthAction?: () => void;
+  initialMode?: 'login' | 'register';
 }
 
 type AuthFormMode =
-  | 'login'
-  | 'register'
+  | 'email_entry'
+  | 'login_password'
+  | 'register_details'
   | 'pending_verify'
   | 'forgot'
   | 'verify_token'
   | 'reset_password';
+
+type RegUsernameStatus =
+  | { state: 'idle' }
+  | { state: 'invalid'; message: string }
+  | { state: 'checking' }
+  | { state: 'available'; message: string }
+  | { state: 'taken'; message: string };
+
+const GoogleLogoSvg: React.FC = () => (
+  <svg aria-hidden="true" className="w-[18px] h-[18px] shrink-0" viewBox="0 0 24 24">
+    <path
+      fill="#4285F4"
+      d="M23.52 12.27c0-.85-.08-1.68-.22-2.47H12v4.68h6.46a5.52 5.52 0 0 1-2.4 3.62v3h3.88c2.27-2.09 3.58-5.17 3.58-8.83z"
+    />
+    <path
+      fill="#34A853"
+      d="M12 24c3.24 0 5.95-1.07 7.94-2.9l-3.88-3c-1.08.72-2.46 1.15-4.06 1.15-3.12 0-5.77-2.11-6.72-4.95H1.28v3.1A12 12 0 0 0 12 24z"
+    />
+    <path
+      fill="#FBBC05"
+      d="M5.28 14.3a7.18 7.18 0 0 1 0-4.6V6.6H1.28a12 12 0 0 0 0 10.8l4-3.1z"
+    />
+    <path
+      fill="#EA4335"
+      d="M12 4.75c1.76 0 3.34.61 4.58 1.8l3.44-3.44C17.95 1.19 15.24 0 12 0A12 12 0 0 0 1.28 6.6l4 3.1c.95-2.84 3.6-4.95 6.72-4.95z"
+    />
+  </svg>
+);
 
 export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
   authUser,
@@ -59,8 +100,9 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
   onAuthChange,
   pendingAuthAction = null,
   onClearPendingAuthAction,
+  initialMode = 'login',
 }) => {
-  const [mode, setMode] = useState<AuthFormMode>('login');
+  const [mode, setMode] = useState<AuthFormMode>('email_entry');
   const [identifier, setIdentifier] = useState('');
   const [email, setEmail] = useState('');
   const [resendEmail, setResendEmail] = useState('');
@@ -71,14 +113,30 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
   const [resetToken, setResetToken] = useState<string | null>(null);
+
+  // Password visibility toggles
+  const [showLoginPass, setShowLoginPass] = useState(false);
+  const [showRegPass, setShowRegPass] = useState(false);
+  const [showRegConfirm, setShowRegConfirm] = useState(false);
+  const [showResetPass, setShowResetPass] = useState(false);
+
+  // Live registration username server availability
+  const [regUsernameStatus, setRegUsernameStatus] = useState<RegUsernameStatus>({
+    state: 'idle',
+  });
+  const usernameCheckTimerRef = useRef<number | null>(null);
+  const usernameCheckAbortRef = useRef<AbortController | null>(null);
+
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
   const [unverifiedNotice, setUnverifiedNotice] = useState(false);
-  const [verifyState, setVerifyState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [verifyState, setVerifyState] = useState<
+    'idle' | 'loading' | 'success' | 'error'
+  >('idle');
   const [resetDone, setResetDone] = useState(false);
 
-  // Stage 2 & C3: Google OAuth availability, linked providers & active sessions
+  // Google OAuth, linked providers & active sessions
   const [googleConfigured, setGoogleConfigured] = useState<boolean | null>(null);
   const [googleBusy, setGoogleBusy] = useState(false);
   const [linkedProviders, setLinkedProviders] = useState<LinkedAuthProvider[]>([]);
@@ -88,6 +146,21 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
   const [revokingSessionId, setRevokingSessionId] = useState<string | null>(null);
 
   const lastAutoVerifiedTokenRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!pendingAuthAction && initialMode) {
+      setMode('email_entry');
+    }
+  }, [initialMode, pendingAuthAction]);
+
+  useEffect(() => {
+    return () => {
+      if (usernameCheckTimerRef.current) {
+        window.clearTimeout(usernameCheckTimerRef.current);
+      }
+      usernameCheckAbortRef.current?.abort();
+    };
+  }, []);
 
   const resetFeedback = () => {
     setErrorMsg(null);
@@ -134,7 +207,7 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
     void loadAccountSecurityState();
   }, [authUser?.userId]);
 
-  // React to incoming `#verify-email=` or `#reset-password=` actions (already scrubbed from URL)
+  // React to `#verify-email=` or `#reset-password=` actions
   useEffect(() => {
     if (!pendingAuthAction) return;
 
@@ -161,7 +234,8 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
           } else {
             setVerifyState('error');
             setErrorMsg(
-              res.message ?? 'لینک تأیید ایمیل نامعتبر، استفاده‌شده یا منقضی شده است.'
+              res.message ??
+                'لینک تأیید ایمیل نامعتبر، استفاده‌شده یا منقضی شده است.'
             );
           }
         })
@@ -193,19 +267,125 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
     }
   }, [pendingAuthAction, onClearPendingAuthAction]);
 
+  const handleRegUsernameChange = (raw: string) => {
+    setUsername(raw);
+    if (usernameCheckTimerRef.current) {
+      window.clearTimeout(usernameCheckTimerRef.current);
+    }
+    usernameCheckAbortRef.current?.abort();
+
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      setRegUsernameStatus({ state: 'idle' });
+      return;
+    }
+
+    const fmt = validateUsernameFormat(trimmed);
+    if (!fmt.valid) {
+      setRegUsernameStatus({
+        state: 'invalid',
+        message: fmt.message ?? '۳ تا ۲۰ کاراکتر انگلیسی، عدد، نقطه یا زیرخط',
+      });
+      return;
+    }
+
+    setRegUsernameStatus({ state: 'checking' });
+    usernameCheckTimerRef.current = window.setTimeout(async () => {
+      const controller = new AbortController();
+      usernameCheckAbortRef.current = controller;
+      try {
+        const res = await checkUsernameAvailabilityRequest(
+          trimmed,
+          controller.signal
+        );
+        if (controller.signal.aborted) return;
+        if (!res.ok) {
+          setRegUsernameStatus({ state: 'idle' });
+          return;
+        }
+        if (res.valid === false) {
+          setRegUsernameStatus({
+            state: 'invalid',
+            message: res.message || 'فرمت نام کاربری معتبر نیست.',
+          });
+          return;
+        }
+        if (res.available) {
+          setRegUsernameStatus({ state: 'available', message: 'آزاد است' });
+        } else {
+          setRegUsernameStatus({
+            state: 'taken',
+            message: 'این نام کاربری قبلاً ثبت شده',
+          });
+        }
+      } catch {
+        setRegUsernameStatus({ state: 'idle' });
+      }
+    }, 320);
+  };
+
+  const regPasswordStrength = useMemo(
+    () => computePasswordStrength(password),
+    [password]
+  );
+  const resetPasswordStrength = useMemo(
+    () => computePasswordStrength(newPassword),
+    [newPassword]
+  );
+  const passwordsMatch =
+    confirmPassword.length > 0 && password === confirmPassword;
+  const passwordsMismatch =
+    confirmPassword.length > 0 && password !== confirmPassword;
+
+  const handleEmailCheckSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (submitting) return;
+    const cleaned = email.trim();
+    if (!cleaned) {
+      setErrorMsg('لطفاً ایمیل خود را وارد کنید.');
+      return;
+    }
+    resetFeedback();
+    setSubmitting(true);
+    try {
+      const res = await checkEmailExistsRequest(cleaned);
+      if (!res.ok) {
+        setErrorMsg(res.message ?? 'فرمت ایمیل واردشده معتبر نیست.');
+        return;
+      }
+      const normalized = res.email ?? cleaned;
+      setEmail(normalized);
+      setIdentifier(normalized);
+      setPassword('');
+      setConfirmPassword('');
+      if (res.exists) {
+        setMode('login_password');
+      } else {
+        setMode('register_details');
+      }
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'خطا در برقراری ارتباط با سرور.'
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitting) return;
     resetFeedback();
     setSubmitting(true);
     try {
-      const res = await loginAccount({ identifier, password });
+      const loginId = (email || identifier).trim();
+      const res = await loginAccount({ identifier: loginId, password });
       if (!res.ok || !res.user) {
         setErrorMsg(res.message ?? 'ورود انجام نشد.');
         if (res.code === 'EMAIL_NOT_VERIFIED' || res.verificationRequired) {
           setUnverifiedNotice(true);
-          if (identifier.includes('@')) {
-            setResendEmail(identifier.trim());
+          if (loginId.includes('@')) {
+            setResendEmail(loginId);
           }
         }
         return;
@@ -314,7 +494,9 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
     e.preventDefault();
     if (submitting) return;
     if (!resetToken) {
-      setErrorMsg('توکن بازیابی رمز عبور موجود نیست. لطفاً مجدداً درخواست بازیابی ثبت کنید.');
+      setErrorMsg(
+        'توکن بازیابی رمز عبور موجود نیست. لطفاً مجدداً درخواست بازیابی ثبت کنید.'
+      );
       return;
     }
     resetFeedback();
@@ -358,7 +540,9 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
         return;
       }
       onAuthChange(null);
-      setInfoMsg('از حساب کاربری خارج شدید. همچنان می‌توانید به‌صورت مهمان بازی کنید.');
+      setInfoMsg(
+        'از حساب کاربری خارج شدید. همچنان می‌توانید به‌صورت مهمان بازی کنید.'
+      );
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'خطا در خروج از حساب.');
     } finally {
@@ -433,7 +617,9 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
         setInfoMsg('نشست فعلی لغو شد.');
         return;
       }
-      setActiveSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
+      setActiveSessions((prev) =>
+        prev.filter((s) => s.sessionId !== sessionId)
+      );
       setInfoMsg(res.message ?? 'نشست انتخاب‌شده با موفقیت لغو شد.');
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'خطا در لغو نشست.');
@@ -442,21 +628,26 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
     }
   };
 
-  // Dedicated C2 token flows take priority even if a stale session was previously shown
+  // Dedicated C2 Token Flow: Verify Email
   if (mode === 'verify_token') {
     return (
-      <div
-        className="p-3.5 rounded-2xl theme-subcard border space-y-3"
-        data-testid="auth-verify-email-panel"
-      >
-        <div className="flex items-center gap-2 text-xs font-extrabold theme-heading">
-          <MailCheck className="w-4 h-4 theme-accent-teal shrink-0" />
-          <span>تأیید ایمیل حساب کاربری</span>
+      <div className="space-y-4" data-testid="auth-verify-email-panel">
+        <div className="flex items-center gap-2.5">
+          <div className="w-10 h-10 rounded-xl bg-[#0D8A8A]/14 border border-[#0D8A8A]/35 flex items-center justify-center shrink-0">
+            <MailCheck className="w-5 h-5 theme-accent-teal" />
+          </div>
+          <div>
+            <h3 className="text-sm font-extrabold theme-heading">
+              تأیید ایمیل حساب کاربری
+            </h3>
+            <p className="text-xs theme-muted">فعال‌سازی حساب مرکزی ایوان</p>
+          </div>
         </div>
 
         {verifyState === 'loading' && (
-          <div className="p-3 rounded-xl theme-input border text-xs theme-muted text-center">
-            در حال بررسی و تأیید لینک ایمیل...
+          <div className="p-4 rounded-xl theme-subcard border text-xs theme-muted flex items-center justify-center gap-2">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span>در حال بررسی و تأیید لینک ایمیل...</span>
           </div>
         )}
 
@@ -464,7 +655,7 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
           <div
             role="alert"
             data-testid="auth-verify-error"
-            className="p-2.5 rounded-xl bg-[#DC2626]/10 border border-[#DC2626]/40 flex items-start gap-2 text-xs font-semibold theme-loss"
+            className="p-3 rounded-xl bg-[#DC2626]/10 border border-[#DC2626]/40 flex items-start gap-2 text-xs font-semibold theme-loss"
           >
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{errorMsg}</span>
@@ -474,22 +665,22 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
         {infoMsg && (
           <div
             data-testid="auth-verify-success"
-            className="p-2.5 rounded-xl bg-[#0D8A8A]/10 border border-[#0D8A8A]/40 flex items-start gap-2 text-xs font-semibold theme-win"
+            className="p-3 rounded-xl bg-[#0D8A8A]/10 border border-[#0D8A8A]/40 flex items-start gap-2 text-xs font-semibold theme-win"
           >
             <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{infoMsg}</span>
           </div>
         )}
 
-        <div className="flex flex-col gap-2">
+        <div className="space-y-2">
           <button
             type="button"
             data-testid="auth-verify-go-login"
             onClick={() => {
-              setMode('login');
+              setMode('email_entry');
               setVerifyState('idle');
             }}
-            className="w-full min-h-[40px] rounded-xl bg-[#D4AE58] hover:bg-[#E5BF69] text-[#0B1528] text-xs font-extrabold cursor-pointer transition-colors"
+            className="w-full min-h-[46px] rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] text-[#0B1528] text-sm font-black cursor-pointer"
           >
             ورود به حساب کاربری
           </button>
@@ -502,7 +693,7 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
                 setVerifyState('idle');
                 resetFeedback();
               }}
-              className="w-full min-h-[38px] rounded-xl border border-[var(--eyvan-gold-border)] text-xs font-bold theme-heading hover:bg-black/10 cursor-pointer transition-colors"
+              className="w-full min-h-[42px] rounded-xl theme-btn-secondary border text-xs font-bold cursor-pointer"
             >
               درخواست ارسال مجدد لینک تأیید
             </button>
@@ -512,14 +703,12 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
     );
   }
 
+  // Dedicated C2 Token Flow: Reset Password
   if (mode === 'reset_password') {
     return (
-      <div
-        className="p-3.5 rounded-2xl theme-subcard border space-y-3"
-        data-testid="auth-reset-password-panel"
-      >
+      <div className="space-y-4" data-testid="auth-reset-password-panel">
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-xs font-extrabold theme-heading">
+          <div className="flex items-center gap-2 text-sm font-extrabold theme-heading">
             <KeyRound className="w-4 h-4 theme-accent-gold shrink-0" />
             <span>تنظیم رمز عبور جدید</span>
           </div>
@@ -527,13 +716,13 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
             type="button"
             onClick={() => {
               setResetToken(null);
-              setMode('login');
+              setMode('email_entry');
               resetFeedback();
             }}
-            className="text-[11px] font-bold theme-muted hover:theme-heading flex items-center gap-1 cursor-pointer"
+            className="text-xs font-bold theme-muted hover:theme-heading flex items-center gap-1 cursor-pointer"
           >
-            <ArrowRight className="w-3.5 h-3.5" />
             <span>بازگشت</span>
+            <ArrowLeft className="w-3.5 h-3.5 shrink-0" />
           </button>
         </div>
 
@@ -541,7 +730,7 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
           <div
             role="alert"
             data-testid="auth-reset-error"
-            className="p-2.5 rounded-xl bg-[#DC2626]/10 border border-[#DC2626]/40 flex items-start gap-2 text-xs font-semibold theme-loss"
+            className="p-3 rounded-xl bg-[#DC2626]/10 border border-[#DC2626]/40 flex items-start gap-2 text-xs font-semibold theme-loss"
           >
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{errorMsg}</span>
@@ -551,7 +740,7 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
         {infoMsg && (
           <div
             data-testid="auth-reset-success"
-            className="p-2.5 rounded-xl bg-[#0D8A8A]/10 border border-[#0D8A8A]/40 flex items-start gap-2 text-xs font-semibold theme-win"
+            className="p-3 rounded-xl bg-[#0D8A8A]/10 border border-[#0D8A8A]/40 flex items-start gap-2 text-xs font-semibold theme-win"
           >
             <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{infoMsg}</span>
@@ -563,62 +752,85 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
             type="button"
             data-testid="auth-reset-go-login"
             onClick={() => {
-              setMode('login');
+              setMode('email_entry');
               setResetDone(false);
             }}
-            className="w-full min-h-[42px] rounded-xl bg-[#D4AE58] hover:bg-[#E5BF69] text-[#0B1528] text-xs font-extrabold cursor-pointer transition-colors"
+            className="w-full min-h-[46px] rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] text-[#0B1528] text-sm font-black cursor-pointer"
           >
             ورود با رمز عبور جدید
           </button>
         ) : (
-          <form onSubmit={handleResetPasswordSubmit} className="space-y-2.5">
-            <div>
+          <form onSubmit={handleResetPasswordSubmit} className="space-y-3.5">
+            <div className="space-y-1.5">
               <label
                 htmlFor="auth-reset-password"
-                className="block text-[11px] font-bold theme-heading mb-1"
+                className="block text-xs font-bold theme-heading"
               >
-                رمز عبور جدید (حداقل ۸ کاراکتر، شامل حرف و عدد)
+                رمز عبور جدید
               </label>
-              <input
-                id="auth-reset-password"
-                data-testid="auth-reset-password"
-                type="password"
-                dir="ltr"
-                autoComplete="new-password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                minLength={8}
-                maxLength={128}
-                required
-                className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
-              />
+              <div className="relative">
+                <Lock className="w-4 h-4 theme-muted absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  id="auth-reset-password"
+                  data-testid="auth-reset-password"
+                  type={showResetPass ? 'text' : 'password'}
+                  dir="ltr"
+                  autoComplete="new-password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  minLength={8}
+                  maxLength={128}
+                  required
+                  className="w-full min-h-[46px] pr-10 pl-11 rounded-xl theme-input border text-sm font-semibold text-left focus:outline-none focus:ring-2 focus:ring-[var(--eyvan-teal)]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowResetPass((v) => !v)}
+                  aria-label={showResetPass ? 'پنهان کردن رمز عبور' : 'نمایش رمز عبور'}
+                  className="absolute left-1.5 top-1/2 -translate-y-1/2 min-w-[38px] min-h-[38px] rounded-lg flex items-center justify-center theme-muted hover:text-[var(--eyvan-text)] cursor-pointer"
+                >
+                  {showResetPass ? (
+                    <EyeOff className="w-4 h-4" />
+                  ) : (
+                    <Eye className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
+              {newPassword.length > 0 && (
+                <PasswordStrengthMeter strength={resetPasswordStrength} />
+              )}
             </div>
-            <div>
+
+            <div className="space-y-1.5">
               <label
                 htmlFor="auth-reset-confirm"
-                className="block text-[11px] font-bold theme-heading mb-1"
+                className="block text-xs font-bold theme-heading"
               >
                 تکرار رمز عبور جدید
               </label>
-              <input
-                id="auth-reset-confirm"
-                data-testid="auth-reset-confirm"
-                type="password"
-                dir="ltr"
-                autoComplete="new-password"
-                value={confirmNewPassword}
-                onChange={(e) => setConfirmNewPassword(e.target.value)}
-                minLength={8}
-                maxLength={128}
-                required
-                className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
-              />
+              <div className="relative">
+                <Lock className="w-4 h-4 theme-muted absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  id="auth-reset-confirm"
+                  data-testid="auth-reset-confirm"
+                  type={showResetPass ? 'text' : 'password'}
+                  dir="ltr"
+                  autoComplete="new-password"
+                  value={confirmNewPassword}
+                  onChange={(e) => setConfirmNewPassword(e.target.value)}
+                  minLength={8}
+                  maxLength={128}
+                  required
+                  className="w-full min-h-[46px] pr-10 pl-3.5 rounded-xl theme-input border text-sm font-semibold text-left focus:outline-none focus:ring-2 focus:ring-[var(--eyvan-teal)]"
+                />
+              </div>
             </div>
+
             <button
               type="submit"
               disabled={submitting}
               data-testid="auth-reset-submit"
-              className="w-full min-h-[42px] rounded-xl bg-[#D4AE58] hover:bg-[#E5BF69] disabled:opacity-50 text-[#0B1528] text-xs font-extrabold cursor-pointer transition-colors"
+              className="w-full min-h-[46px] rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] disabled:opacity-50 text-[#0B1528] text-sm font-black cursor-pointer"
             >
               {submitting ? 'در حال ثبت رمز جدید...' : 'ثبت رمز عبور جدید'}
             </button>
@@ -630,27 +842,26 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
 
   if (authLoading) {
     return (
-      <div className="p-3.5 rounded-xl theme-subcard border text-xs theme-muted text-center">
-        در حال بررسی وضعیت حساب کاربری...
+      <div className="p-5 rounded-2xl theme-subcard border text-xs theme-muted flex items-center justify-center gap-2">
+        <Loader2 className="w-4 h-4 animate-spin" />
+        <span>در حال بررسی وضعیت حساب...</span>
       </div>
     );
   }
 
+  // Signed-In Account Security View
   if (authUser) {
     return (
-      <div
-        className="p-3.5 rounded-2xl theme-subcard border space-y-3"
-        data-testid="auth-signed-in-panel"
-      >
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5 text-xs font-extrabold theme-heading">
+      <div className="space-y-4" data-testid="auth-signed-in-panel">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 space-y-1">
+            <div className="flex items-center gap-2 text-sm font-extrabold theme-heading">
               <ShieldCheck className="w-4 h-4 theme-accent-teal shrink-0" />
-              <span>حساب مرکزی ایوان فعال است</span>
+              <span>حساب مرکزی فعال است</span>
             </div>
             <div
               dir="ltr"
-              className="text-xs font-bold theme-accent-gold mt-1 truncate text-right"
+              className="text-sm font-extrabold theme-accent-gold truncate text-right"
               data-testid="auth-user-username"
             >
               {authUser.username}
@@ -658,28 +869,27 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
             {authUser.email && (
               <div
                 dir="ltr"
-                className="text-[11px] theme-muted truncate text-right"
+                className="text-xs theme-muted truncate text-right"
                 data-testid="auth-user-email"
               >
                 {authUser.email}
               </div>
             )}
           </div>
+
           <span
-            className={`text-[10px] font-bold px-2 py-0.5 rounded-md border shrink-0 ${
-              authUser.emailVerified
-                ? 'border-[#0D8A8A]/50 text-[#0D8A8A]'
-                : 'border-[#D4AE58]/50 theme-accent-gold'
+            className={`text-xs font-bold shrink-0 ${
+              authUser.emailVerified ? 'theme-win' : 'theme-accent-gold'
             }`}
           >
-            {authUser.emailVerified ? 'ایمیل تایید شده' : 'در انتظار تایید ایمیل'}
+            {authUser.emailVerified ? 'ایمیل تأییدشده' : 'در انتظار تأیید'}
           </span>
         </div>
 
         {errorMsg && (
           <div
             role="alert"
-            className="p-2.5 rounded-xl bg-[#DC2626]/10 border border-[#DC2626]/40 flex items-start gap-2 text-xs font-semibold theme-loss"
+            className="p-3 rounded-xl bg-[#DC2626]/10 border border-[#DC2626]/40 flex items-start gap-2 text-xs font-semibold theme-loss"
           >
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{errorMsg}</span>
@@ -687,28 +897,28 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
         )}
 
         {infoMsg && (
-          <div className="p-2.5 rounded-xl bg-[#0D8A8A]/10 border border-[#0D8A8A]/40 flex items-start gap-2 text-xs font-semibold theme-win">
+          <div className="p-3 rounded-xl bg-[#0D8A8A]/10 border border-[#0D8A8A]/40 flex items-start gap-2 text-xs font-semibold theme-win">
             <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{infoMsg}</span>
           </div>
         )}
 
-        {/* Linked Providers & Explicit Google Linking */}
-        <div className="pt-1 border-t border-[var(--eyvan-line)] space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-[11px] font-bold theme-muted">
-              روش‌های ورود متصل:
-            </span>
-            <div className="flex items-center gap-1.5">
+        {/* Connected Login Providers */}
+        <div className="pt-3.5 border-t border-[var(--eyvan-line)] space-y-2.5">
+          <div className="flex items-center justify-between gap-2 text-xs">
+            <span className="font-bold theme-muted">روش‌های ورود متصل</span>
+            <div className="flex items-center gap-2 font-extrabold">
               {linkedProviders.includes('password') && (
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded-md border border-[var(--eyvan-line)] theme-heading">
-                  رمز عبور
-                </span>
+                <span className="theme-heading">رمز عبور</span>
               )}
+              {linkedProviders.includes('password') &&
+                linkedProviders.includes('google') && (
+                  <span className="theme-muted">·</span>
+                )}
               {linkedProviders.includes('google') && (
                 <span
                   data-testid="auth-provider-google-badge"
-                  className="text-[10px] font-bold px-2 py-0.5 rounded-md border border-[#0D8A8A]/50 theme-accent-teal"
+                  className="theme-accent-teal"
                 >
                   گوگل
                 </span>
@@ -722,9 +932,9 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
               disabled={submitting || googleBusy}
               onClick={() => void handleGoogleOAuth('link')}
               data-testid="auth-link-google-btn"
-              className="w-full min-h-[38px] px-3 rounded-xl border border-[var(--eyvan-gold-border)] hover:border-[#D4AE58] text-xs font-bold theme-heading flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
+              className="w-full min-h-[44px] px-3.5 rounded-xl theme-btn-secondary border text-xs font-extrabold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
             >
-              <Link2 className="w-3.5 h-3.5 theme-accent-gold" />
+              <Link2 className="w-4 h-4 theme-accent-gold shrink-0" />
               <span>
                 {googleBusy
                   ? 'در حال اتصال به گوگل...'
@@ -734,8 +944,8 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
           )}
         </div>
 
-        {/* Collapsible Active Sessions Management */}
-        <div className="pt-1 border-t border-[var(--eyvan-line)] space-y-2">
+        {/* Collapsible Active Sessions */}
+        <div className="pt-3.5 border-t border-[var(--eyvan-line)] space-y-2.5">
           <button
             type="button"
             onClick={() => {
@@ -744,32 +954,29 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
               if (next) void loadAccountSecurityState();
             }}
             data-testid="auth-sessions-toggle"
-            className="w-full flex items-center justify-between text-[11px] font-bold theme-heading py-1 cursor-pointer"
+            className="w-full min-h-[38px] flex items-center justify-between text-xs font-extrabold theme-heading cursor-pointer"
           >
-            <span className="inline-flex items-center gap-1.5">
-              <Monitor className="w-3.5 h-3.5 theme-accent-teal" />
+            <span className="inline-flex items-center gap-2">
+              <Monitor className="w-4 h-4 theme-accent-teal shrink-0" />
               <span>
                 نشست‌های فعال ({toPersianDigits(activeSessions.length)})
               </span>
             </span>
             {sessionsOpen ? (
-              <ChevronUp className="w-3.5 h-3.5 theme-muted" />
+              <ChevronUp className="w-4 h-4 theme-muted" />
             ) : (
-              <ChevronDown className="w-3.5 h-3.5 theme-muted" />
+              <ChevronDown className="w-4 h-4 theme-muted" />
             )}
           </button>
 
           {sessionsOpen && (
-            <div
-              className="space-y-1.5"
-              data-testid="auth-sessions-list"
-            >
+            <div className="space-y-2" data-testid="auth-sessions-list">
               {sessionsLoading ? (
-                <div className="text-[11px] theme-muted py-2 text-center">
+                <div className="text-xs theme-muted py-2 text-center">
                   در حال دریافت نشست‌ها...
                 </div>
               ) : activeSessions.length === 0 ? (
-                <div className="text-[11px] theme-muted py-2 text-center">
+                <div className="text-xs theme-muted py-2 text-center">
                   نشست فعالی یافت نشد.
                 </div>
               ) : (
@@ -777,13 +984,15 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
                   <div
                     key={sess.sessionId}
                     data-testid={`auth-session-row-${sess.isCurrent ? 'current' : sess.sessionId}`}
-                    className="p-2 rounded-xl theme-input border flex items-center justify-between gap-2 text-[11px]"
+                    className="p-3 rounded-xl theme-subcard border flex items-center justify-between gap-2 text-xs"
                   >
                     <div className="min-w-0">
                       <div className="font-bold theme-heading truncate">
-                        {sess.isCurrent ? 'همین دستگاه (نشست فعلی)' : 'دستگاه دیگر'}
+                        {sess.isCurrent
+                          ? 'همین دستگاه (نشست فعلی)'
+                          : 'دستگاه دیگر'}
                       </div>
-                      <div className="text-[10px] theme-muted">
+                      <div className="text-[11px] theme-muted mt-0.5">
                         آخرین فعالیت:{' '}
                         {new Date(sess.lastSeenAt).toLocaleDateString('fa-IR')}
                       </div>
@@ -792,11 +1001,13 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
                       <button
                         type="button"
                         disabled={revokingSessionId === sess.sessionId}
-                        onClick={() => void handleRevokeSingleSession(sess.sessionId)}
+                        onClick={() =>
+                          void handleRevokeSingleSession(sess.sessionId)
+                        }
                         data-testid={`auth-revoke-session-${sess.sessionId}`}
-                        className="px-2.5 min-h-[30px] rounded-lg border border-[#DC2626]/45 text-[10px] font-bold theme-loss hover:bg-[#DC2626]/10 inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 shrink-0"
+                        className="px-3 min-h-[34px] rounded-lg border border-[#DC2626]/45 text-xs font-bold theme-loss hover:bg-[#DC2626]/10 inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 shrink-0"
                       >
-                        <Trash2 className="w-3 h-3" />
+                        <Trash2 className="w-3.5 h-3.5" />
                         <span>لغو</span>
                       </button>
                     )}
@@ -807,15 +1018,16 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
           )}
         </div>
 
-        <div className="grid grid-cols-2 gap-2 pt-1">
+        {/* Sign Out Actions */}
+        <div className="grid grid-cols-2 gap-2.5 pt-2">
           <button
             type="button"
             disabled={submitting}
             onClick={handleLogout}
             data-testid="auth-logout-btn"
-            className="min-h-[40px] px-3 rounded-xl border border-[#DC2626]/45 text-xs font-bold theme-loss hover:bg-[#DC2626]/10 disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+            className="min-h-[44px] px-3 rounded-xl border border-[#DC2626]/45 text-xs font-extrabold theme-loss hover:bg-[#DC2626]/10 disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
           >
-            <LogOut className="w-3.5 h-3.5" />
+            <LogOut className="w-4 h-4 shrink-0" />
             <span>خروج از حساب</span>
           </button>
           <button
@@ -823,7 +1035,7 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
             disabled={submitting}
             onClick={handleLogoutAll}
             data-testid="auth-logout-all-btn"
-            className="min-h-[40px] px-3 rounded-xl border border-[var(--eyvan-gold-border)] text-xs font-bold theme-muted hover:theme-heading disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+            className="min-h-[44px] px-3 rounded-xl theme-btn-secondary border text-xs font-bold disabled:opacity-50 flex items-center justify-center cursor-pointer transition-colors"
           >
             <span>خروج از همه دستگاه‌ها</span>
           </button>
@@ -832,62 +1044,74 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
     );
   }
 
+  // Unified Email-First Auth Flow (Single clean entry: auto-detects Login vs Registration from DB)
   return (
-    <div
-      className="p-3.5 rounded-2xl theme-subcard border space-y-3"
-      data-testid="auth-guest-panel"
-    >
+    <div className="space-y-4" data-testid="auth-guest-panel">
+      {/* Clean Contextual Header */}
       <div className="space-y-1">
-        <div className="text-xs font-extrabold theme-heading">
-          ورود یا ثبت‌نام در حساب مرکزی ایوان
-        </div>
-        <p className="text-[11px] theme-muted leading-relaxed">
-          اکنون در حالت مهمان هستید. برای بازی حکم نیازی به ثبت‌نام نیست، اما با
-          ساخت و تأیید حساب، هویت کاربری شما در تمام بازی‌های ایوان حفظ می‌شود.
+        <h3 className="text-base font-black theme-heading">
+          {mode === 'register_details'
+            ? 'ساخت حساب جدید'
+            : mode === 'login_password'
+              ? 'ورود به حساب'
+              : mode === 'pending_verify'
+                ? 'تأیید ایمیل'
+                : mode === 'forgot'
+                  ? 'بازیابی رمز عبور'
+                  : 'ورود به ایوان'}
+        </h3>
+        <p className="text-xs theme-muted leading-relaxed">
+          {mode === 'register_details'
+            ? 'این ایمیل هنوز ثبت نشده است؛ نام کاربری و رمز عبور خود را انتخاب کنید.'
+            : mode === 'login_password'
+              ? 'رمز عبور حساب خود را وارد کنید.'
+              : mode === 'forgot'
+                ? 'ایمیل حساب خود را وارد کنید تا لینک بازیابی ارسال شود.'
+                : mode === 'pending_verify'
+                  ? 'لینک تأیید به ایمیل شما ارسال شد.'
+                  : 'ایمیل خود را وارد کنید تا به‌صورت خودکار وارد شوید یا حساب جدید بسازید.'}
         </p>
       </div>
 
-      {/* Mode Switch */}
-      <div className="grid grid-cols-2 gap-1 p-1 theme-tab-track rounded-xl border">
-        <button
-          type="button"
-          data-testid="auth-mode-login"
-          onClick={() => {
-            setMode('login');
-            resetFeedback();
-          }}
-          className={`min-h-[34px] rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
-            mode === 'login' || mode === 'forgot'
-              ? 'bg-[#D4AE58] text-[#0B1528]'
-              : 'theme-muted'
-          }`}
-        >
-          <LogIn className="w-3.5 h-3.5" />
-          <span>ورود</span>
-        </button>
-        <button
-          type="button"
-          data-testid="auth-mode-register"
-          onClick={() => {
-            setMode('register');
-            resetFeedback();
-          }}
-          className={`min-h-[34px] rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
-            mode === 'register' || mode === 'pending_verify'
-              ? 'bg-[#D4AE58] text-[#0B1528]'
-              : 'theme-muted'
-          }`}
-        >
-          <UserPlus className="w-3.5 h-3.5" />
-          <span>ثبت‌نام</span>
-        </button>
-      </div>
+      {/* Prominent 1-Tap Google OAuth on Email Entry Step */}
+      {mode === 'email_entry' && (
+        <div className="space-y-3">
+          <button
+            type="button"
+            disabled={submitting || googleBusy}
+            onClick={() => void handleGoogleOAuth('login')}
+            data-testid="auth-google-btn"
+            className="w-full min-h-[46px] px-4 rounded-xl theme-subcard border border-[var(--eyvan-line)] hover:border-[var(--eyvan-teal)] disabled:opacity-50 text-xs sm:text-sm font-extrabold theme-heading flex items-center justify-center gap-2.5 cursor-pointer transition-colors"
+          >
+            <GoogleLogoSvg />
+            <span>
+              {googleBusy ? 'در حال اتصال به گوگل...' : 'ادامه با گوگل'}
+            </span>
+          </button>
 
+          {googleConfigured === false && (
+            <p
+              data-testid="auth-google-not-configured-hint"
+              className="text-[11px] theme-muted text-center"
+            >
+              ورود با گوگل پس از تنظیم کلیدهای Google OAuth در سرور فعال می‌شود.
+            </p>
+          )}
+
+          <div className="flex items-center gap-2.5 text-[11px] font-bold theme-muted">
+            <span className="flex-1 h-px bg-[var(--eyvan-line)]" />
+            <span>یا ورود با ایمیل</span>
+            <span className="flex-1 h-px bg-[var(--eyvan-line)]" />
+          </div>
+        </div>
+      )}
+
+      {/* Feedback Alerts */}
       {errorMsg && (
         <div
           role="alert"
           data-testid="auth-error-msg"
-          className="p-2.5 rounded-xl bg-[#DC2626]/10 border border-[#DC2626]/40 flex items-start gap-2 text-xs font-semibold theme-loss"
+          className="p-3 rounded-xl bg-[#DC2626]/10 border border-[#DC2626]/40 flex items-start gap-2 text-xs font-semibold theme-loss leading-relaxed"
         >
           <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
           <span>{errorMsg}</span>
@@ -897,41 +1121,95 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
       {infoMsg && (
         <div
           data-testid="auth-info-msg"
-          className="p-2.5 rounded-xl bg-[#0D8A8A]/10 border border-[#0D8A8A]/40 flex items-start gap-2 text-xs font-semibold theme-win"
+          className="p-3 rounded-xl bg-[#0D8A8A]/10 border border-[#0D8A8A]/40 flex items-start gap-2 text-xs font-semibold theme-win leading-relaxed"
         >
           <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
           <span>{infoMsg}</span>
         </div>
       )}
 
-      {mode === 'login' && (
-        <div className="space-y-2.5">
-          <form onSubmit={handleLoginSubmit} className="space-y-2.5">
-            <div>
-              <label
-                htmlFor="auth-login-identifier"
-                className="block text-[11px] font-bold theme-heading mb-1"
-              >
-                ایمیل یا نام کاربری
-              </label>
+      {/* STEP 1: UNIFIED EMAIL ENTRY */}
+      {mode === 'email_entry' && (
+        <form
+          onSubmit={handleEmailCheckSubmit}
+          className="space-y-3.5"
+          data-testid="auth-email-step-form"
+        >
+          <div className="space-y-1.5">
+            <label
+              htmlFor="auth-email-input"
+              className="block text-xs font-bold theme-heading"
+            >
+              ایمیل
+            </label>
+            <div className="relative">
+              <Mail className="w-4 h-4 theme-muted absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
-                id="auth-login-identifier"
-                data-testid="auth-login-identifier"
-                type="text"
+                id="auth-email-input"
+                data-testid="auth-email-input"
+                type="email"
                 dir="ltr"
-                autoComplete="username"
-                value={identifier}
-                onChange={(e) => setIdentifier(e.target.value)}
-                placeholder="name@example.com or player_one"
+                autoComplete="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="name@example.com"
                 required
-                className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
+                className="w-full min-h-[48px] pr-10 pl-3.5 rounded-xl theme-input border text-sm font-semibold text-left focus:outline-none focus:ring-2 focus:ring-[var(--eyvan-teal)]"
               />
             </div>
-            <div>
-              <div className="flex items-center justify-between mb-1">
+          </div>
+
+          <button
+            type="submit"
+            disabled={submitting}
+            data-testid="auth-email-continue-btn"
+            className="w-full min-h-[48px] rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] hover:brightness-105 disabled:opacity-50 text-[#0B1528] text-sm font-black cursor-pointer transition-all shadow-xs flex items-center justify-center gap-2"
+          >
+            {submitting ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>در حال بررسی...</span>
+              </>
+            ) : (
+              <>
+                <LogIn className="w-4 h-4" />
+                <span>ادامه</span>
+              </>
+            )}
+          </button>
+        </form>
+      )}
+
+      {/* STEP 2A: PASSWORD LOGIN (Existing Email in DB) */}
+      {mode === 'login_password' && (
+        <div className="space-y-3" data-testid="auth-login-password-step">
+          <div className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl theme-subcard border text-xs">
+            <div className="flex items-center gap-2 min-w-0">
+              <Mail className="w-3.5 h-3.5 theme-accent-teal shrink-0" />
+              <span dir="ltr" className="font-bold theme-heading truncate">
+                {email}
+              </span>
+            </div>
+            <button
+              type="button"
+              data-testid="auth-change-email-btn"
+              onClick={() => {
+                setMode('email_entry');
+                setPassword('');
+                resetFeedback();
+              }}
+              className="text-[11px] font-extrabold theme-accent-teal hover:underline shrink-0 cursor-pointer"
+            >
+              تغییر
+            </button>
+          </div>
+
+          <form onSubmit={handleLoginSubmit} className="space-y-3.5">
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
                 <label
                   htmlFor="auth-login-password"
-                  className="block text-[11px] font-bold theme-heading"
+                  className="block text-xs font-bold theme-heading"
                 >
                   رمز عبور
                 </label>
@@ -939,32 +1217,51 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
                   type="button"
                   data-testid="auth-forgot-link"
                   onClick={() => {
-                    setForgotEmail(identifier.includes('@') ? identifier.trim() : '');
+                    setForgotEmail(email.trim());
                     setMode('forgot');
                     resetFeedback();
                   }}
-                  className="text-[11px] font-bold theme-accent-gold hover:underline cursor-pointer"
+                  className="text-xs font-bold theme-accent-teal hover:underline cursor-pointer"
                 >
                   فراموشی رمز عبور؟
                 </button>
               </div>
-              <input
-                id="auth-login-password"
-                data-testid="auth-login-password"
-                type="password"
-                dir="ltr"
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
-              />
+              <div className="relative">
+                <Lock className="w-4 h-4 theme-muted absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  id="auth-login-password"
+                  data-testid="auth-login-password"
+                  type={showLoginPass ? 'text' : 'password'}
+                  dir="ltr"
+                  autoComplete="current-password"
+                  autoFocus
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  required
+                  className="w-full min-h-[46px] pr-10 pl-11 rounded-xl theme-input border text-sm font-semibold text-left focus:outline-none focus:ring-2 focus:ring-[var(--eyvan-teal)]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowLoginPass((v) => !v)}
+                  aria-label={showLoginPass ? 'پنهان کردن رمز عبور' : 'نمایش رمز عبور'}
+                  data-testid="auth-login-toggle-password"
+                  className="absolute left-1.5 top-1/2 -translate-y-1/2 min-w-[38px] min-h-[38px] rounded-lg flex items-center justify-center theme-muted hover:text-[var(--eyvan-text)] cursor-pointer"
+                >
+                  {showLoginPass ? (
+                    <EyeOff className="w-4 h-4" />
+                  ) : (
+                    <Eye className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
             </div>
+
             <button
               type="submit"
               disabled={submitting}
               data-testid="auth-login-submit"
-              className="w-full min-h-[42px] rounded-xl bg-[#D4AE58] hover:bg-[#E5BF69] disabled:opacity-50 text-[#0B1528] text-xs font-extrabold cursor-pointer transition-colors"
+              className="w-full min-h-[48px] rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] hover:brightness-105 disabled:opacity-50 text-[#0B1528] text-sm font-black cursor-pointer transition-all shadow-xs"
             >
               {submitting ? 'در حال ورود...' : 'ورود به حساب'}
             </button>
@@ -973,12 +1270,12 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
           {unverifiedNotice && (
             <div
               data-testid="auth-unverified-resend-box"
-              className="p-2.5 rounded-xl border border-[#D4AE58]/40 bg-[#D4AE58]/10 space-y-2"
+              className="p-3 rounded-xl border border-[#D4AE58]/40 bg-[#D4AE58]/10 space-y-2.5"
             >
-              <div className="text-[11px] font-bold theme-heading">
+              <div className="text-xs font-bold theme-heading">
                 حساب شما در انتظار تأیید ایمیل است
               </div>
-              <div className="flex gap-1.5">
+              <div className="flex gap-2">
                 <input
                   type="email"
                   dir="ltr"
@@ -986,16 +1283,16 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
                   value={resendEmail}
                   onChange={(e) => setResendEmail(e.target.value)}
                   placeholder="you@example.com"
-                  className="flex-1 min-h-[36px] px-2.5 rounded-lg theme-input border text-xs text-left focus:outline-none focus:border-[#0D8A8A]"
+                  className="flex-1 min-h-[40px] px-3 rounded-xl theme-input border text-xs text-left focus:outline-none focus:ring-2 focus:ring-[var(--eyvan-teal)]"
                 />
                 <button
                   type="button"
                   disabled={submitting}
                   data-testid="auth-inline-resend-btn"
                   onClick={() => handleResendVerification()}
-                  className="px-3 min-h-[36px] rounded-lg bg-[#0D8A8A] hover:bg-[#0F9F9F] disabled:opacity-50 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0 transition-colors"
+                  className="px-3.5 min-h-[40px] rounded-xl bg-[#0D8A8A] hover:bg-[#0B7676] disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shrink-0"
                 >
-                  <RefreshCw className="w-3 h-3" />
+                  <RefreshCw className="w-3.5 h-3.5" />
                   <span>ارسال مجدد</span>
                 </button>
               </div>
@@ -1004,162 +1301,222 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
         </div>
       )}
 
-      {mode === 'register' && (
-        <form onSubmit={handleRegisterSubmit} className="space-y-2.5">
-          <div>
-            <label
-              htmlFor="auth-reg-email"
-              className="block text-[11px] font-bold theme-heading mb-1"
+      {/* STEP 2B: COMPLETE REGISTRATION (New Email not found in DB) */}
+      {mode === 'register_details' && (
+        <form
+          onSubmit={handleRegisterSubmit}
+          className="space-y-3.5"
+          data-testid="auth-register-details-step"
+        >
+          <div className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl theme-subcard border text-xs">
+            <div className="flex items-center gap-2 min-w-0">
+              <Mail className="w-3.5 h-3.5 theme-accent-teal shrink-0" />
+              <span dir="ltr" className="font-bold theme-heading truncate">
+                {email}
+              </span>
+            </div>
+            <button
+              type="button"
+              data-testid="auth-change-email-btn"
+              onClick={() => {
+                setMode('email_entry');
+                setPassword('');
+                setConfirmPassword('');
+                resetFeedback();
+              }}
+              className="text-[11px] font-extrabold theme-accent-teal hover:underline shrink-0 cursor-pointer"
             >
-              ایمیل
-            </label>
-            <input
-              id="auth-reg-email"
-              data-testid="auth-reg-email"
-              type="email"
-              dir="ltr"
-              autoComplete="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              required
-              className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
-            />
+              تغییر
+            </button>
           </div>
-          <div>
-            <label
-              htmlFor="auth-reg-username"
-              className="block text-[11px] font-bold theme-heading mb-1"
-            >
-              نام کاربری (انگلیسی، ۳ تا ۲۰ کاراکتر)
-            </label>
-            <input
-              id="auth-reg-username"
-              data-testid="auth-reg-username"
-              type="text"
-              dir="ltr"
-              autoComplete="username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="player_one"
-              maxLength={20}
-              required
-              className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
-            />
+
+          {/* Username with Live Server Availability */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="auth-reg-username"
+                className="block text-xs font-bold theme-heading"
+              >
+                نام کاربری (انگلیسی)
+              </label>
+              {regUsernameStatus.state === 'checking' && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-bold theme-muted">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <span>بررسی...</span>
+                </span>
+              )}
+              {regUsernameStatus.state === 'available' && (
+                <span
+                  data-testid="auth-reg-username-available"
+                  className="inline-flex items-center gap-1 text-[11px] font-bold theme-win"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>{regUsernameStatus.message}</span>
+                </span>
+              )}
+              {(regUsernameStatus.state === 'taken' ||
+                regUsernameStatus.state === 'invalid') && (
+                <span className="text-[11px] font-bold theme-loss">
+                  {regUsernameStatus.message}
+                </span>
+              )}
+            </div>
+            <div className="relative">
+              <AtSign className="w-4 h-4 theme-muted absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                id="auth-reg-username"
+                data-testid="auth-reg-username"
+                type="text"
+                dir="ltr"
+                autoComplete="username"
+                autoFocus
+                value={username}
+                onChange={(e) => handleRegUsernameChange(e.target.value)}
+                placeholder="player_one"
+                maxLength={20}
+                required
+                className={`w-full min-h-[46px] pr-10 pl-3.5 rounded-xl theme-input border text-sm font-semibold text-left focus:outline-none focus:ring-2 ${
+                  regUsernameStatus.state === 'taken' ||
+                  regUsernameStatus.state === 'invalid'
+                    ? 'border-[#DC2626] focus:ring-[#DC2626]/30'
+                    : 'focus:ring-[var(--eyvan-teal)]'
+                }`}
+              />
+            </div>
           </div>
-          <div>
+
+          {/* Password with Strength Meter & Eye Toggle */}
+          <div className="space-y-1.5">
             <label
               htmlFor="auth-reg-password"
-              className="block text-[11px] font-bold theme-heading mb-1"
+              className="block text-xs font-bold theme-heading"
             >
-              رمز عبور (حداقل ۸ کاراکتر، شامل حرف و عدد)
+              رمز عبور
             </label>
-            <input
-              id="auth-reg-password"
-              data-testid="auth-reg-password"
-              type="password"
-              dir="ltr"
-              autoComplete="new-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              minLength={8}
-              maxLength={128}
-              required
-              className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
-            />
+            <div className="relative">
+              <Lock className="w-4 h-4 theme-muted absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                id="auth-reg-password"
+                data-testid="auth-reg-password"
+                type={showRegPass ? 'text' : 'password'}
+                dir="ltr"
+                autoComplete="new-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="حداقل ۸ کاراکتر شامل حرف و عدد"
+                minLength={8}
+                maxLength={128}
+                required
+                className="w-full min-h-[46px] pr-10 pl-11 rounded-xl theme-input border text-sm font-semibold text-left focus:outline-none focus:ring-2 focus:ring-[var(--eyvan-teal)]"
+              />
+              <button
+                type="button"
+                onClick={() => setShowRegPass((v) => !v)}
+                aria-label={showRegPass ? 'پنهان کردن رمز عبور' : 'نمایش رمز عبور'}
+                data-testid="auth-reg-toggle-password"
+                className="absolute left-1.5 top-1/2 -translate-y-1/2 min-w-[38px] min-h-[38px] rounded-lg flex items-center justify-center theme-muted hover:text-[var(--eyvan-text)] cursor-pointer"
+              >
+                {showRegPass ? (
+                  <EyeOff className="w-4 h-4" />
+                ) : (
+                  <Eye className="w-4 h-4" />
+                )}
+              </button>
+            </div>
+            <PasswordStrengthMeter strength={regPasswordStrength} />
           </div>
-          <div>
-            <label
-              htmlFor="auth-reg-confirm"
-              className="block text-[11px] font-bold theme-heading mb-1"
-            >
-              تکرار رمز عبور
-            </label>
-            <input
-              id="auth-reg-confirm"
-              data-testid="auth-reg-confirm"
-              type="password"
-              dir="ltr"
-              autoComplete="new-password"
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              minLength={8}
-              maxLength={128}
-              required
-              className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
-            />
+
+          {/* Confirm Password with Match Indicator */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="auth-reg-confirm"
+                className="block text-xs font-bold theme-heading"
+              >
+                تکرار رمز عبور
+              </label>
+              {passwordsMatch && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-bold theme-win">
+                  <Check className="w-3.5 h-3.5" />
+                  <span>یکسان است</span>
+                </span>
+              )}
+              {passwordsMismatch && (
+                <span className="text-[11px] font-bold theme-loss">
+                  با رمز عبور مطابقت ندارد
+                </span>
+              )}
+            </div>
+            <div className="relative">
+              <Lock className="w-4 h-4 theme-muted absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                id="auth-reg-confirm"
+                data-testid="auth-reg-confirm"
+                type={showRegConfirm ? 'text' : 'password'}
+                dir="ltr"
+                autoComplete="new-password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="تکرار رمز عبور"
+                minLength={8}
+                maxLength={128}
+                required
+                className={`w-full min-h-[46px] pr-10 pl-11 rounded-xl theme-input border text-sm font-semibold text-left focus:outline-none focus:ring-2 ${
+                  passwordsMismatch
+                    ? 'border-[#DC2626] focus:ring-[#DC2626]/30'
+                    : 'focus:ring-[var(--eyvan-teal)]'
+                }`}
+              />
+              <button
+                type="button"
+                onClick={() => setShowRegConfirm((v) => !v)}
+                aria-label={
+                  showRegConfirm ? 'پنهان کردن تکرار رمز' : 'نمایش تکرار رمز'
+                }
+                className="absolute left-1.5 top-1/2 -translate-y-1/2 min-w-[38px] min-h-[38px] rounded-lg flex items-center justify-center theme-muted hover:text-[var(--eyvan-text)] cursor-pointer"
+              >
+                {showRegConfirm ? (
+                  <EyeOff className="w-4 h-4" />
+                ) : (
+                  <Eye className="w-4 h-4" />
+                )}
+              </button>
+            </div>
           </div>
+
           <button
             type="submit"
-            disabled={submitting}
+            disabled={submitting || regUsernameStatus.state === 'taken'}
             data-testid="auth-reg-submit"
-            className="w-full min-h-[42px] rounded-xl bg-[#D4AE58] hover:bg-[#E5BF69] disabled:opacity-50 text-[#0B1528] text-xs font-extrabold cursor-pointer transition-colors"
+            className="w-full min-h-[48px] rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] hover:brightness-105 disabled:opacity-50 text-[#0B1528] text-sm font-black cursor-pointer transition-all shadow-xs flex items-center justify-center gap-2"
           >
-            {submitting ? 'در حال ثبت‌نام...' : 'ساخت حساب کاربری'}
+            <UserPlus className="w-4 h-4" />
+            <span>{submitting ? 'در حال ساخت حساب...' : 'تکمیل ثبت‌نام'}</span>
           </button>
         </form>
       )}
 
-      {(mode === 'login' || mode === 'register') && (
-        <div className="pt-1 space-y-2">
-          <div className="flex items-center gap-2 text-[10px] theme-muted">
-            <span className="flex-1 h-px bg-[var(--eyvan-line)]" />
-            <span>یا</span>
-            <span className="flex-1 h-px bg-[var(--eyvan-line)]" />
-          </div>
-          <button
-            type="button"
-            disabled={submitting || googleBusy}
-            onClick={() => void handleGoogleOAuth('login')}
-            data-testid="auth-google-btn"
-            className="w-full min-h-[42px] px-3 rounded-xl theme-input border border-[var(--eyvan-gold-border)] hover:border-[#D4AE58] disabled:opacity-50 text-xs font-extrabold theme-heading flex items-center justify-center gap-2 cursor-pointer transition-colors"
-          >
-            <svg
-              aria-hidden="true"
-              className="w-4 h-4 shrink-0"
-              viewBox="0 0 24 24"
-            >
-              <path
-                fill="#EA4335"
-                d="M12 10.2v3.9h5.4c-.2 1.3-1.5 3.9-5.4 3.9-3.2 0-5.9-2.7-5.9-6s2.7-6 5.9-6c1.8 0 3.1.8 3.8 1.5l2.6-2.5C16.7 3.4 14.6 2.5 12 2.5 6.8 2.5 2.5 6.8 2.5 12s4.3 9.5 9.5 9.5c5.5 0 9.1-3.9 9.1-9.3 0-.6-.1-1.1-.2-1.6H12z"
-              />
-            </svg>
-            <span>
-              {googleBusy ? 'در حال اتصال به گوگل...' : 'ورود با حساب گوگل'}
-            </span>
-          </button>
-          {googleConfigured === false && (
-            <p
-              data-testid="auth-google-not-configured-hint"
-              className="text-[10px] theme-muted text-center leading-relaxed"
-            >
-              ورود با گوگل پس از تنظیم کلیدهای Google OAuth در سرور فعال می‌شود.
-            </p>
-          )}
-        </div>
-      )}
-
+      {/* PENDING EMAIL VERIFICATION */}
       {mode === 'pending_verify' && (
         <form
           onSubmit={handleResendVerification}
-          className="space-y-2.5"
+          className="space-y-3.5"
           data-testid="auth-pending-verify-panel"
         >
-          <div className="p-2.5 rounded-xl border border-[#D4AE58]/40 bg-[#D4AE58]/10 space-y-1">
-            <div className="flex items-center gap-1.5 text-xs font-extrabold theme-heading">
+          <div className="p-3.5 rounded-xl border border-[#D4AE58]/40 bg-[#D4AE58]/10 space-y-1.5">
+            <div className="flex items-center gap-2 text-xs font-extrabold theme-heading">
               <MailCheck className="w-4 h-4 theme-accent-gold shrink-0" />
               <span>تأیید ایمیل برای فعال‌سازی حساب</span>
             </div>
-            <p className="text-[11px] theme-muted leading-relaxed">
-              پس از باز کردن لینک تأیید در ایمیل، حساب شما فعال می‌شود و می‌توانید
-              وارد شوید.
+            <p className="text-xs theme-muted leading-relaxed">
+              لینک تأیید به ایمیل شما ارسال شد. پس از باز کردن آن می‌توانید وارد شوید.
             </p>
           </div>
 
-          <div>
+          <div className="space-y-1.5">
             <label
               htmlFor="auth-resend-email"
-              className="block text-[11px] font-bold theme-heading mb-1"
+              className="block text-xs font-bold theme-heading"
             >
               ایمیل برای ارسال مجدد لینک تأیید
             </label>
@@ -1173,7 +1530,7 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
               onChange={(e) => setResendEmail(e.target.value)}
               placeholder="you@example.com"
               required
-              className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
+              className="w-full min-h-[46px] px-3.5 rounded-xl theme-input border text-sm font-semibold text-left focus:outline-none focus:ring-2 focus:ring-[var(--eyvan-teal)]"
             />
           </div>
 
@@ -1181,82 +1538,145 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
             type="submit"
             disabled={submitting}
             data-testid="auth-resend-submit"
-            className="w-full min-h-[40px] rounded-xl bg-[#0D8A8A] hover:bg-[#0F9F9F] disabled:opacity-50 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+            className="w-full min-h-[46px] rounded-xl bg-[#0D8A8A] hover:bg-[#0B7676] disabled:opacity-50 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer"
           >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span>{submitting ? 'در حال ارسال...' : 'ارسال مجدد ایمیل تأیید'}</span>
+            <RefreshCw className="w-4 h-4" />
+            <span>
+              {submitting ? 'در حال ارسال...' : 'ارسال مجدد ایمیل تأیید'}
+            </span>
           </button>
 
           <button
             type="button"
             onClick={() => {
-              setMode('login');
+              setMode('email_entry');
               resetFeedback();
             }}
-            className="w-full min-h-[36px] rounded-xl border border-[var(--eyvan-gold-border)] text-xs font-bold theme-muted hover:theme-heading cursor-pointer transition-colors"
+            className="w-full min-h-[42px] rounded-xl theme-btn-secondary border text-xs font-bold cursor-pointer"
           >
             بازگشت به صفحه ورود
           </button>
         </form>
       )}
 
+      {/* FORGOT PASSWORD */}
       {mode === 'forgot' && (
         <form
           onSubmit={handleForgotSubmit}
-          className="space-y-2.5"
+          className="space-y-3.5"
           data-testid="auth-forgot-panel"
         >
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5 text-xs font-extrabold theme-heading">
-              <KeyRound className="w-4 h-4 theme-accent-gold shrink-0" />
+            <span className="inline-flex items-center gap-1.5 text-xs font-extrabold theme-heading">
+              <KeyRound className="w-4 h-4 theme-accent-gold" />
               <span>بازیابی رمز عبور</span>
-            </div>
+            </span>
             <button
               type="button"
               onClick={() => {
-                setMode('login');
+                setMode('email_entry');
                 resetFeedback();
               }}
-              className="text-[11px] font-bold theme-muted hover:theme-heading flex items-center gap-1 cursor-pointer"
+              className="text-xs font-bold theme-muted hover:theme-heading flex items-center gap-1 cursor-pointer"
             >
-              <ArrowRight className="w-3.5 h-3.5" />
-              <span>بازگشت به ورود</span>
+              <span>بازگشت</span>
+              <ArrowLeft className="w-3.5 h-3.5 shrink-0" />
             </button>
           </div>
-          <p className="text-[11px] theme-muted leading-relaxed">
-            ایمیل ثبت‌شده خود را وارد کنید تا لینک یک‌بارمصرف بازیابی رمز عبور
-            برای شما ارسال شود.
-          </p>
-          <div>
+
+          <div className="space-y-1.5">
             <label
               htmlFor="auth-forgot-email"
-              className="block text-[11px] font-bold theme-heading mb-1"
+              className="block text-xs font-bold theme-heading"
             >
-              ایمیل
+              ایمیل حساب
             </label>
-            <input
-              id="auth-forgot-email"
-              data-testid="auth-forgot-email"
-              type="email"
-              dir="ltr"
-              autoComplete="email"
-              value={forgotEmail}
-              onChange={(e) => setForgotEmail(e.target.value)}
-              placeholder="you@example.com"
-              required
-              className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-semibold text-left focus:outline-none focus:border-[#0D8A8A]"
-            />
+            <div className="relative">
+              <Mail className="w-4 h-4 theme-muted absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                id="auth-forgot-email"
+                data-testid="auth-forgot-email"
+                type="email"
+                dir="ltr"
+                autoComplete="email"
+                value={forgotEmail}
+                onChange={(e) => setForgotEmail(e.target.value)}
+                placeholder="you@example.com"
+                required
+                className="w-full min-h-[46px] pr-10 pl-3.5 rounded-xl theme-input border text-sm font-semibold text-left focus:outline-none focus:ring-2 focus:ring-[var(--eyvan-teal)]"
+              />
+            </div>
           </div>
+
           <button
             type="submit"
             disabled={submitting}
             data-testid="auth-forgot-submit"
-            className="w-full min-h-[42px] rounded-xl bg-[#D4AE58] hover:bg-[#E5BF69] disabled:opacity-50 text-[#0B1528] text-xs font-extrabold cursor-pointer transition-colors"
+            className="w-full min-h-[46px] rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] disabled:opacity-50 text-[#0B1528] text-sm font-black cursor-pointer"
           >
-            {submitting ? 'در حال ارسال...' : 'ارسال لینک بازیابی رمز عبور'}
+            {submitting ? 'در حال ارسال...' : 'ارسال لینک بازیابی'}
           </button>
         </form>
       )}
+    </div>
+  );
+};
+
+const PasswordStrengthMeter: React.FC<{
+  strength: ReturnType<typeof computePasswordStrength>;
+}> = ({ strength }) => {
+  const barColors = [
+    strength.score >= 1
+      ? strength.score === 1
+        ? 'bg-[#DC2626]'
+        : strength.score === 2
+          ? 'bg-[#D4AE58]'
+          : 'bg-[#0D8A8A]'
+      : 'bg-[var(--eyvan-line)]',
+    strength.score >= 2
+      ? strength.score === 2
+        ? 'bg-[#D4AE58]'
+        : 'bg-[#0D8A8A]'
+      : 'bg-[var(--eyvan-line)]',
+    strength.score >= 3 ? 'bg-[#0D8A8A]' : 'bg-[var(--eyvan-line)]',
+  ];
+
+  return (
+    <div data-testid="password-strength-meter" className="space-y-1.5 pt-1">
+      <div className="grid grid-cols-3 gap-1.5">
+        {barColors.map((cls, idx) => (
+          <span
+            key={idx}
+            className={`h-1.5 rounded-full transition-colors ${cls}`}
+          />
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-bold">
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+          <span className={strength.hasMinLength ? 'theme-win' : 'theme-muted'}>
+            {strength.hasMinLength ? '✓' : '·'} ۸+ کاراکتر
+          </span>
+          <span className={strength.hasLetter ? 'theme-win' : 'theme-muted'}>
+            {strength.hasLetter ? '✓' : '·'} حرف انگلیسی
+          </span>
+          <span className={strength.hasNumber ? 'theme-win' : 'theme-muted'}>
+            {strength.hasNumber ? '✓' : '·'} عدد
+          </span>
+        </div>
+        {strength.label && (
+          <span
+            className={
+              strength.score === 3
+                ? 'theme-win'
+                : strength.score === 2
+                  ? 'theme-accent-gold'
+                  : 'theme-loss'
+            }
+          >
+            {strength.label}
+          </span>
+        )}
+      </div>
     </div>
   );
 };

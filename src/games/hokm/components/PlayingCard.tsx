@@ -177,10 +177,10 @@ interface PlayingCardProps {
 const SIZE_CLASSES: Record<NonNullable<PlayingCardProps['size']>, string> = {
   xs: 'w-9 h-[52px] rounded-[5px]',
   sm: 'w-14 h-[78px] rounded-[7px]',
-  md: 'w-[84px] h-[118px] sm:w-[106px] sm:h-[148px] rounded-[8px] sm:rounded-[10px]',
+  md: 'w-[92px] h-[130px] sm:w-[120px] sm:h-[168px] rounded-[9px] sm:rounded-[12px]',
   trick:
-    'w-[78px] h-[110px] sm:w-[102px] sm:h-[143px] rounded-[8px] sm:rounded-[10px]',
-  lg: 'w-[96px] h-[134px] sm:w-[116px] sm:h-[162px] rounded-[9px] sm:rounded-[11px]',
+    'w-[82px] h-[116px] sm:w-[106px] sm:h-[150px] rounded-[9px] sm:rounded-[11px]',
+  lg: 'w-[108px] h-[152px] sm:w-[128px] sm:h-[180px] rounded-[10px] sm:rounded-[12px]',
 };
 
 export const PlayingCard: React.FC<PlayingCardProps> = React.memo(
@@ -229,7 +229,7 @@ export const PlayingCard: React.FC<PlayingCardProps> = React.memo(
             : isSelected
               ? 'border-[#E8C268] ring-2 ring-[#F3D179]/85 shadow-[0_14px_28px_rgba(0,0,0,0.52)]'
               : 'border-[#CFCBC2] shadow-[0_4px_14px_rgba(0,0,0,0.38)]'
-        } ${!isPlayable ? 'brightness-[0.62] saturate-[0.22] contrast-[0.94]' : ''} ${className}`}
+        } ${!isPlayable ? 'brightness-[0.52] saturate-[0.2] contrast-[0.92]' : ''} ${className}`}
       >
         {/* Subtle real poker-stock inner edge sheen */}
         <div

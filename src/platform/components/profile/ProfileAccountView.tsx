@@ -2,6 +2,7 @@ import React from 'react';
 import { AuthUserSummary, PendingAuthUrlAction } from '../../auth/authClient';
 import { UserProfile } from '../../types/platform';
 import { AccountAuthPanel } from '../AccountAuthPanel';
+import { ProfileInitialAuthMode } from '../ProfileDrawer';
 
 interface ProfileAccountViewProps {
   profile: UserProfile;
@@ -11,18 +12,19 @@ interface ProfileAccountViewProps {
   onAuthChange: (user: AuthUserSummary | null) => void;
   pendingAuthAction?: PendingAuthUrlAction | null;
   onClearPendingAuthAction?: () => void;
+  initialAuthMode?: ProfileInitialAuthMode;
 }
 
 const PRIVACY_TOGGLES = [
   {
     key: 'showOnlineStatus',
     title: 'نمایش وضعیت آنلاین',
-    desc: 'نمایش وضعیت حضور در فهرست دوستان',
+    desc: 'دوستان ببینند چه زمانی در ایوان آنلاین هستید',
   },
   {
     key: 'allowFriendRequests',
-    title: 'پذیرش لینک دعوت و دوستی',
-    desc: 'اجازه افزودن از طریق لینک دعوت اختصاصی شما',
+    title: 'پذیرش درخواست دوستی',
+    desc: 'امکان افزودن شما از طریق نام کاربری یا لینک دعوت',
   },
   {
     key: 'compactProfileStats',
@@ -39,37 +41,39 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
   onAuthChange,
   pendingAuthAction = null,
   onClearPendingAuthAction,
+  initialAuthMode = 'login',
 }) => {
   return (
-    <div className="space-y-4" data-testid="profile-account-view">
-      {/* Preserved C1 & C2 Central Authentication Panel */}
+    <div className="space-y-6" data-testid="profile-account-view">
+      {/* Redesigned Central Auth & Registration Flow */}
       <AccountAuthPanel
         authUser={authUser}
         authLoading={authLoading}
         onAuthChange={onAuthChange}
         pendingAuthAction={pendingAuthAction}
         onClearPendingAuthAction={onClearPendingAuthAction}
+        initialMode={initialAuthMode}
       />
 
-      {/* Account Privacy Controls */}
-      <section className="space-y-2.5">
-        <h3 className="text-xs sm:text-sm font-extrabold theme-heading px-0.5">
+      {/* Privacy Controls — Clean Hairline-Divided Section */}
+      <section className="pt-5 border-t border-[var(--eyvan-line)] space-y-2.5">
+        <h3 className="text-xs sm:text-sm font-extrabold theme-heading">
           حریم خصوصی و تعامل
         </h3>
 
-        <div className="rounded-2xl theme-subcard border overflow-hidden divide-y divide-[var(--eyvan-line)]">
+        <div className="divide-y divide-[var(--eyvan-line)]">
           {PRIVACY_TOGGLES.map((item) => {
             const checked = profile.accountSettings[item.key];
             return (
               <div
                 key={item.key}
-                className="flex items-center justify-between gap-3 px-4 py-3.5 min-h-[60px]"
+                className="flex items-center justify-between gap-3 py-3 min-h-[56px]"
               >
                 <div className="min-w-0">
-                  <div className="text-xs font-bold theme-heading">
+                  <div className="text-xs sm:text-sm font-bold theme-heading">
                     {item.title}
                   </div>
-                  <div className="text-[11px] theme-muted mt-0.5 leading-relaxed">
+                  <div className="text-[11px] theme-muted mt-0.5">
                     {item.desc}
                   </div>
                 </div>

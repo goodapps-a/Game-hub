@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { AlertTriangle, Crown, Wifi, WifiOff } from 'lucide-react';
 import {
@@ -10,9 +10,11 @@ import {
   TeamId,
 } from '../engine/types';
 import { getLegalCards } from '../engine/rules';
+import { resolveNextHakem } from '../engine/gameEngine';
 import { PlayingCard, SuitIconSvg } from './PlayingCard';
 import { TrumpSelector } from './TrumpSelector';
 import { HandResultModal } from './HandResultModal';
+import { HandWinCelebration } from './HandWinCelebration';
 import { CardBackSvg } from './CardBackSvg';
 import { PersianCornerOrnament } from '../../../platform/theme/PersianPatterns';
 import { toPersianDigits } from '../../../platform/theme/tokens';
@@ -46,11 +48,13 @@ interface HokmTableProps {
   flyingDealCards: readonly FlyingDealCard[];
   isShufflingAnim: boolean;
   isDealingAnim: boolean;
+  southHandOverride?: readonly Card[];
+  handGathered?: boolean;
   showGameStartBanner: boolean;
   trickCollectPhase: TrickCollectPhase;
   collectingWinnerTeam: TeamId | null;
-  selectedCardId: string | null;
   playerName: string;
+  tableSkinId?: string;
   reducedMotion: boolean;
   canHumanPlay: boolean;
   exitConfirmOpen: boolean;
@@ -58,7 +62,6 @@ interface HokmTableProps {
   deckCount?: number;
   onlineHud?: OnlineTableHudInfo;
   canStartRematch?: boolean;
-  onSelectCard: (cardId: string | null) => void;
   onPlayCard: (cardId: string) => void;
   onChooseTrump: (suit: Suit) => void;
   onRequestExit: () => void;
@@ -248,64 +251,107 @@ const TeamTrickPile: React.FC<{
 
 /**
  * Strictly face-down card backs for opponent & partner hands.
- * ALWAYS reserves fixed layout dimensions even at 0 cards so the arena NEVER jumps
- * downward when the first card arrives during dealing!
+ * Sized identically to South's cards (`92x130` mobile / `120x168` desktop) and
+ * anchored neatly off the viewport edges like classic Hokm salons.
  */
 const HiddenHandFan: React.FC<{
   count: number;
   orientation: 'horizontal' | 'vertical';
-}> = ({ count, orientation }) => {
+  side?: 'north' | 'west' | 'east';
+  isDesktop?: boolean;
+}> = ({ count, orientation, side = 'north', isDesktop = false }) => {
   const displayCount = Math.min(count, 13);
 
   if (orientation === 'horizontal') {
+    const mid = (displayCount - 1) / 2;
     return (
       <div
         dir="ltr"
-        className="flex items-center justify-center h-[48px] sm:h-[62px] w-full"
+        className="flex items-start justify-center h-[130px] sm:h-[168px] pointer-events-none select-none"
         aria-hidden="true"
       >
         {displayCount > 0 &&
-          Array.from({ length: displayCount }).map((_, idx) => (
-            <div
-              key={idx}
-              className="w-[34px] h-[48px] sm:w-[42px] sm:h-[60px] rounded-[5px] bg-white p-[1.5px] overflow-hidden shadow-md border border-[#D4CFC5] shrink-0"
-              style={{
-                marginLeft: idx === 0 ? 0 : displayCount > 9 ? -21 : -15,
-                zIndex: idx,
-              }}
-            >
-              <div className="w-full h-full rounded-[3px] overflow-hidden">
-                <CardBackSvg />
+          Array.from({ length: displayCount }).map((_, idx) => {
+            const norm = displayCount <= 1 ? 0 : (idx - mid) / Math.max(1, mid);
+            const rot = -norm * Math.min(15, (displayCount - 1) * 1.25);
+            const arcY = -(norm * norm) * Math.min(18, (displayCount - 1) * 1.45);
+            const overlapMargin =
+              idx === 0
+                ? 0
+                : isDesktop
+                  ? displayCount > 9
+                    ? -91
+                    : displayCount > 6
+                      ? -82
+                      : -72
+                  : displayCount > 9
+                    ? -71
+                    : displayCount > 6
+                      ? -64
+                      : -56;
+            return (
+              <div
+                key={idx}
+                className="w-[92px] h-[130px] sm:w-[120px] sm:h-[168px] rounded-[9px] sm:rounded-[11px] bg-white p-[2.5px] sm:p-[3px] overflow-hidden shadow-[0_6px_18px_rgba(0,0,0,0.42)] border border-[#D4CFC5] shrink-0 transition-transform duration-200"
+                style={{
+                  marginLeft: overlapMargin,
+                  transform: `translateY(${arcY}px) rotate(${rot}deg)`,
+                  zIndex: idx,
+                }}
+              >
+                <div className="w-full h-full rounded-[6px] sm:rounded-[8px] overflow-hidden">
+                  <CardBackSvg />
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
       </div>
     );
   }
 
-  const visibleStack = Math.min(displayCount, 7);
+  const visibleStack = Math.min(displayCount, 13);
+  const mid = (visibleStack - 1) / 2;
+  const dirSign = side === 'west' ? 1 : -1;
   return (
     <div
-      className="flex flex-col items-center justify-center h-[112px] sm:h-[146px] w-[48px] sm:w-[58px] shrink-0"
+      className="flex flex-col items-center justify-center w-[130px] sm:w-[168px] pointer-events-none select-none"
       aria-hidden="true"
     >
       {visibleStack > 0 &&
-        Array.from({ length: visibleStack }).map((_, idx) => (
-          <div
-            key={idx}
-            className="w-[46px] h-[32px] sm:w-[56px] sm:h-[38px] rounded-[5px] bg-white p-[1.5px] overflow-hidden shadow-md border border-[#D4CFC5] shrink-0"
-            style={{
-              marginTop: idx === 0 ? 0 : -20,
-              zIndex: idx,
-            }}
-          >
-            <div className="w-full h-full rounded-[3px] overflow-hidden">
-              <div className="w-full h-full rotate-90 scale-[1.45]">
+        Array.from({ length: visibleStack }).map((_, idx) => {
+          const norm = visibleStack <= 1 ? 0 : (idx - mid) / Math.max(1, mid);
+          const rot = dirSign * norm * Math.min(14, (visibleStack - 1) * 1.25);
+          const arcX = -dirSign * (norm * norm) * 14;
+          const overlapMt =
+            idx === 0
+              ? 0
+              : isDesktop
+                ? visibleStack > 9
+                  ? -102
+                  : visibleStack > 6
+                    ? -92
+                    : -78
+                : visibleStack > 9
+                  ? -78
+                  : visibleStack > 6
+                    ? -70
+                    : -60;
+          return (
+            <div
+              key={idx}
+              className="w-[130px] h-[92px] sm:w-[168px] sm:h-[120px] rounded-[9px] sm:rounded-[11px] bg-white p-[2.5px] sm:p-[3px] overflow-hidden shadow-[0_6px_16px_rgba(0,0,0,0.42)] border border-[#D4CFC5] shrink-0 flex items-center justify-center transition-transform duration-200"
+              style={{
+                marginTop: overlapMt,
+                transform: `translateX(${arcX}px) rotate(${rot}deg)`,
+                zIndex: idx,
+              }}
+            >
+              <div className="w-[86px] h-[124px] sm:w-[114px] sm:h-[162px] rounded-[6px] sm:rounded-[8px] overflow-hidden rotate-90 shrink-0">
                 <CardBackSvg />
               </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
     </div>
   );
 };
@@ -439,272 +485,392 @@ const RoyalScoreboard: React.FC<{
   );
 };
 
+function resolveTableSkinVisual(tableSkinId?: string): {
+  imageSrc: string;
+  vignette: string;
+  railAccent: string;
+} {
+  if (tableSkinId === 'tt-lapis' || tableSkinId === 'tt-turquoise-palace') {
+    return {
+      imageSrc: PLATFORM_ASSETS.hokmTableLapis,
+      vignette:
+        'radial-gradient(ellipse at 50% 48%, rgba(8, 30, 62, 0.10) 0%, rgba(5, 19, 44, 0.42) 72%, rgba(3, 10, 26, 0.78) 100%)',
+      railAccent: 'border-[#67D5E8]/45',
+    };
+  }
+  if (tableSkinId === 'tt-tabriz') {
+    return {
+      imageSrc: PLATFORM_ASSETS.hokmTableRuby,
+      vignette:
+        'radial-gradient(ellipse at 50% 48%, rgba(58, 12, 24, 0.10) 0%, rgba(36, 7, 15, 0.42) 72%, rgba(20, 4, 9, 0.78) 100%)',
+      railAccent: 'border-[#F3D179]/48',
+    };
+  }
+  return {
+    imageSrc: PLATFORM_ASSETS.hokmTableTraditional,
+    vignette:
+      'radial-gradient(ellipse at 50% 48%, rgba(7, 46, 33, 0.08) 0%, rgba(4, 28, 20, 0.40) 72%, rgba(2, 16, 12, 0.76) 100%)',
+    railAccent: 'border-[#D4AE58]/42',
+  };
+}
+
 /**
- * Zero-Latency Pointer-Events Draggable & Two-Tap Hand Card:
- * - Tap 1 on a legal card: lifts the card smoothly higher and highlights it.
- * - Tap 2 on the ALREADY selected card: plays that card onto the table!
- * - Dragging upward onto center table (dy < -62px or brisk upward flick): also plays smoothly!
- * - Grayed-out / dimmed whenever it is NOT the player's turn (or card is illegal),
- *   brightening immediately when it becomes the player's turn!
+ * Zero-Lag 60-120fps Direct-DOM Pure Drag-and-Drop Hand Card:
+ * - Zero React re-renders during drag (drives transforms via rAF + direct DOM style & dropRingRef dataset).
+ * - Pure drag-and-drop ONLY (no tap-to-select).
+ * - Out of turn (!canHumanPlay): ALL cards remain vivid, active, and draggable (springing back on release).
+ * - On player's turn (canHumanPlay): ONLY legal cards remain bright & draggable;
+ *   illegal cards are dimmed and non-draggable!
  */
 interface DraggableHandCardProps {
   card: Card;
   idx: number;
   targetX: number;
+  fanArcY: number;
+  fanRotateDeg: number;
   cardWidthPx: number;
   isLegal: boolean;
   canHumanPlay: boolean;
-  isWaitingTurn: boolean;
-  isSelected: boolean;
-  isDraggingGlobal: boolean;
+  handGathered: boolean;
   reducedMotion: boolean;
-  onSelectCard: (cardId: string | null) => void;
+  dropRingRef: React.RefObject<HTMLDivElement | null>;
   onPlayCard: (cardId: string) => void;
-  onDragChange: (cardId: string | null, overDrop: boolean) => void;
 }
 
-const DraggableHandCard: React.FC<DraggableHandCardProps> = ({
-  card,
-  idx,
-  targetX,
-  cardWidthPx,
-  isLegal,
-  canHumanPlay,
-  isWaitingTurn,
-  isSelected,
-  isDraggingGlobal,
-  reducedMotion,
-  onSelectCard,
-  onPlayCard,
-  onDragChange,
-}) => {
-  const isDraggable = canHumanPlay && isLegal;
-  const dimmed = isWaitingTurn || (canHumanPlay && !isLegal);
+const DraggableHandCard: React.FC<DraggableHandCardProps> = React.memo(
+  ({
+    card,
+    idx,
+    targetX,
+    fanArcY,
+    fanRotateDeg,
+    cardWidthPx,
+    isLegal,
+    canHumanPlay,
+    handGathered,
+    reducedMotion,
+    dropRingRef,
+    onPlayCard,
+  }) => {
+    const canPlayNow = canHumanPlay && isLegal && !handGathered;
+    // Out of turn: every card stays vivid & draggable (springs back without playing).
+    // On player's turn: ONLY legal cards stay vivid & draggable; illegal cards are dimmed & disabled!
+    const isCardActive = !canHumanPlay || isLegal;
+    const isDraggableNow = isCardActive && !handGathered;
 
-  const innerRef = useRef<HTMLDivElement | null>(null);
-  const dragStateRef = useRef<{
-    active: boolean;
-    pointerId: number | null;
-    startX: number;
-    startY: number;
-    lastY: number;
-    lastTime: number;
-    vy: number;
-    didDrag: boolean;
-    overDrop: boolean;
-    baseY: number;
-  }>({
-    active: false,
-    pointerId: null,
-    startX: 0,
-    startY: 0,
-    lastY: 0,
-    lastTime: 0,
-    vy: 0,
-    didDrag: false,
-    overDrop: false,
-    baseY: 0,
-  });
+    const slotRef = useRef<HTMLDivElement | null>(null);
+    const innerRef = useRef<HTMLDivElement | null>(null);
+    const rafIdRef = useRef<number | null>(null);
 
-  // Sync resting/selected transform cleanly whenever NOT actively dragging
-  useEffect(() => {
-    const el = innerRef.current;
-    if (!el || dragStateRef.current.active) return;
-    el.style.transition = reducedMotion
-      ? 'none'
-      : 'transform 210ms cubic-bezier(0.22, 1, 0.36, 1)';
-    el.style.transform = isSelected
-      ? 'translate3d(0px, -28px, 0px) scale(1.12)'
-      : 'translate3d(0px, 0px, 0px) scale(1)';
-  }, [isSelected, reducedMotion]);
-
-  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!isDraggable) return;
-    if (e.button !== 0 && e.pointerType === 'mouse') return;
-
-    const el = innerRef.current;
-    if (!el) return;
-
-    try {
-      el.setPointerCapture(e.pointerId);
-    } catch {
-      // Ignore synthetic events without active pointerId
-    }
-
-    const baseY = isSelected ? -28 : 0;
-    dragStateRef.current = {
-      active: true,
-      pointerId: e.pointerId,
-      startX: e.clientX,
-      startY: e.clientY,
-      lastY: e.clientY,
-      lastTime: performance.now(),
+    const dragStateRef = useRef<{
+      active: boolean;
+      pointerId: number | null;
+      startX: number;
+      startY: number;
+      anchorDx: number;
+      anchorDy: number;
+      latestDx: number;
+      latestDy: number;
+      lastY: number;
+      lastTime: number;
+      vy: number;
+      didDrag: boolean;
+      baseY: number;
+      canPlayAtStart: boolean;
+    }>({
+      active: false,
+      pointerId: null,
+      startX: 0,
+      startY: 0,
+      anchorDx: 0,
+      anchorDy: 0,
+      latestDx: 0,
+      latestDy: 0,
+      lastY: 0,
+      lastTime: 0,
       vy: 0,
       didDrag: false,
-      overDrop: false,
-      baseY,
-    };
-  };
+      baseY: 0,
+      canPlayAtStart: false,
+    });
 
-  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    const ds = dragStateRef.current;
-    if (!ds.active || ds.pointerId !== e.pointerId) return;
-    const el = innerRef.current;
-    if (!el) return;
+    const prevDropStateRef = useRef<{ dragActive: boolean; dropOver: boolean }>({
+      dragActive: false,
+      dropOver: false,
+    });
 
-    const dx = e.clientX - ds.startX;
-    const dy = e.clientY - ds.startY;
-    const now = performance.now();
-    const dt = Math.max(8, now - ds.lastTime);
-    ds.vy = (e.clientY - ds.lastY) / dt;
-    ds.lastY = e.clientY;
-    ds.lastTime = now;
+    const restTransform = `translate3d(0px, ${fanArcY}px, 0px) rotate(${fanRotateDeg}deg) scale(${
+      handGathered ? 0.94 : 1
+    })`;
 
-    if (!ds.didDrag) {
-      if (Math.hypot(dx, dy) < 7) return;
-      ds.didDrag = true;
-      el.style.transition = 'none';
-      const overNow = dy + ds.baseY < -54;
-      ds.overDrop = overNow;
-      onDragChange(card.id, overNow);
-    }
-
-    const visualY = dy + ds.baseY;
-    const tilt = Math.max(-13, Math.min(13, dx * 0.065));
-    el.style.transform = `translate3d(${dx}px, ${visualY}px, 0px) rotate(${tilt}deg) scale(1.14)`;
-
-    const overNow = visualY < -54;
-    if (overNow !== ds.overDrop) {
-      ds.overDrop = overNow;
-      onDragChange(card.id, overNow);
-    }
-  };
-
-  const finishPointer = (e: React.PointerEvent<HTMLDivElement>, cancelled: boolean) => {
-    const ds = dragStateRef.current;
-    if (!ds.active || ds.pointerId !== e.pointerId) return;
-
-    const el = innerRef.current;
-    if (el) {
-      try {
-        if (el.hasPointerCapture(e.pointerId)) {
-          el.releasePointerCapture(e.pointerId);
-        }
-      } catch {
-        // Ignore
+    // Keep resting fan transform synced smoothly when NOT actively dragging
+    useEffect(() => {
+      const el = innerRef.current;
+      const slot = slotRef.current;
+      if (!el || dragStateRef.current.active) return;
+      el.style.transition = reducedMotion
+        ? 'none'
+        : handGathered
+          ? 'transform 360ms cubic-bezier(0.22, 1, 0.36, 1)'
+          : 'transform 380ms cubic-bezier(0.16, 1, 0.3, 1)';
+      el.style.transform = restTransform;
+      if (slot) {
+        slot.style.zIndex = String(idx + 1);
       }
-    }
+    }, [restTransform, reducedMotion, idx, handGathered]);
 
-    const dy = e.clientY - ds.startY;
-    const totalY = dy + ds.baseY;
-    const wasDrag = ds.didDrag;
-    const vy = ds.vy;
+    // Cleanup any pending animation frame on unmount
+    useEffect(() => {
+      return () => {
+        if (rafIdRef.current !== null) {
+          cancelAnimationFrame(rafIdRef.current);
+          rafIdRef.current = null;
+        }
+      };
+    }, []);
 
-    ds.active = false;
-    ds.pointerId = null;
-    ds.didDrag = false;
-    ds.overDrop = false;
-
-    if (wasDrag) {
-      onDragChange(null, false);
-      const droppedOnTable =
-        !cancelled &&
-        (totalY < -62 || (vy < -0.45 && totalY < -28));
-
-      if (droppedOnTable && isDraggable) {
-        onPlayCard(card.id);
+    const syncDropRing = (dragActive: boolean, dropOver: boolean) => {
+      const prev = prevDropStateRef.current;
+      if (prev.dragActive === dragActive && prev.dropOver === dropOver) {
         return;
       }
+      prev.dragActive = dragActive;
+      prev.dropOver = dropOver;
+      const ring = dropRingRef.current;
+      if (!ring) return;
+      ring.dataset.dragActive = dragActive ? 'true' : 'false';
+      ring.dataset.dropOver = dropOver ? 'true' : 'false';
+    };
 
-      // Smoothly return card to hand (keeping selection state cleanly)
+    const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0 && e.pointerType === 'mouse') return;
+      // On player's turn, illegal cards are strictly locked and non-draggable!
+      if (!isDraggableNow) return;
+
+      e.stopPropagation();
+      const el = innerRef.current;
+      const slot = slotRef.current;
+      if (!el) return;
+
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch {
+        // Ignore synthetic events without active pointerId
+      }
+
+      dragStateRef.current = {
+        active: true,
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        anchorDx: 0,
+        anchorDy: 0,
+        latestDx: 0,
+        latestDy: 0,
+        lastY: e.clientY,
+        lastTime: performance.now(),
+        vy: 0,
+        didDrag: false,
+        baseY: fanArcY,
+        canPlayAtStart: canPlayNow,
+      };
+
+      // When out of turn (!canHumanPlay), immediately stand card upright (0deg) in its slot without shifting sideways
+      if (!canHumanPlay) {
+        el.style.transition = reducedMotion
+          ? 'none'
+          : 'transform 160ms cubic-bezier(0.22, 1, 0.36, 1)';
+        el.style.transform = `translate3d(0px, ${fanArcY - 6}px, 0px) rotate(0deg) scale(1.04)`;
+        if (slot) {
+          slot.style.zIndex = '95';
+        }
+      }
+    };
+
+    const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+      const ds = dragStateRef.current;
+      if (!ds.active || ds.pointerId !== e.pointerId) return;
+
+      const dx = e.clientX - ds.startX;
+      const dy = e.clientY - ds.startY;
+      const now = performance.now();
+      const dt = Math.max(8, now - ds.lastTime);
+      ds.vy = (e.clientY - ds.lastY) / dt;
+      ds.lastY = e.clientY;
+      ds.lastTime = now;
+      ds.latestDx = dx;
+      ds.latestDy = dy;
+
+      if (!ds.didDrag) {
+        if (Math.hypot(dx, dy) < 2.5) return;
+        ds.didDrag = true;
+        ds.anchorDx = dx;
+        ds.anchorDy = dy;
+      }
+
+      if (rafIdRef.current === null) {
+        rafIdRef.current = requestAnimationFrame(() => {
+          rafIdRef.current = null;
+          const cur = dragStateRef.current;
+          if (!cur.active || !cur.didDrag) return;
+          const el = innerRef.current;
+          const slot = slotRef.current;
+          if (!el) return;
+
+          const moveDx = cur.latestDx - cur.anchorDx;
+          const moveDy = cur.latestDy - cur.anchorDy;
+          const dist = Math.hypot(moveDx, moveDy);
+          const t = Math.min(1, dist / 28);
+          const easeOut = 1 - (1 - t) * (1 - t);
+
+          if (!canHumanPlay) {
+            // Out of turn: card stays anchored in its slot horizontally/vertically & stands cleanly upright at 0deg
+            const uprightRot = fanRotateDeg * (1 - easeOut);
+            el.style.transition = 'none';
+            el.style.transform = `translate3d(0px, ${
+              cur.baseY - 6 * Math.max(0.35, easeOut)
+            }px, 0px) rotate(${uprightRot.toFixed(2)}deg) scale(${(
+              1 +
+              0.04 * easeOut
+            ).toFixed(4)})`;
+            if (slot) {
+              slot.style.zIndex = '95';
+            }
+            return;
+          }
+
+          const visualY = moveDy + cur.baseY;
+          const targetTilt = Math.max(-12, Math.min(12, moveDx * 0.055));
+          const rot = fanRotateDeg + (targetTilt - fanRotateDeg) * easeOut;
+          const scale = 1 + 0.075 * easeOut;
+
+          el.style.transition = 'none';
+          el.style.transform = `translate3d(${moveDx}px, ${visualY}px, 0px) rotate(${rot.toFixed(
+            2
+          )}deg) scale(${scale.toFixed(4)})`;
+          if (slot) {
+            slot.style.zIndex = '95';
+          }
+          // Measure actual upward drag distance cleanly for ALL cards
+          const overNow = cur.canPlayAtStart && moveDy < -48;
+          syncDropRing(cur.canPlayAtStart, overNow);
+        });
+      }
+    };
+
+    const finishPointer = (
+      e: React.PointerEvent<HTMLDivElement>,
+      cancelled: boolean
+    ) => {
+      const ds = dragStateRef.current;
+      if (!ds.active || ds.pointerId !== e.pointerId) return;
+
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+
+      const el = innerRef.current;
+      const slot = slotRef.current;
+      if (el) {
+        try {
+          if (el.hasPointerCapture(e.pointerId)) {
+            el.releasePointerCapture(e.pointerId);
+          }
+        } catch {
+          // Ignore
+        }
+      }
+
+      const dy = e.clientY - ds.startY - ds.anchorDy;
+      const wasDrag = ds.didDrag;
+      const vy = ds.vy;
+
+      ds.active = false;
+      ds.pointerId = null;
+      ds.didDrag = false;
+      ds.anchorDx = 0;
+      ds.anchorDy = 0;
+
+      syncDropRing(false, false);
+
+      if (wasDrag && canHumanPlay) {
+        // Uniform upward drag threshold for EVERY card regardless of fan arc position
+        const droppedOnTable =
+          !cancelled && (dy < -50 || (vy < -0.35 && dy < -24));
+
+        // Play ONLY if it is the player's turn AND the card is legal
+        if (droppedOnTable && canPlayNow) {
+          onPlayCard(card.id);
+          return;
+        }
+      }
+
+      // Pure Drag-and-Drop ONLY: tapping or invalid/out-of-turn release springs smoothly back into the fan
       if (el) {
         el.style.transition = reducedMotion
           ? 'none'
-          : 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1)';
-        el.style.transform = isSelected
-          ? 'translate3d(0px, -28px, 0px) scale(1.12)'
-          : 'translate3d(0px, 0px, 0px) scale(1)';
+          : 'transform 260ms cubic-bezier(0.22, 1, 0.36, 1)';
+        el.style.transform = restTransform;
       }
-      return;
-    }
+      if (slot) {
+        slot.style.zIndex = String(idx + 1);
+      }
+    };
 
-    // TAP 1: lift & select card; TAP 2 on the ALREADY selected card: play it!
-    if (!cancelled && isDraggable) {
-      if (isSelected) {
-        onPlayCard(card.id);
-      } else {
-        onSelectCard(card.id);
-      }
-    }
-  };
-
-  return (
-    <motion.div
-      initial={
-        reducedMotion
-          ? { x: targetX, opacity: 1 }
-          : { x: targetX, y: -36, opacity: 0, scale: 0.9 }
-      }
-      animate={{
-        x: targetX,
-        y: 0,
-        opacity: 1,
-        scale: 1,
-      }}
-      transition={
-        reducedMotion
-          ? { duration: 0.05 }
-          : {
-              x: { type: 'spring', stiffness: 195, damping: 24, mass: 0.85 },
-              y: { type: 'spring', stiffness: 260, damping: 26 },
-              opacity: { duration: 0.2 },
-              scale: { duration: 0.2 },
-            }
-      }
-      style={{
-        position: 'absolute',
-        bottom: 4,
-        left: '50%',
-        marginLeft: -(cardWidthPx / 2),
-        zIndex: isDraggingGlobal ? 95 : isSelected ? 55 : idx + 1,
-      }}
-      className="will-change-transform"
-    >
+    return (
       <div
-        ref={innerRef}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={(e) => finishPointer(e, false)}
-        onPointerCancel={(e) => finishPointer(e, true)}
-        role={isDraggable ? 'button' : undefined}
-        tabIndex={isDraggable ? 0 : -1}
-        aria-disabled={dimmed ? 'true' : undefined}
-        data-playable={isDraggable ? 'true' : 'false'}
-        data-selected={isSelected ? 'true' : 'false'}
-        data-card-slot={card.id}
+        ref={slotRef}
         style={{
-          transform: isSelected
-            ? 'translate3d(0px, -28px, 0px) scale(1.12)'
-            : 'translate3d(0px, 0px, 0px) scale(1)',
+          position: 'absolute',
+          bottom: 14,
+          left: '50%',
+          marginLeft: -(cardWidthPx / 2),
+          transform: `translate3d(${targetX}px, 0px, 0px)`,
+          transition: reducedMotion
+            ? 'none'
+            : handGathered
+              ? 'transform 360ms cubic-bezier(0.22, 1, 0.36, 1)'
+              : 'transform 380ms cubic-bezier(0.16, 1, 0.3, 1)',
+          zIndex: idx + 1,
         }}
-        className={`touch-none select-none will-change-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F3D179] rounded-[10px] ${
-          isDraggable
-            ? 'cursor-grab active:cursor-grabbing'
-            : dimmed
-              ? 'cursor-not-allowed'
-              : 'cursor-default'
-        }`}
+        className="will-change-transform"
       >
-        <PlayingCard
-          card={card}
-          isSelected={isSelected || isDraggingGlobal}
-          isPlayable={!dimmed}
-          size="md"
-        />
+        <div
+          ref={innerRef}
+          draggable={false}
+          onDragStart={(e) => e.preventDefault()}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={(e) => finishPointer(e, false)}
+          onPointerCancel={(e) => finishPointer(e, true)}
+          role="button"
+          tabIndex={canPlayNow ? 0 : -1}
+          aria-disabled={!isCardActive}
+          data-playable={canPlayNow ? 'true' : 'false'}
+          data-visually-dimmed={!isCardActive ? 'true' : 'false'}
+          data-card-slot={card.id}
+          style={{
+            transformOrigin: '50% 72%',
+            transform: restTransform,
+          }}
+          className={`touch-none select-none will-change-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F3D179] rounded-[11px] ${
+            isCardActive
+              ? 'cursor-grab active:cursor-grabbing'
+              : 'cursor-not-allowed'
+          }`}
+        >
+          <PlayingCard
+            card={card}
+            isPlayable={isCardActive}
+            size="md"
+          />
+        </div>
       </div>
-    </motion.div>
-  );
-};
+    );
+  }
+);
+DraggableHandCard.displayName = 'DraggableHandCard';
 
 export const HokmTable: React.FC<HokmTableProps> = ({
   state,
@@ -712,11 +878,13 @@ export const HokmTable: React.FC<HokmTableProps> = ({
   flyingDealCards,
   isShufflingAnim,
   isDealingAnim,
+  southHandOverride,
+  handGathered = false,
   showGameStartBanner,
   trickCollectPhase,
   collectingWinnerTeam,
-  selectedCardId,
   playerName,
+  tableSkinId = 'tt-traditional',
   reducedMotion,
   canHumanPlay,
   exitConfirmOpen,
@@ -724,7 +892,6 @@ export const HokmTable: React.FC<HokmTableProps> = ({
   deckCount,
   onlineHud,
   canStartRematch = true,
-  onSelectCard,
   onPlayCard,
   onChooseTrump,
   onRequestExit,
@@ -732,16 +899,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
   onConfirmExit,
   onNewMatch,
 }) => {
-  const [draggingCardId, setDraggingCardId] = useState<string | null>(null);
-  const [isOverDropZone, setIsOverDropZone] = useState(false);
-
-  const handleDragChange = useCallback(
-    (cardId: string | null, overDrop: boolean) => {
-      setDraggingCardId(cardId);
-      setIsOverDropZone(overDrop);
-    },
-    []
-  );
+  const dropRingRef = useRef<HTMLDivElement | null>(null);
+  const tableSkin = resolveTableSkinVisual(tableSkinId);
 
   // Measure South hand container width for silky-smooth dynamic card spacing as hand shrinks
   const handContainerRef = useRef<HTMLDivElement | null>(null);
@@ -778,7 +937,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
     };
   }, []);
 
-  const southHand = state.hands.south.slice(0, visibleHandCounts.south);
+  const southHand =
+    southHandOverride ?? state.hands.south.slice(0, visibleHandCounts.south);
   const legalIds = new Set(
     canHumanPlay
       ? getLegalCards(state.hands.south, state.currentTrick).map((c) => c.id)
@@ -823,43 +983,75 @@ export const HokmTable: React.FC<HokmTableProps> = ({
       : SEAT_FLY_OFFSETS.east
     : { x: 0, y: 0, rotate: 0 };
 
-  // Dynamic smooth horizontal fan step:
-  // As southHand.length decreases (13 -> 12 -> ... -> 1), step widens smoothly!
-  const cardWidthPx = handLayout.isDesktop ? 106 : 84;
-  const maxUsableWidth = handLayout.isDesktop
-    ? Math.min(handLayout.width - 28, 960)
-    : Math.max(260, handLayout.width - 14);
-  const idealSpreadStep = handLayout.isDesktop ? cardWidthPx + 10 : cardWidthPx + 6;
+  // Zero-Overflow Curved Fan Geometry:
+  // Computes exact rotated upper-corner bounding extent for transformOrigin(50%, 72%)
+  // so ALL 13 cards strictly remain inside even narrow 360px mobile viewports with uniform grab spacing!
+  const cardWidthPx = handLayout.isDesktop ? 120 : 92;
+  const cardHeightPx = handLayout.isDesktop ? 168 : 130;
   const count = southHand.length;
-  const fanStepPx =
+  const maxAngleDeg = Math.min(
+    handLayout.isDesktop ? 20 : 16,
+    Math.max(0, (count - 1) * (handLayout.isDesktop ? 1.65 : 1.35))
+  );
+  const maxArcDropPx = Math.min(
+    handLayout.isDesktop ? 40 : 24,
+    Math.max(0, (count - 1) * (handLayout.isDesktop ? 3.3 : 2.0))
+  );
+  const maxAngleRad = (maxAngleDeg * Math.PI) / 180;
+  const rotatedHalfExtent = Math.ceil(
+    (cardWidthPx / 2) * Math.cos(maxAngleRad) +
+      cardHeightPx * 0.72 * Math.sin(maxAngleRad)
+  );
+  const edgePadPx = handLayout.isDesktop ? 16 : 6;
+  const safeHalfSpan = Math.max(
+    24,
+    Math.floor(handLayout.width / 2 - rotatedHalfExtent - edgePadPx)
+  );
+  const idealHalfSpan = ((count - 1) * (handLayout.isDesktop ? 52 : 34)) / 2;
+  const fanHalfSpan =
     count <= 1
       ? 0
-      : Math.min(idealSpreadStep, Math.max(22, (maxUsableWidth - cardWidthPx) / (count - 1)));
+      : Math.min(
+          handLayout.isDesktop ? Math.min(safeHalfSpan, 316) : safeHalfSpan,
+          idealHalfSpan
+        );
+
+  const showTrumpModal =
+    state.phase === 'CHOOSING_TRUMP' &&
+    state.hakem === 'south' &&
+    !isDealingAnim &&
+    !isShufflingAnim &&
+    !handGathered;
+
+  const nextHakemSeat =
+    state.phase === 'HAND_COMPLETE' ? resolveNextHakem(state) : state.hakem;
+  const hakemChangedOnHand =
+    state.phase === 'HAND_COMPLETE' && nextHakemSeat !== state.hakem;
 
   return (
     <div
-      className="min-h-[100dvh] w-full flex flex-col hokm-traditional-arena text-[#F6F3EC] relative overflow-hidden select-none transform-gpu"
+      className="min-h-[100dvh] w-full flex flex-col hokm-traditional-arena text-[#F6F3EC] relative overflow-clip select-none transform-gpu"
       data-testid="hokm-table"
+      data-table-skin={tableSkinId}
       data-phase={state.phase}
       data-turn={state.currentTurn}
     >
-      {/* TRADITIONAL PERSIAN EMERALD VELVET & KHATAMKARI TABLE BACKDROP */}
+      {/* LUXURY HOKM TABLE BACKDROP (Active Skin from Shop or Default Emerald Baize) */}
       <div
         className="fixed inset-0 z-0 pointer-events-none overflow-hidden"
         aria-hidden="true"
       >
         <img
-          src={PLATFORM_ASSETS.hokmTableTraditional}
+          src={tableSkin.imageSrc}
           alt=""
           decoding="sync"
           loading="eager"
-          className="w-full h-full object-cover object-center scale-[1.18] brightness-[0.94] contrast-[1.06] saturate-[1.08]"
+          className="w-full h-full object-cover object-center scale-[1.06] brightness-[0.96] contrast-[1.04]"
         />
         <div
           className="absolute inset-0"
           style={{
-            background:
-              'radial-gradient(ellipse at 50% 48%, rgba(8, 52, 39, 0.14) 0%, rgba(5, 30, 23, 0.45) 70%, rgba(3, 18, 14, 0.78) 100%)',
+            background: tableSkin.vignette,
           }}
         />
       </div>
@@ -912,10 +1104,12 @@ export const HokmTable: React.FC<HokmTableProps> = ({
         </div>
       )}
 
-      {/* Main Traditional Salon Arena */}
-      <main className="flex-1 relative z-10 flex flex-col justify-between px-2 sm:px-6 py-2 sm:py-3 max-w-6xl w-full mx-auto">
+      {/* Main Traditional Salon Arena (Full viewport width so edge opponent card fans clip cleanly off sides) */}
+      <main className="flex-1 relative z-10 flex flex-col justify-between px-2 sm:px-6 py-2 sm:py-3 w-full">
         {/* Inlaid Persian Gold & Khatamkari Perimeter Rail */}
-        <div className="pointer-events-none absolute inset-1.5 sm:inset-3 rounded-[28px] border-2 border-[#D4AE58]/40 shadow-[inset_0_0_54px_rgba(0,0,0,0.42)]">
+        <div
+          className={`pointer-events-none absolute inset-1.5 sm:inset-3 max-w-6xl mx-auto rounded-[28px] border-2 ${tableSkin.railAccent} shadow-[inset_0_0_54px_rgba(0,0,0,0.42)]`}
+        >
           <div className="absolute inset-1.5 rounded-[22px] border border-[#D4AE58]/22" />
           <PersianCornerOrnament className="absolute top-2 left-2 opacity-80 hidden sm:block" />
           <PersianCornerOrnament
@@ -933,36 +1127,64 @@ export const HokmTable: React.FC<HokmTableProps> = ({
           />
         </div>
 
-        {/* TOP SEAT: North (Partner) */}
+        {/* TOP SEAT: North (Partner — Full-size edge-bleeding fan behind SeatProfile) */}
         <section
-          className="relative z-10 flex flex-col items-center gap-1 pt-1"
+          className="relative z-10 flex flex-col items-center pt-1.5 sm:pt-2.5 min-h-[78px] sm:min-h-[96px]"
           aria-label={resolvedSeats.north.name}
         >
-          <SeatProfile
-            seat="north"
-            displayName={resolvedSeats.north.name}
-            avatarSrc={resolvedSeats.north.avatarSrc}
-            connected={resolvedSeats.north.connected}
-            disconnectRemainingSec={resolvedSeats.north.disconnectRemainingSec}
-            isTurn={
-              (state.phase === 'PLAYING_TRICK' ||
-                state.phase === 'CHOOSING_TRUMP') &&
-              state.currentTurn === 'north'
-            }
-            isHakem={state.hakem === 'north'}
-          />
-          <HiddenHandFan count={visibleHandCounts.north} orientation="horizontal" />
+          <div className="pointer-events-none absolute -top-[82px] sm:-top-[108px] left-1/2 -translate-x-1/2 z-0">
+            <HiddenHandFan
+              count={visibleHandCounts.north}
+              orientation="horizontal"
+              isDesktop={handLayout.isDesktop}
+            />
+          </div>
+          <div className="relative z-20">
+            <SeatProfile
+              seat="north"
+              displayName={resolvedSeats.north.name}
+              avatarSrc={resolvedSeats.north.avatarSrc}
+              connected={resolvedSeats.north.connected}
+              disconnectRemainingSec={resolvedSeats.north.disconnectRemainingSec}
+              isTurn={
+                (state.phase === 'PLAYING_TRICK' ||
+                  state.phase === 'CHOOSING_TRUMP') &&
+                state.currentTurn === 'north'
+              }
+              isHakem={state.hakem === 'north'}
+            />
+          </div>
         </section>
 
-        {/* MIDDLE ROW: West (left), Center Trick Arena, East (right + opponentTeam pile) */}
+        {/* MIDDLE ROW: West (left edge fan), Center Trick Arena, East (right edge fan + opponentTeam pile) */}
         <section
           dir="ltr"
-          className="relative z-10 flex-1 grid grid-cols-[80px_1fr_80px] sm:grid-cols-[164px_1fr_164px] items-center gap-1 sm:gap-4 my-1"
+          className="relative z-10 flex-1 grid grid-cols-[88px_1fr_88px] sm:grid-cols-[170px_1fr_170px] items-center gap-1 sm:gap-4 my-1 max-w-6xl w-full mx-auto"
         >
-          {/* Physical LEFT: West */}
+          {/* Full-size West Card Fan anchored flush off viewport LEFT edge */}
+          <div className="pointer-events-none fixed left-[-92px] sm:left-[-118px] top-1/2 -translate-y-1/2 z-0">
+            <HiddenHandFan
+              count={visibleHandCounts.west}
+              orientation="vertical"
+              side="west"
+              isDesktop={handLayout.isDesktop}
+            />
+          </div>
+
+          {/* Full-size East Card Fan anchored flush off viewport RIGHT edge */}
+          <div className="pointer-events-none fixed right-[-92px] sm:right-[-118px] top-1/2 -translate-y-1/2 z-0">
+            <HiddenHandFan
+              count={visibleHandCounts.east}
+              orientation="vertical"
+              side="east"
+              isDesktop={handLayout.isDesktop}
+            />
+          </div>
+
+          {/* Physical LEFT: West Profile */}
           <div
             dir="rtl"
-            className="flex flex-col items-center justify-center gap-2"
+            className="relative z-20 flex flex-col items-center justify-center pl-7 sm:pl-12"
             aria-label={resolvedSeats.west.name}
           >
             <SeatProfile
@@ -978,7 +1200,6 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               }
               isHakem={state.hakem === 'west'}
             />
-            <HiddenHandFan count={visibleHandCounts.west} orientation="vertical" />
           </div>
 
           {/* CENTER ARENA */}
@@ -986,15 +1207,12 @@ export const HokmTable: React.FC<HokmTableProps> = ({
             dir="rtl"
             className="relative min-h-[206px] sm:min-h-[280px] flex flex-col items-center justify-center"
           >
-            {/* Interactive Drop Ring over the Traditional Embossed Shamseh */}
+            {/* Interactive Zero-Rerender Drop Ring over Center Table */}
             <div
-              className={`w-[192px] h-[192px] sm:w-[268px] sm:h-[268px] rounded-full border flex items-center justify-center relative transition-all duration-150 ${
-                draggingCardId
-                  ? isOverDropZone
-                    ? 'border-[#F3D179] bg-[#F3D179]/16 shadow-[0_0_36px_rgba(243,209,121,0.38)] scale-[1.05]'
-                    : 'border-[#F3D179]/55 bg-black/15'
-                  : 'border-[#D4AE58]/26 bg-black/8'
-              }`}
+              ref={dropRingRef}
+              data-drag-active="false"
+              data-drop-over="false"
+              className="w-[192px] h-[192px] sm:w-[268px] sm:h-[268px] rounded-full border border-[#D4AE58]/28 bg-black/8 flex items-center justify-center relative transition-all duration-150 data-[drag-active=true]:border-[#F3D179]/60 data-[drag-active=true]:bg-black/16 data-[drop-over=true]:border-[#F3D179] data-[drop-over=true]:bg-[#F3D179]/18 data-[drop-over=true]:shadow-[0_0_38px_rgba(243,209,121,0.42)] data-[drop-over=true]:scale-[1.05]"
               aria-hidden="true"
             />
 
@@ -1200,50 +1418,31 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               )}
             </AnimatePresence>
 
-            {/* Enlarged Spotlight Icon-Only Trump Selector (keeps bottom 5 cards & header crystal clear) */}
-            <AnimatePresence>
-              {state.phase === 'CHOOSING_TRUMP' &&
-                state.hakem === 'south' &&
-                !isDealingAnim &&
-                !isShufflingAnim && (
-                  <div className="absolute inset-0 z-40 flex items-center justify-center overflow-visible pointer-events-none">
-                    <div className="pointer-events-auto">
-                      <TrumpSelector
-                        onSelectTrump={onChooseTrump}
-                        reducedMotion={reducedMotion}
-                      />
-                    </div>
-                  </div>
-                )}
-            </AnimatePresence>
+            {/* TrumpSelector is rendered above the dimmed backdrop at z-50 below */}
           </div>
 
-          {/* Physical RIGHT: East + Opponent Team Pile (anchored inward so never clips on mobile) */}
+          {/* Physical RIGHT: East Profile + Opponent Team Pile */}
           <div
             dir="rtl"
-            className="flex flex-col items-center justify-center gap-2"
+            className="relative z-20 flex flex-col items-center justify-center pr-7 sm:pr-12"
             aria-label={resolvedSeats.east.name}
           >
-            <SeatProfile
-              seat="east"
-              displayName={resolvedSeats.east.name}
-              avatarSrc={resolvedSeats.east.avatarSrc}
-              connected={resolvedSeats.east.connected}
-              disconnectRemainingSec={resolvedSeats.east.disconnectRemainingSec}
-              isTurn={
-                (state.phase === 'PLAYING_TRICK' ||
-                  state.phase === 'CHOOSING_TRUMP') &&
-                state.currentTurn === 'east'
-              }
-              isHakem={state.hakem === 'east'}
-            />
             <div className="relative flex items-center justify-center">
-              <HiddenHandFan
-                count={visibleHandCounts.east}
-                orientation="vertical"
+              <SeatProfile
+                seat="east"
+                displayName={resolvedSeats.east.name}
+                avatarSrc={resolvedSeats.east.avatarSrc}
+                connected={resolvedSeats.east.connected}
+                disconnectRemainingSec={resolvedSeats.east.disconnectRemainingSec}
+                isTurn={
+                  (state.phase === 'PLAYING_TRICK' ||
+                    state.phase === 'CHOOSING_TRUMP') &&
+                  state.currentTurn === 'east'
+                }
+                isHakem={state.hakem === 'east'}
               />
               {state.trickCounts.opponentTeam > 0 && (
-                <div className="absolute top-1/2 -translate-y-1/2 right-full mr-1.5 sm:mr-2.5 pointer-events-none">
+                <div className="absolute top-1/2 -translate-y-1/2 right-full mr-2 sm:mr-3 pointer-events-none">
                   <TeamTrickPile
                     count={state.trickCounts.opponentTeam}
                     team="opponentTeam"
@@ -1254,63 +1453,111 @@ export const HokmTable: React.FC<HokmTableProps> = ({
           </div>
         </section>
 
-        {/* BOTTOM SEAT: South (Main Player) + My Team Pile (zero-shift anchored) + Hand */}
+        {/* Subtle Focus-Dimming Backdrop behind Trump Selector (keeps bottom 5 cards bright & clear!) */}
+        <AnimatePresence>
+          {showTrumpModal && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: reducedMotion ? 0.05 : 0.24 }}
+              data-testid="trump-selector-backdrop"
+              className="fixed inset-0 z-30 bg-[#020A08]/62 backdrop-blur-[2.5px] pointer-events-none"
+              aria-hidden="true"
+            />
+          )}
+        </AnimatePresence>
+
+        {/* Enlarged Spotlight Icon-Only Trump Selector — hoisted to z-50 ABOVE the dimmed backdrop */}
+        <AnimatePresence>
+          {showTrumpModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center pb-28 sm:pb-32 pointer-events-none">
+              <div className="pointer-events-auto">
+                <TrumpSelector
+                  onSelectTrump={onChooseTrump}
+                  reducedMotion={reducedMotion}
+                />
+              </div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* BOTTOM SEAT: Exact Screenshot-1 Deep Radial Curved Fan + Centered Lower-Base South Profile */}
         <section
-          className="relative z-20 flex flex-col items-center gap-4 sm:gap-3.5 pb-2 sm:pb-3"
+          className={`relative ${
+            showTrumpModal ? 'z-40' : 'z-20'
+          } flex flex-col items-center pb-0`}
           aria-label={resolvedSeats.south.name}
         >
-          <div className="relative flex items-center justify-center min-h-[58px] sm:min-h-[64px]">
-            <SeatProfile
-              seat="south"
-              displayName={resolvedSeats.south.name}
-              avatarSrc={resolvedSeats.south.avatarSrc}
-              connected={resolvedSeats.south.connected}
-              disconnectRemainingSec={resolvedSeats.south.disconnectRemainingSec}
-              isTurn={
-                (state.phase === 'PLAYING_TRICK' ||
-                  state.phase === 'CHOOSING_TRUMP') &&
-                state.currentTurn === 'south'
-              }
-              isHakem={state.hakem === 'south'}
-            />
-            {state.trickCounts.myTeam > 0 && (
-              <div className="absolute right-full mr-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                <TeamTrickPile count={state.trickCounts.myTeam} team="myTeam" />
-              </div>
-            )}
-          </div>
-
           <div
             ref={handContainerRef}
             dir="ltr"
-            className="relative w-full h-[142px] sm:h-[178px] overflow-visible"
+            className="relative w-full h-[168px] sm:h-[208px] overflow-visible touch-none"
             data-testid="south-hand"
           >
             {southHand.map((card, idx) => {
-              const targetX = (idx - (count - 1) / 2) * fanStepPx;
-              const isWaitingTurn =
-                !canHumanPlay &&
-                (state.phase === 'PLAYING_TRICK' ||
-                  state.phase === 'TRICK_COMPLETE');
+              const mid = (count - 1) / 2;
+              const norm = count <= 1 ? 0 : (idx - mid) / Math.max(1, mid);
+              const fanRotateDeg = handGathered
+                ? Number(((idx - mid) * 0.45).toFixed(2))
+                : Number((norm * maxAngleDeg).toFixed(2));
+              // Uniform linear X distribution ensures outer left/right cards have the exact same grab area as center cards
+              const targetX = handGathered
+                ? Math.round((idx - mid) * 1.4)
+                : count <= 1
+                  ? 0
+                  : Math.round(norm * fanHalfSpan);
+              const fanArcY = handGathered
+                ? Math.round(Math.abs(idx - mid) * 0.45) + 4
+                : Math.round(norm * norm * maxArcDropPx) - 10;
+
               return (
                 <DraggableHandCard
                   key={card.id}
                   card={card}
                   idx={idx}
                   targetX={targetX}
+                  fanArcY={fanArcY}
+                  fanRotateDeg={fanRotateDeg}
                   cardWidthPx={cardWidthPx}
                   isLegal={legalIds.has(card.id)}
                   canHumanPlay={canHumanPlay}
-                  isWaitingTurn={isWaitingTurn}
-                  isSelected={selectedCardId === card.id}
-                  isDraggingGlobal={draggingCardId === card.id}
+                  handGathered={handGathered}
                   reducedMotion={reducedMotion}
-                  onSelectCard={onSelectCard}
+                  dropRingRef={dropRingRef}
                   onPlayCard={onPlayCard}
-                  onDragChange={handleDragChange}
                 />
               );
             })}
+
+            {/* South SeatProfile overlaid neatly at lower-center base of the fan (exactly like Screenshot 1) */}
+            <div
+              dir="rtl"
+              className="pointer-events-none absolute bottom-1 sm:bottom-2 left-1/2 -translate-x-1/2 z-40"
+            >
+              <SeatProfile
+                seat="south"
+                displayName={resolvedSeats.south.name}
+                avatarSrc={resolvedSeats.south.avatarSrc}
+                connected={resolvedSeats.south.connected}
+                disconnectRemainingSec={
+                  resolvedSeats.south.disconnectRemainingSec
+                }
+                isTurn={
+                  (state.phase === 'PLAYING_TRICK' ||
+                    state.phase === 'CHOOSING_TRUMP') &&
+                  state.currentTurn === 'south'
+                }
+                isHakem={state.hakem === 'south'}
+              />
+            </div>
+
+            {/* My Team Trick Pile anchored cleanly at bottom-left edge */}
+            {state.trickCounts.myTeam > 0 && (
+              <div className="pointer-events-none absolute left-2 sm:left-5 bottom-2 sm:bottom-4 z-30">
+                <TeamTrickPile count={state.trickCounts.myTeam} team="myTeam" />
+              </div>
+            )}
           </div>
         </section>
       </main>
@@ -1380,7 +1627,20 @@ export const HokmTable: React.FC<HokmTableProps> = ({
         )}
       </AnimatePresence>
 
-      {/* Spectacular Full-Screen Match Completion Screen (ONLY when first team reaches 3!) */}
+      {/* Exciting Hand-Win Celebration Animation (between hands when 7 tricks reached) */}
+      <AnimatePresence>
+        {state.phase === 'HAND_COMPLETE' && state.handOutcome && (
+          <HandWinCelebration
+            outcome={state.handOutcome}
+            matchScores={state.matchScores}
+            nextHakemName={resolvedSeats[nextHakemSeat].name}
+            hakemChanged={hakemChangedOnHand}
+            reducedMotion={reducedMotion}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Spectacular Full-Screen Match Completion Screen (ONLY when first team reaches targetMatchScore!) */}
       <AnimatePresence>
         {state.phase === 'MATCH_COMPLETE' &&
           state.handOutcome &&

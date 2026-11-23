@@ -119,17 +119,20 @@ export function dealCardsBatch(
 }
 
 /**
- * Sorts a player's hand neatly by suit (grouping red/black alternating for readability)
- * and descending power (Ace -> 2). Optionally places the trump suit first.
+ * Sorts a player's hand strictly Left-to-Right by suit:
+ * Hearts (دل) -> Spades (پیک) -> Diamonds (خشت) -> Clubs (گشنیز)
+ * and descending power (Ace -> 2) within each suit.
  */
 export function sortHand(
   hand: readonly Card[],
-  trumpSuit: Card['suit'] | null = null
+  _trumpSuit: Card['suit'] | null = null
 ): Card[] {
-  const baseOrder: Card['suit'][] = ['spades', 'hearts', 'clubs', 'diamonds'];
-  const suitOrder = trumpSuit
-    ? [trumpSuit, ...baseOrder.filter((s) => s !== trumpSuit)]
-    : baseOrder;
+  const suitOrder: readonly Card['suit'][] = [
+    'hearts',
+    'spades',
+    'diamonds',
+    'clubs',
+  ];
 
   return [...hand].sort((a, b) => {
     const suitDiff = suitOrder.indexOf(a.suit) - suitOrder.indexOf(b.suit);

@@ -15,6 +15,7 @@ import {
   createOnlineRoom,
   fetchRecentOnlineMatches,
   joinOnlineRoom,
+  quickMatchOnlineRoom,
   resumeOnlineSession,
 } from './online/client';
 import {
@@ -27,12 +28,21 @@ import { OnlineLobby, getAvatarSrcByCode } from './components/OnlineLobby';
 import { hokmSound } from './audio/soundEffects';
 import { preloadCardArtwork } from './components/PlayingCard';
 
+export type OnlineHokmLaunchAction =
+  | 'quick_match'
+  | 'create_friends'
+  | 'join_room'
+  | null;
+
 interface OnlineHokmGameProps {
   username: string;
   avatarCode: string;
+  tableSkinId?: string;
   isAuthenticated?: boolean;
   initialRoomCode?: string;
   autoJoinRoom?: boolean;
+  targetMatchScore?: number;
+  initialLaunchAction?: OnlineHokmLaunchAction;
   soundEnabled: boolean;
   reducedMotionPreference: boolean;
   onChangeUsername: (username: string) => void;
@@ -44,9 +54,12 @@ interface OnlineHokmGameProps {
 export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
   username,
   avatarCode,
+  tableSkinId = 'tt-traditional',
   isAuthenticated = false,
   initialRoomCode = '',
   autoJoinRoom = false,
+  targetMatchScore = 3,
+  initialLaunchAction = null,
   soundEnabled,
   reducedMotionPreference,
   onChangeUsername,
@@ -70,7 +83,6 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
   );
 
   // Table visual states synced to authoritative server events
-  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [exitConfirmOpen, setExitConfirmOpen] = useState(false);
   const [flyingDealCards] = useState<FlyingDealCard[]>([]);
   const [showGameStartBanner, setShowGameStartBanner] = useState(false);
@@ -183,7 +195,6 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
 
       switch (event.type) {
         case 'DEALT_INITIAL_5':
-          setSelectedCardId(null);
           clearTrickTimers();
           setTrickCollectPhase('idle');
           setCollectingWinnerTeam(null);
@@ -204,13 +215,11 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
 
         case 'CARD_PLAYED':
           hokmSound.playCardSnap();
-          setSelectedCardId(null);
           setShowGameStartBanner(false);
           break;
 
         case 'TRICK_COMPLETED': {
           hokmSound.playCardSnap();
-          setSelectedCardId(null);
           const winnerTeam =
             nextSnap.game?.lastCompletedTrick?.winnerTeam ?? null;
           clearTrickTimers();
@@ -380,7 +389,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
       const creds = await createOnlineRoom({
         username,
         avatarCode,
-        targetMatchScore: 3,
+        targetMatchScore,
       });
       setSessionCreds(creds);
     } catch (err) {
@@ -390,7 +399,33 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
     } finally {
       setBusy(false);
     }
-  }, [avatarCode, username]);
+  }, [avatarCode, targetMatchScore, username]);
+
+  const handleQuickMatch = useCallback(async () => {
+    setBusy(true);
+    setErrorMessage(null);
+    setClosedReason(null);
+    try {
+      const creds = await quickMatchOnlineRoom({
+        username,
+        avatarCode,
+        targetMatchScore,
+      });
+      setSessionCreds(creds);
+      showTransientNotice(
+        creds.matchedExisting
+          ? 'به یک میز رندوم باز متصل شدید.'
+          : 'میز رندوم جدید ساخته شد — در انتظار بازیکنان دیگر.',
+        3600
+      );
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : 'ورود به بازی تصادفی با خطا مواجه شد.'
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, [avatarCode, showTransientNotice, targetMatchScore, username]);
 
   const handleJoinRoom = useCallback(
     async (roomCode: string) => {
@@ -415,24 +450,30 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
     [avatarCode, username]
   );
 
-  // One-click real-room join when arriving from an accepted game invite (Stage D3)
+  // One-click real-room launch from Game Hub or accepted game invite
   useEffect(() => {
-    if (
-      !autoJoinRoom ||
-      !resumeChecked ||
-      !initialRoomCode ||
-      sessionCreds ||
-      busy ||
-      autoJoinAttemptedRef.current
-    ) {
+    if (!resumeChecked || sessionCreds || busy || autoJoinAttemptedRef.current) {
       return;
     }
+    const effectiveAction: OnlineHokmLaunchAction =
+      initialLaunchAction ?? (autoJoinRoom && initialRoomCode ? 'join_room' : null);
+    if (!effectiveAction) return;
+
     autoJoinAttemptedRef.current = true;
-    void handleJoinRoom(initialRoomCode);
+    if (effectiveAction === 'join_room' && initialRoomCode) {
+      void handleJoinRoom(initialRoomCode);
+    } else if (effectiveAction === 'quick_match') {
+      void handleQuickMatch();
+    } else if (effectiveAction === 'create_friends') {
+      void handleCreateRoom();
+    }
   }, [
     autoJoinRoom,
     busy,
+    handleCreateRoom,
     handleJoinRoom,
+    handleQuickMatch,
+    initialLaunchAction,
     initialRoomCode,
     resumeChecked,
     sessionCreds,
@@ -514,8 +555,8 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
           showGameStartBanner={showGameStartBanner}
           trickCollectPhase={trickCollectPhase}
           collectingWinnerTeam={collectingWinnerTeam}
-          selectedCardId={selectedCardId}
           playerName={username}
+          tableSkinId={tableSkinId}
           reducedMotion={reducedMotion}
           canHumanPlay={canHumanPlay}
           exitConfirmOpen={exitConfirmOpen}
@@ -529,14 +570,8 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
             bannerNotice,
             waitingHakemName: hakemName,
           }}
-          onSelectCard={(cardId) => {
-            if (!canHumanPlay) return;
-            if (cardId) hokmSound.playCardSelect();
-            setSelectedCardId(cardId);
-          }}
           onPlayCard={(cardId) => {
             if (!canHumanPlay) return;
-            setSelectedCardId(null);
             clientRef.current?.playCard(cardId);
           }}
           onChooseTrump={(suit: Suit) => {

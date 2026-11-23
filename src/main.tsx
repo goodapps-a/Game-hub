@@ -2,6 +2,11 @@ import React, { Component, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
+import { initPWAInstallCapture } from './platform/pwa/usePWAInstall';
+import { registerEyvanServiceWorker } from './platform/pwa/registerSw';
+
+initPWAInstallCapture();
+registerEyvanServiceWorker();
 
 interface ErrorBoundaryState {
   hasError: boolean;

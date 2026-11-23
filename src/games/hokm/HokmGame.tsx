@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  Card,
   HOKM_CONFIG,
   HokmState,
   Seat,
@@ -14,6 +15,7 @@ import {
   dealRemainingEight,
   playCard,
   resetMatch,
+  resolveNextHakem,
   startNextHand,
   startShufflingHand,
 } from './engine/gameEngine';
@@ -32,6 +34,8 @@ import {
 
 interface HokmGameProps {
   playerName: string;
+  tableSkinId?: string;
+  targetMatchScore?: number;
   soundEnabled: boolean;
   animationSpeed: AnimationSpeed;
   reducedMotionPreference: boolean;
@@ -42,16 +46,22 @@ interface HokmGameProps {
 
 export const HokmGame: React.FC<HokmGameProps> = ({
   playerName,
+  tableSkinId = 'tt-traditional',
+  targetMatchScore = HOKM_CONFIG.DEFAULT_MATCH_TARGET_SCORE,
   soundEnabled,
   animationSpeed,
   reducedMotionPreference,
   onBackToGames,
 }) => {
+  const safeTargetScore = Math.max(
+    1,
+    Math.min(7, Math.floor(targetMatchScore) || HOKM_CONFIG.DEFAULT_MATCH_TARGET_SCORE)
+  );
   const [configuredHakem] = useState<Seat>('south');
   const [state, setState] = useState<HokmState>(() =>
     createInitialMatchState({
       initialHakem: 'south',
-      targetMatchScore: HOKM_CONFIG.DEFAULT_MATCH_TARGET_SCORE,
+      targetMatchScore: safeTargetScore,
     })
   );
 
@@ -63,13 +73,16 @@ export const HokmGame: React.FC<HokmGameProps> = ({
     west: 0,
   });
   const [flyingDealCards, setFlyingDealCards] = useState<FlyingDealCard[]>([]);
+  const [southDealCards, setSouthDealCards] = useState<Card[]>([]);
+  const [southHandSorted, setSouthHandSorted] = useState(false);
+  const [handGathered, setHandGathered] = useState(false);
   const [isShufflingAnim, setIsShufflingAnim] = useState(false);
   const [isDealingAnim, setIsDealingAnim] = useState(false);
+  const [isSortingAnim, setIsSortingAnim] = useState(false);
   const [trickCollectPhase, setTrickCollectPhase] =
     useState<TrickCollectPhase>('idle');
   const [collectingWinnerTeam, setCollectingWinnerTeam] =
     useState<TeamId | null>(null);
-  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [exitConfirmOpen, setExitConfirmOpen] = useState(false);
   const [showGameStartBanner, setShowGameStartBanner] = useState(false);
 
@@ -97,6 +110,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
   const reducedMotionRef = useRef(reducedMotion);
   const isExitingRef = useRef(false);
   const phaseRef = useRef(state.phase);
+  const southDealCardsRef = useRef<Card[]>([]);
 
   useEffect(() => {
     phaseRef.current = state.phase;
@@ -218,11 +232,13 @@ export const HokmGame: React.FC<HokmGameProps> = ({
 
   /**
    * Calm, rhythmic dealing animation with authentic real physical card slide sounds.
+   * Appends South cards strictly in raw arrival order (never sorting mid-deal).
    */
   const runDealWaveAnimation = useCallback(
     (
-      dealSequence: Array<{ seat: Seat }>,
+      dealSequence: Array<{ seat: Seat; card: Card }>,
       startingCounts: Record<Seat, number>,
+      startingSouthCards: readonly Card[],
       waveTag: string,
       expectedRunId: number,
       onComplete: (finalCounts: Record<Seat, number>) => void
@@ -231,6 +247,9 @@ export const HokmGame: React.FC<HokmGameProps> = ({
       const stepDelay = reducedMotionRef.current ? 12 : 108;
       const flyDuration = reducedMotionRef.current ? 50 : 295;
       const runningCounts: Record<Seat, number> = { ...startingCounts };
+      const runningSouthCards: Card[] = [...startingSouthCards];
+      southDealCardsRef.current = runningSouthCards;
+      setSouthDealCards([...runningSouthCards]);
 
       dealSequence.forEach((entry, idx) => {
         schedule(
@@ -243,6 +262,11 @@ export const HokmGame: React.FC<HokmGameProps> = ({
             hokmSound.playDealTick();
             runningCounts[entry.seat] += 1;
             setDealtCounts({ ...runningCounts });
+            if (entry.seat === 'south') {
+              runningSouthCards.push(entry.card);
+              southDealCardsRef.current = [...runningSouthCards];
+              setSouthDealCards([...runningSouthCards]);
+            }
 
             schedule(
               () => {
@@ -270,7 +294,49 @@ export const HokmGame: React.FC<HokmGameProps> = ({
   );
 
   /**
-   * Phase 1 of dealing: Shuffle -> Calmly deal 5 cards each -> Wait for Trump selection.
+   * Smoothly gathers the full 13-card hand to a tight stack, applies the sorted suit order
+   * (Hearts -> Spades -> Diamonds -> Clubs), and fans the hand back open fluidly.
+   */
+  const runGatherAndSortAnimation = useCallback(
+    (
+      sortedSouthHand: readonly Card[],
+      expectedRunId: number,
+      onSortedOpen: () => void
+    ) => {
+      setIsSortingAnim(true);
+      setHandGathered(true);
+      hokmSound.playCardSelect();
+
+      schedule(
+        () => {
+          const nextSorted = [...sortedSouthHand];
+          southDealCardsRef.current = nextSorted;
+          setSouthDealCards(nextSorted);
+          schedule(
+            () => {
+              setHandGathered(false);
+              schedule(
+                () => {
+                  setIsSortingAnim(false);
+                  onSortedOpen();
+                },
+                440,
+                expectedRunId
+              );
+            },
+            130,
+            expectedRunId
+          );
+        },
+        380,
+        expectedRunId
+      );
+    },
+    [schedule]
+  );
+
+  /**
+   * Phase 1 of dealing: Shuffle -> Deal 5 cards in raw arrival order (NO sorting yet) -> Wait for Trump.
    */
   const beginShuffleAndInitialDeal = useCallback(
     (shufflingState: HokmState) => {
@@ -278,10 +344,14 @@ export const HokmGame: React.FC<HokmGameProps> = ({
       const runId = runIdRef.current;
       clearAllTimers();
 
-      setSelectedCardId(null);
       setTrickCollectPhase('idle');
       setCollectingWinnerTeam(null);
       setFlyingDealCards([]);
+      southDealCardsRef.current = [];
+      setSouthDealCards([]);
+      setSouthHandSorted(false);
+      setHandGathered(false);
+      setIsSortingAnim(false);
       setShowGameStartBanner(false);
       setDealtCounts({ south: 0, east: 0, north: 0, west: 0 });
       setState(shufflingState);
@@ -297,16 +367,17 @@ export const HokmGame: React.FC<HokmGameProps> = ({
           runDealWaveAnimation(
             dealSequence,
             { south: 0, east: 0, north: 0, west: 0 },
+            [],
             'init5',
             runId,
             () => {
-              setIsDealingAnim(false);
               setDealtCounts({
                 south: dealt5State.hands.south.length,
                 east: dealt5State.hands.east.length,
                 north: dealt5State.hands.north.length,
                 west: dealt5State.hands.west.length,
               });
+              setIsDealingAnim(false);
             }
           );
         },
@@ -320,7 +391,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
   useEffect(() => {
     const initial = createInitialMatchState({
       initialHakem: 'south',
-      targetMatchScore: HOKM_CONFIG.DEFAULT_MATCH_TARGET_SCORE,
+      targetMatchScore: safeTargetScore,
     });
     const shuffling = startShufflingHand(initial, 'south');
     beginShuffleAndInitialDeal(shuffling);
@@ -328,11 +399,14 @@ export const HokmGame: React.FC<HokmGameProps> = ({
   }, []);
 
   /**
-   * Phase 2 of dealing (4 + 4 in ONE seamless continuous stream — NO mid-deal pause!):
+   * Phase 2 of dealing (4 + 4 in ONE seamless continuous stream — NO mid-deal sorting!):
+   * Appends the 8 newly dealt South cards in raw arrival order, THEN gathers & fans open sorted once.
    */
   const handleChooseTrump = useCallback(
     (suit: Suit) => {
-      if (state.phase !== 'CHOOSING_TRUMP' || isDealingAnim) return;
+      if (state.phase !== 'CHOOSING_TRUMP' || isDealingAnim || isSortingAnim) {
+        return;
+      }
       const runId = runIdRef.current;
 
       const afterTrump = chooseTrumpSuit(state, suit, state.hakem);
@@ -348,32 +422,40 @@ export const HokmGame: React.FC<HokmGameProps> = ({
           } = dealRemainingEight(afterTrump);
           setState(dealt13State);
 
-          // Continuous 4+4 stream with ZERO pause between waves
+          // Continuous 4+4 stream with ZERO pause between waves, keeping initial 5 cards unsorted
           const continuousEightSequence = [...wave1Sequence, ...wave2Sequence];
+          const existingUnsortedFive =
+            southDealCardsRef.current.length > 0
+              ? southDealCardsRef.current
+              : afterTrump.hands.south;
 
           runDealWaveAnimation(
             continuousEightSequence,
             { south: 5, east: 5, north: 5, west: 5 },
+            existingUnsortedFive,
             'wave8',
             runId,
             () => {
-              setIsDealingAnim(false);
               setDealtCounts({
                 south: dealt13State.hands.south.length,
                 east: dealt13State.hands.east.length,
                 north: dealt13State.hands.north.length,
                 west: dealt13State.hands.west.length,
               });
-              // Exciting non-blocking "Game Started!" burst right when play begins
-              setShowGameStartBanner(true);
-              hokmSound.playGameStart();
-              schedule(
-                () => {
-                  setShowGameStartBanner(false);
-                },
-                1280,
-                runId
-              );
+              runGatherAndSortAnimation(dealt13State.hands.south, runId, () => {
+                setSouthHandSorted(true);
+                setIsDealingAnim(false);
+                // Exciting non-blocking "Game Started!" burst right when play begins
+                setShowGameStartBanner(true);
+                hokmSound.playGameStart();
+                schedule(
+                  () => {
+                    setShowGameStartBanner(false);
+                  },
+                  1280,
+                  runId
+                );
+              });
             }
           );
         },
@@ -381,7 +463,14 @@ export const HokmGame: React.FC<HokmGameProps> = ({
         runId
       );
     },
-    [isDealingAnim, runDealWaveAnimation, schedule, state]
+    [
+      isDealingAnim,
+      isSortingAnim,
+      runDealWaveAnimation,
+      runGatherAndSortAnimation,
+      schedule,
+      state,
+    ]
   );
 
   // Automated Hakem picks trump when human is not Hakem
@@ -390,7 +479,8 @@ export const HokmGame: React.FC<HokmGameProps> = ({
       state.phase === 'CHOOSING_TRUMP' &&
       state.hakem !== 'south' &&
       !isDealingAnim &&
-      !isShufflingAnim
+      !isShufflingAnim &&
+      !isSortingAnim
     ) {
       const runId = runIdRef.current;
       const timerId = schedule(
@@ -407,6 +497,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
     handleChooseTrump,
     isDealingAnim,
     isShufflingAnim,
+    isSortingAnim,
     schedule,
     state.hakem,
     state.phase,
@@ -421,7 +512,6 @@ export const HokmGame: React.FC<HokmGameProps> = ({
     });
     hokmSound.playCardSnap();
     if (seat === 'south') {
-      setSelectedCardId(null);
       setShowGameStartBanner(false);
     }
   }, []);
@@ -432,6 +522,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
       state.phase !== 'PLAYING_TRICK' ||
       isDealingAnim ||
       isShufflingAnim ||
+      isSortingAnim ||
       trickCollectPhase !== 'idle' ||
       state.currentTurn === 'south'
     ) {
@@ -456,6 +547,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
     executeCardPlay,
     isDealingAnim,
     isShufflingAnim,
+    isSortingAnim,
     schedule,
     state.currentTrick,
     state.currentTurn,
@@ -522,23 +614,25 @@ export const HokmGame: React.FC<HokmGameProps> = ({
     );
   }, [schedule, state.lastCompletedTrick, state.phase]);
 
-  // Seamless auto-next-hand when a hand finishes (NO modal popup between hands!)
+  // Seamless auto-next-hand after Hand-Win Celebration Animation,
+  // rotating Hakem counter-clockwise to the next seat whenever the Hakem loses the hand!
   useEffect(() => {
     if (state.phase !== 'HAND_COMPLETE') return;
     const runId = runIdRef.current;
     const timerId = schedule(
       () => {
-        const next = startNextHand(state, configuredHakem);
+        const nextHakem = resolveNextHakem(state);
+        const next = startNextHand(state, nextHakem);
         beginShuffleAndInitialDeal(next);
       },
-      1100,
+      2100,
       runId
     );
     return () => window.clearTimeout(timerId);
-  }, [beginShuffleAndInitialDeal, configuredHakem, schedule, state]);
+  }, [beginShuffleAndInitialDeal, schedule, state]);
 
   const visibleHandCounts: Record<Seat, number> =
-    isDealingAnim || isShufflingAnim
+    isDealingAnim || isShufflingAnim || isSortingAnim
       ? dealtCounts
       : {
           south: state.hands.south.length,
@@ -548,20 +642,14 @@ export const HokmGame: React.FC<HokmGameProps> = ({
         };
 
   const canHumanPlay =
+    southHandSorted &&
     state.phase === 'PLAYING_TRICK' &&
     state.currentTurn === 'south' &&
     !isDealingAnim &&
     !isShufflingAnim &&
+    !isSortingAnim &&
+    !handGathered &&
     trickCollectPhase === 'idle';
-
-  const handleSelectCard = useCallback(
-    (cardId: string | null) => {
-      if (!canHumanPlay) return;
-      if (cardId) hokmSound.playCardSelect();
-      setSelectedCardId(cardId);
-    },
-    [canHumanPlay]
-  );
 
   const handleHumanPlayCard = useCallback(
     (cardId: string) => {
@@ -572,12 +660,9 @@ export const HokmGame: React.FC<HokmGameProps> = ({
   );
 
   const handleStartNewMatch = useCallback(() => {
-    const fresh = resetMatch(
-      HOKM_CONFIG.DEFAULT_MATCH_TARGET_SCORE,
-      configuredHakem
-    );
+    const fresh = resetMatch(safeTargetScore, configuredHakem);
     beginShuffleAndInitialDeal(fresh);
-  }, [beginShuffleAndInitialDeal, configuredHakem]);
+  }, [beginShuffleAndInitialDeal, configuredHakem, safeTargetScore]);
 
   return (
     <HokmTable
@@ -586,15 +671,20 @@ export const HokmGame: React.FC<HokmGameProps> = ({
       flyingDealCards={flyingDealCards}
       isShufflingAnim={isShufflingAnim}
       isDealingAnim={isDealingAnim}
+      southHandOverride={
+        isDealingAnim || isSortingAnim || handGathered || !southHandSorted
+          ? southDealCards
+          : undefined
+      }
+      handGathered={handGathered}
       showGameStartBanner={showGameStartBanner}
       trickCollectPhase={trickCollectPhase}
       collectingWinnerTeam={collectingWinnerTeam}
-      selectedCardId={selectedCardId}
       playerName={playerName}
+      tableSkinId={tableSkinId}
       reducedMotion={reducedMotion}
       canHumanPlay={canHumanPlay}
       exitConfirmOpen={exitConfirmOpen}
-      onSelectCard={handleSelectCard}
       onPlayCard={handleHumanPlayCard}
       onChooseTrump={handleChooseTrump}
       onRequestExit={handleRequestExit}

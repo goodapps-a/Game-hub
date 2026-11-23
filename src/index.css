@@ -49,30 +49,32 @@
 }
 
 [data-theme="light"] {
-  --eyvan-bg: #F2F5F9;
-  --eyvan-text: #102542;
-  --eyvan-text-strong: #0A1B33;
-  --eyvan-muted: #4C607B;
-  --eyvan-gold: #0B7C7E;
-  --eyvan-gold-text: #946308;
-  --eyvan-gold-border: rgba(15, 39, 77, 0.14);
-  --eyvan-line: rgba(15, 39, 77, 0.11);
-  --eyvan-teal: #0A7375;
-  --eyvan-teal-solid: #0D8A8A;
+  /* Pure Crisp Porcelain White & Cool Slate-Navy + Royal Turquoise (Zero Yellow/Cream Tint) */
+  --eyvan-bg: #F4F6FA;
+  --eyvan-text: #111827;
+  --eyvan-text-strong: #0B1220;
+  --eyvan-muted: #526075;
+  --eyvan-gold: #0D8A8A;
+  --eyvan-gold-text: #0B6E73;
+  --eyvan-gold-border: rgba(15, 23, 42, 0.14);
+  --eyvan-line: rgba(15, 23, 42, 0.10);
+  --eyvan-teal: #0D8A8A;
+  --eyvan-teal-solid: #0C7B7B;
   --eyvan-surface: #FFFFFF;
-  --eyvan-surface-elevated: #F6F9FC;
-  --eyvan-surface-muted: #EEF3F8;
+  --eyvan-surface-elevated: #F8FAFC;
+  --eyvan-surface-muted: #EEF2F7;
   --eyvan-card-bg: #FFFFFF;
-  --eyvan-card-shadow: 0 6px 20px rgba(15, 39, 77, 0.06), 0 1px 3px rgba(15, 39, 77, 0.04);
-  --eyvan-bar-bg: rgba(255, 255, 255, 0.94);
-  --eyvan-dock-bg: rgba(255, 255, 255, 0.97);
+  --eyvan-card-shadow: 0 8px 24px rgba(15, 23, 42, 0.06), 0 1px 3px rgba(15, 23, 42, 0.04);
+  --eyvan-bar-bg: rgba(255, 255, 255, 0.95);
+  --eyvan-dock-bg: rgba(255, 255, 255, 0.98);
   --eyvan-modal-bg: #FFFFFF;
-  --eyvan-pill-bg: #F1F6FA;
-  --eyvan-subcard-bg: #F5F8FC;
-  --eyvan-backdrop-opacity: 0.11;
+  --eyvan-pill-bg: #F1F5F9;
+  --eyvan-subcard-bg: #F3F6FA;
+  --eyvan-backdrop-opacity: 0.06;
   --eyvan-backdrop-scrim:
-    radial-gradient(ellipse at 20% 0%, rgba(25, 162, 162, 0.11) 0%, transparent 55%),
-    linear-gradient(180deg, rgba(242, 245, 249, 0.9) 0%, rgba(240, 244, 249, 0.96) 55%, rgba(235, 240, 247, 0.98) 100%);
+    radial-gradient(ellipse at 18% 0%, rgba(13, 138, 138, 0.08) 0%, transparent 52%),
+    radial-gradient(ellipse at 85% 10%, rgba(30, 64, 175, 0.06) 0%, transparent 50%),
+    linear-gradient(180deg, rgba(244, 246, 250, 0.92) 0%, rgba(241, 245, 249, 0.96) 55%, rgba(238, 242, 247, 0.99) 100%);
 }
 
 @layer base {
@@ -126,8 +128,8 @@
 }
 
 [data-theme="light"] .eyvan-card-hover:hover {
-  border-color: rgba(10, 115, 117, 0.38);
-  box-shadow: 0 10px 24px rgba(15, 39, 77, 0.1);
+  border-color: rgba(13, 138, 138, 0.38);
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.09);
 }
 
 /* Warm antique gold metallic title over dark artwork */
@@ -137,7 +139,7 @@
 }
 
 [data-theme="light"] .eyvan-gold-title-adaptive {
-  color: #0F274D;
+  color: #0F172A;
   text-shadow: none;
 }
 
@@ -148,28 +150,28 @@
 
 /* Traditional Persian Hokm Table Backdrop */
 .hokm-traditional-arena {
-  background-color: #092B21;
+  background-color: #07221A;
   transform: translateZ(0);
 }
 
 /* Light/Dark semantic helpers */
 [data-theme="light"] .theme-heading {
-  color: #0F274D;
+  color: #0F172A;
 }
 [data-theme="dark"] .theme-heading {
   color: #F5EFE4;
 }
 
 [data-theme="light"] .theme-muted {
-  color: #4C607B;
+  color: #526075;
 }
 [data-theme="dark"] .theme-muted {
   color: #9EB0C8;
 }
 
 [data-theme="light"] .theme-subcard {
-  background-color: #F5F8FC;
-  border-color: rgba(15, 39, 77, 0.11);
+  background-color: #F3F6FA;
+  border-color: rgba(15, 23, 42, 0.10);
 }
 [data-theme="dark"] .theme-subcard {
   background-color: #12213B;
@@ -178,7 +180,7 @@
 
 [data-theme="light"] .theme-drawer {
   background-color: #FFFFFF;
-  color: #0F274D;
+  color: #0F172A;
 }
 [data-theme="dark"] .theme-drawer {
   background-color: #0B1528;
@@ -186,15 +188,15 @@
 }
 
 [data-theme="light"] .theme-panel-tint {
-  background-color: #F4F8FC;
+  background-color: #F4F6FA;
 }
 [data-theme="dark"] .theme-panel-tint {
   background-color: #0E1B31;
 }
 
 [data-theme="light"] .theme-tab-track {
-  background-color: #E7EEF6;
-  border-color: rgba(15, 39, 77, 0.11);
+  background-color: #E8EEF5;
+  border-color: rgba(15, 23, 42, 0.10);
 }
 [data-theme="dark"] .theme-tab-track {
   background-color: #091324;
@@ -203,13 +205,13 @@
 
 [data-theme="light"] .theme-btn-secondary {
   background-color: #FFFFFF;
-  border-color: rgba(15, 39, 77, 0.16);
-  color: #0F274D;
-  box-shadow: 0 1px 3px rgba(15, 39, 77, 0.05);
+  border-color: rgba(15, 23, 42, 0.14);
+  color: #0F172A;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.05);
 }
 [data-theme="light"] .theme-btn-secondary:hover {
-  background-color: #EEF4F9;
-  border-color: rgba(10, 115, 117, 0.36);
+  background-color: #F1F5F9;
+  border-color: rgba(13, 138, 138, 0.42);
 }
 [data-theme="dark"] .theme-btn-secondary {
   background-color: #152542;
@@ -223,11 +225,11 @@
 
 [data-theme="light"] .theme-input {
   background-color: #FFFFFF;
-  border-color: rgba(15, 39, 77, 0.18);
-  color: #0F274D;
+  border-color: rgba(15, 23, 42, 0.18);
+  color: #0F172A;
 }
 [data-theme="light"] .theme-input::placeholder {
-  color: #6B7E99;
+  color: #7D8B9F;
 }
 [data-theme="dark"] .theme-input {
   background-color: #091324;
@@ -239,35 +241,35 @@
 }
 
 [data-theme="light"] .theme-accent-teal {
-  color: #0A7375;
+  color: #0D8A8A;
 }
 [data-theme="dark"] .theme-accent-teal {
   color: #3DD5D0;
 }
 
 [data-theme="light"] .theme-accent-gold {
-  color: #946308;
+  color: #B45309;
 }
 [data-theme="dark"] .theme-accent-gold {
   color: #F3D179;
 }
 
 [data-theme="light"] .theme-win {
-  color: #107C41;
+  color: #0D7A43;
 }
 [data-theme="dark"] .theme-win {
   color: #4ADE80;
 }
 
 [data-theme="light"] .theme-loss {
-  color: #C22D38;
+  color: #BE2430;
 }
 [data-theme="dark"] .theme-loss {
   color: #F87171;
 }
 
 [data-theme="light"] .theme-bar-track {
-  background-color: #DCE6F2;
+  background-color: #E2E8F0;
 }
 [data-theme="dark"] .theme-bar-track {
   background-color: #182946;
@@ -391,6 +393,219 @@
 
 .eyvan-gentle-pulse {
   animation: eyvanGentlePulse 3.4s ease-in-out infinite;
+}
+
+/* ============================================================================
+   Luminous Animated Coin & Gem Capsules (Looping Glow, Glint & Twinkle)
+   ============================================================================ */
+[data-theme="dark"] .eyvan-currency-box-coin {
+  background: linear-gradient(180deg, rgba(46, 33, 11, 0.92) 0%, rgba(22, 16, 8, 0.96) 100%);
+  border: 1.5px solid rgba(245, 199, 84, 0.65);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 241, 176, 0.24);
+}
+[data-theme="light"] .eyvan-currency-box-coin {
+  background: linear-gradient(180deg, #FFFFFF 0%, #F1F5F9 100%);
+  border: 1.5px solid rgba(217, 119, 6, 0.35);
+  box-shadow: 0 3px 10px rgba(15, 23, 42, 0.07), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+}
+
+[data-theme="dark"] .eyvan-currency-box-gem {
+  background: linear-gradient(180deg, rgba(42, 18, 72, 0.92) 0%, rgba(20, 10, 40, 0.96) 100%);
+  border: 1.5px solid rgba(192, 132, 252, 0.62);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(245, 208, 254, 0.24);
+}
+[data-theme="light"] .eyvan-currency-box-gem {
+  background: linear-gradient(180deg, #FFFFFF 0%, #F5F3FF 100%);
+  border: 1.5px solid rgba(139, 92, 246, 0.35);
+  box-shadow: 0 3px 10px rgba(15, 23, 42, 0.07), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+}
+
+@keyframes eyvanCoinPulse {
+  0%, 100% {
+    filter: drop-shadow(0 0 5px rgba(250, 204, 21, 0.55)) drop-shadow(0 2px 4px rgba(0, 0, 0, 0.35));
+  }
+  50% {
+    filter: drop-shadow(0 0 11px rgba(253, 224, 71, 0.92)) drop-shadow(0 2px 5px rgba(0, 0, 0, 0.35));
+  }
+}
+
+@keyframes eyvanGemPulse {
+  0%, 100% {
+    filter: drop-shadow(0 0 5px rgba(192, 132, 252, 0.6)) drop-shadow(0 2px 4px rgba(0, 0, 0, 0.35));
+  }
+  50% {
+    filter: drop-shadow(0 0 12px rgba(232, 121, 249, 0.95)) drop-shadow(0 2px 5px rgba(0, 0, 0, 0.35));
+  }
+}
+
+@keyframes eyvanCurrencySweep {
+  0%, 58% {
+    transform: translateX(0px) skewX(-20deg);
+    opacity: 0;
+  }
+  64% {
+    opacity: 0.95;
+  }
+  84% {
+    transform: translateX(52px) skewX(-20deg);
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(52px) skewX(-20deg);
+    opacity: 0;
+  }
+}
+
+@keyframes eyvanCapsuleSheen {
+  0%, 66% {
+    transform: translateX(0%) skewX(-16deg);
+    opacity: 0;
+  }
+  74% {
+    opacity: 1;
+  }
+  94% {
+    transform: translateX(360%) skewX(-16deg);
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(360%) skewX(-16deg);
+    opacity: 0;
+  }
+}
+
+@keyframes eyvanTwinkle {
+  0%, 100% {
+    opacity: 0.18;
+    transform: scale(0.65);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.22);
+  }
+}
+
+.eyvan-coin-glow {
+  animation: eyvanCoinPulse 2.8s ease-in-out infinite;
+}
+
+.eyvan-gem-glow {
+  animation: eyvanGemPulse 3.1s ease-in-out infinite;
+}
+
+.eyvan-currency-sweep {
+  animation: eyvanCurrencySweep 3.2s ease-in-out infinite;
+}
+
+.eyvan-currency-sweep-delayed {
+  animation: eyvanCurrencySweep 3.2s ease-in-out 1.4s infinite;
+}
+
+.eyvan-capsule-sheen {
+  animation: eyvanCapsuleSheen 4.4s ease-in-out infinite;
+}
+
+.eyvan-capsule-sheen-delayed {
+  animation: eyvanCapsuleSheen 4.4s ease-in-out 2.1s infinite;
+}
+
+.eyvan-twinkle-a {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: eyvanTwinkle 2.1s ease-in-out infinite;
+}
+
+.eyvan-twinkle-b {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: eyvanTwinkle 2.1s ease-in-out 1.05s infinite;
+}
+
+/* Slow, calm breathing float + halo animation for the circular Floating Friends Button */
+@keyframes eyvanFriendsFloat {
+  0%, 100% {
+    transform: translate3d(0, 0, 0);
+    box-shadow: 0 10px 26px rgba(13, 138, 138, 0.34), 0 0 0 0 rgba(44, 197, 194, 0.36);
+  }
+  50% {
+    transform: translate3d(0, -5px, 0);
+    box-shadow: 0 16px 32px rgba(13, 138, 138, 0.46), 0 0 0 9px rgba(44, 197, 194, 0);
+  }
+}
+
+.eyvan-friends-fab {
+  animation: eyvanFriendsFloat 4.2s ease-in-out infinite;
+  will-change: transform, box-shadow;
+}
+
+/* ============================================================================
+   HOKM HUB CODED ANIMATED BACKDROP (GPU Transform-Only, Calm & Refined)
+   ============================================================================ */
+@keyframes hokmAuroraDriftA {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-4%, 6%, 0) scale(1.09);
+  }
+}
+
+@keyframes hokmAuroraDriftB {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(5%, -5%, 0) scale(1.08);
+  }
+}
+
+@keyframes hokmLightSweep {
+  0%, 100% {
+    transform: translate3d(-15%, 0, 0) rotate(12deg);
+    opacity: 0.4;
+  }
+  50% {
+    transform: translate3d(175%, 0, 0) rotate(12deg);
+    opacity: 0.85;
+  }
+}
+
+@keyframes hokmShamsaSpinCW {
+  from {
+    transform: translate3d(-50%, -50%, 0) rotate(0deg);
+  }
+  to {
+    transform: translate3d(-50%, -50%, 0) rotate(360deg);
+  }
+}
+
+@keyframes hokmShamsaSpinCCW {
+  from {
+    transform: translate3d(-50%, -50%, 0) rotate(0deg);
+  }
+  to {
+    transform: translate3d(-50%, -50%, 0) rotate(-360deg);
+  }
+}
+
+.hokm-aurora-orb-a {
+  animation: hokmAuroraDriftA 22s ease-in-out infinite;
+}
+
+.hokm-aurora-orb-b {
+  animation: hokmAuroraDriftB 27s ease-in-out infinite;
+}
+
+.hokm-light-sweep {
+  animation: hokmLightSweep 18s ease-in-out infinite;
+}
+
+.hokm-shamsa-spin-cw {
+  animation: hokmShamsaSpinCW 150s linear infinite;
+}
+
+.hokm-shamsa-spin-ccw {
+  animation: hokmShamsaSpinCCW 110s linear infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {

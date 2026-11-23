@@ -8,7 +8,10 @@
  *   tabs/devices on the same account manage independent presence leases accurately.
  */
 
-import { buildOnlineHttpUrl } from '../../games/hokm/online/client';
+import {
+  buildOnlineHttpUrl,
+  buildOnlineWsUrl,
+} from '../../games/hokm/online/client';
 
 export type PresenceStatus = 'online' | 'offline';
 export type PresenceDeviceState = 'online' | 'away' | 'busy';
@@ -194,6 +197,7 @@ export interface ChatMessagesResponse {
   readonly hasMore?: boolean;
   readonly nextBefore?: number | null;
   readonly partnerLastReadAt?: number | null;
+  readonly partnerLastReadMessageId?: string | null;
   readonly code?: string;
   readonly message?: string;
 }
@@ -620,15 +624,32 @@ export async function openDirectConversationApi(
   );
 }
 
+export function buildChatWebSocketUrl(conversationId: string): string {
+  return buildOnlineWsUrl(
+    `/ws/social/chat/${encodeURIComponent(conversationId)}`
+  );
+}
+
+export interface ChatDeltaSyncParams {
+  readonly after: number;
+  readonly afterMessageId?: string | null;
+}
+
 export async function fetchChatMessagesRequest(
   conversationId: string,
   before?: number,
   limit = 30,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  delta?: ChatDeltaSyncParams
 ): Promise<ChatMessagesResponse> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (typeof before === 'number' && Number.isFinite(before)) {
     params.set('before', String(Math.floor(before)));
+  } else if (delta && Number.isFinite(delta.after) && delta.after > 0) {
+    params.set('after', String(Math.floor(delta.after)));
+    if (delta.afterMessageId) {
+      params.set('afterMessageId', delta.afterMessageId);
+    }
   }
   const res = await fetch(
     buildOnlineHttpUrl(
@@ -678,7 +699,14 @@ export async function sendChatMessageApi(
 export async function markChatReadApi(
   conversationId: string,
   lastReadMessageId?: string
-): Promise<{ readonly ok: boolean; readonly code?: string; readonly message?: string }> {
+): Promise<{
+  readonly ok: boolean;
+  readonly conversationId?: string;
+  readonly lastReadMessageId?: string | null;
+  readonly lastReadAt?: number;
+  readonly code?: string;
+  readonly message?: string;
+}> {
   const res = await fetch(
     buildOnlineHttpUrl(
       `/api/social/chat/conversations/${encodeURIComponent(conversationId)}/read`
@@ -697,6 +725,9 @@ export async function markChatReadApi(
   );
   return parseSocialJson<{
     readonly ok: boolean;
+    readonly conversationId?: string;
+    readonly lastReadMessageId?: string | null;
+    readonly lastReadAt?: number;
     readonly code?: string;
     readonly message?: string;
   }>(res, 'خطا در ثبت وضعیت خوانده‌شدن گفتگو.');

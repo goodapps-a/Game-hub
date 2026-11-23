@@ -57,6 +57,7 @@ import {
   updateSocialPrivacySettings,
 } from './socialService';
 import {
+  findDirectConversationIdByPair,
   listConversationMessages,
   listDirectConversations,
   markConversationRead,
@@ -69,6 +70,7 @@ import {
   listGameInvites,
   respondToGameInvite,
 } from './inviteService';
+import { ChatRealtimePublisher } from '../../../../src/platform/social/chatRealtimeProtocol';
 import { GameRoomLookupFn, SocialRequestContext } from './types';
 
 const MAX_SOCIAL_BODY_BYTES = 12 * 1024; // 12KB strict cap (supports 2000-char Persian UTF-8 messages)
@@ -82,6 +84,7 @@ export interface SocialHttpEnv {
   readonly clientIp: string;
   readonly now?: number;
   readonly roomLookup?: GameRoomLookupFn;
+  readonly chatRealtimePublisher?: ChatRealtimePublisher;
 }
 
 function buildSocialResponse(
@@ -494,6 +497,20 @@ export async function handleSocialHttpRequest(
           extra
         );
       }
+      if (env.chatRealtimePublisher && typeof body.data.targetUserId === 'string') {
+        try {
+          const convId = await findDirectConversationIdByPair(
+            env.db,
+            ctx.actorUserId,
+            body.data.targetUserId.trim()
+          );
+          if (convId) {
+            await env.chatRealtimePublisher.revokeConversation(convId, 'unfriended');
+          }
+        } catch {
+          // Best-effort realtime revocation; D1 friendship removal already committed
+        }
+      }
       return buildSocialResponse(
         {
           ok: true,
@@ -630,6 +647,20 @@ export async function handleSocialHttpRequest(
           extra
         );
       }
+      if (env.chatRealtimePublisher) {
+        try {
+          const convId = await findDirectConversationIdByPair(
+            env.db,
+            ctx.actorUserId,
+            result.targetUserId
+          );
+          if (convId) {
+            await env.chatRealtimePublisher.revokeConversation(convId, 'blocked');
+          }
+        } catch {
+          // Best-effort realtime revocation; D1 block already committed
+        }
+      }
       return buildSocialResponse(
         {
           ok: true,
@@ -749,7 +780,11 @@ export async function handleSocialHttpRequest(
           conversationId,
           reqUrl.searchParams.get('before'),
           reqUrl.searchParams.get('limit'),
-          ctx
+          ctx,
+          {
+            after: reqUrl.searchParams.get('after'),
+            afterMessageId: reqUrl.searchParams.get('afterMessageId'),
+          }
         );
         if (result.ok === false) {
           return buildSocialResponse(
@@ -766,6 +801,7 @@ export async function handleSocialHttpRequest(
             hasMore: result.hasMore,
             nextBefore: result.nextBefore,
             partnerLastReadAt: result.partnerLastReadAt,
+            partnerLastReadMessageId: result.partnerLastReadMessageId,
           },
           200,
           env.corsHeaders
@@ -792,6 +828,17 @@ export async function handleSocialHttpRequest(
             env.corsHeaders,
             extra
           );
+        }
+        // Strictly publish AFTER D1 commit succeeded (and only for newly inserted messages)
+        if (!result.deduplicated && env.chatRealtimePublisher) {
+          try {
+            await env.chatRealtimePublisher.publishMessage(
+              conversationId,
+              result.message
+            );
+          } catch {
+            // Non-fatal: D1 commit already succeeded; clients will sync on reconnect/fallback
+          }
         }
         return buildSocialResponse(
           {
@@ -830,10 +877,24 @@ export async function handleSocialHttpRequest(
           extra
         );
       }
+      // Broadcast read cursor ONLY AFTER D1 commit succeeded and cursor actually advanced
+      if (result.advanced && env.chatRealtimePublisher) {
+        try {
+          await env.chatRealtimePublisher.publishRead({
+            conversationId: result.conversationId,
+            readerUserId: result.readerUserId,
+            lastReadMessageId: result.lastReadMessageId,
+            lastReadAt: result.lastReadAt,
+          });
+        } catch {
+          // Non-fatal: D1 read state already persisted
+        }
+      }
       return buildSocialResponse(
         {
           ok: true,
           conversationId: result.conversationId,
+          lastReadMessageId: result.lastReadMessageId,
           lastReadAt: result.lastReadAt,
         },
         200,

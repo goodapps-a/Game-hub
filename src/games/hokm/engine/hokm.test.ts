@@ -26,6 +26,7 @@ import {
   dealInitialFive,
   dealRemainingEight,
   playCard,
+  resolveNextHakem,
   startNextHand,
   startShufflingHand,
 } from './gameEngine';
@@ -398,4 +399,59 @@ test('wonTricksBySeat tracks trick wins per seat accurately and resets to zero o
     west: 0,
   });
 });
+
+test('resolveNextHakem keeps Hakem on win and rotates counter-clockwise on Hakem loss', () => {
+  const base = createInitialMatchState({ initialHakem: 'south' });
+
+  // Hakem (south, myTeam) wins -> stays south
+  const wonByHakem = {
+    ...base,
+    hakem: 'south' as Seat,
+    handOutcome: evaluateHandOutcome(
+      { myTeam: 7, opponentTeam: 3 },
+      'south',
+      'hearts'
+    ),
+  };
+  assert.equal(resolveNextHakem(wonByHakem), 'south');
+  assert.equal(startNextHand(wonByHakem).hakem, 'south');
+
+  // Hakem (south, myTeam) loses -> rotates counter-clockwise to east
+  const lostBySouth = {
+    ...base,
+    hakem: 'south' as Seat,
+    handOutcome: evaluateHandOutcome(
+      { myTeam: 4, opponentTeam: 7 },
+      'south',
+      'spades'
+    ),
+  };
+  assert.equal(resolveNextHakem(lostBySouth), 'east');
+  assert.equal(startNextHand(lostBySouth).hakem, 'east');
+
+  // Hakem (east, opponentTeam) loses -> rotates counter-clockwise to north
+  const lostByEast = {
+    ...base,
+    hakem: 'east' as Seat,
+    handOutcome: evaluateHandOutcome(
+      { myTeam: 7, opponentTeam: 0 },
+      'east',
+      'diamonds'
+    ),
+  };
+  assert.equal(resolveNextHakem(lostByEast), 'north');
+
+  // Hakem (west, opponentTeam) loses -> wraps counter-clockwise to south
+  const lostByWest = {
+    ...base,
+    hakem: 'west' as Seat,
+    handOutcome: evaluateHandOutcome(
+      { myTeam: 7, opponentTeam: 5 },
+      'west',
+      'clubs'
+    ),
+  };
+  assert.equal(resolveNextHakem(lostByWest), 'south');
+});
+
 
