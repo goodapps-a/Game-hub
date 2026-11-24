@@ -27,6 +27,10 @@ import {
 import { OnlineLobby, getAvatarSrcByCode } from './components/OnlineLobby';
 import { hokmSound } from './audio/soundEffects';
 import { preloadCardArtwork } from './components/PlayingCard';
+import {
+  EYVAN_CLASSIC_DECK_ID,
+  deckRuntime,
+} from '../../platform/decks';
 
 export type OnlineHokmLaunchAction =
   | 'quick_match'
@@ -38,6 +42,7 @@ interface OnlineHokmGameProps {
   username: string;
   avatarCode: string;
   tableSkinId?: string;
+  deckId?: string;
   isAuthenticated?: boolean;
   initialRoomCode?: string;
   autoJoinRoom?: boolean;
@@ -55,6 +60,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
   username,
   avatarCode,
   tableSkinId = 'tt-traditional',
+  deckId = EYVAN_CLASSIC_DECK_ID,
   isAuthenticated = false,
   initialRoomCode = '',
   autoJoinRoom = false,
@@ -100,6 +106,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
   const [osReducedMotion, setOsReducedMotion] = useState(false);
   useEffect(() => {
     preloadCardArtwork();
+    void deckRuntime.ensureDeckReady(deckId);
     hokmSound.prefetchRaw();
     if (typeof window === 'undefined' || !window.matchMedia) return;
     const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -107,7 +114,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
     const handler = (e: MediaQueryListEvent) => setOsReducedMotion(e.matches);
     mq.addEventListener('change', handler);
     return () => mq.removeEventListener('change', handler);
-  }, []);
+  }, [deckId]);
 
   const reducedMotion = reducedMotionPreference || osReducedMotion;
 
@@ -557,6 +564,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
           collectingWinnerTeam={collectingWinnerTeam}
           playerName={username}
           tableSkinId={tableSkinId}
+          deckId={deckId}
           reducedMotion={reducedMotion}
           canHumanPlay={canHumanPlay}
           exitConfirmOpen={exitConfirmOpen}

@@ -12,6 +12,8 @@ import { ShopCategories } from '../components/shop/ShopCategories';
 import { ShopHeader } from '../components/shop/ShopHeader';
 import { ShopProductCard } from '../components/shop/ShopProductCard';
 import { ShopProductDetails } from '../components/shop/ShopProductDetails';
+import { DeckCatalogSection } from '../components/shop/DeckCatalogSection';
+import { EYVAN_CLASSIC_DECK_ID } from '../decks';
 
 interface ShopPageProps {
   userCoins: number;
@@ -20,8 +22,10 @@ interface ShopPageProps {
   ownedItemIds?: readonly string[];
   equippedTableSkinId?: string;
   equippedBannerCode?: string;
+  equippedDeckId?: string;
   onPurchaseItem?: (item: ShopItem) => void;
   onEquipItem?: (item: ShopItem) => void;
+  onSelectDeck?: (deckId: string) => void | Promise<void>;
   onRequireAuth?: () => void;
   initialCategory?: ShopCategoryFilter;
   onBack?: () => void;
@@ -34,8 +38,10 @@ export const ShopPage: React.FC<ShopPageProps> = ({
   ownedItemIds = [],
   equippedTableSkinId = 'tt-traditional',
   equippedBannerCode = 'royal',
+  equippedDeckId = EYVAN_CLASSIC_DECK_ID,
   onPurchaseItem,
   onEquipItem,
+  onSelectDeck,
   onRequireAuth,
   initialCategory = 'all',
   onBack,
@@ -188,6 +194,16 @@ export const ShopPage: React.FC<ShopPageProps> = ({
 
           {/* Structured Category Shelves */}
           {SHOP_SECTIONS.filter((s) => s.id !== 'daily_deals').map((section) => {
+            if (section.id === 'card_decks') {
+              return (
+                <DeckCatalogSection
+                  key={section.id}
+                  equippedDeckId={equippedDeckId}
+                  ownedItemIds={ownedItemIds}
+                  onSelectDeck={(deckId) => onSelectDeck?.(deckId)}
+                />
+              );
+            }
             const sectionItems = getShopItemsByCategory(
               SHOP_ITEMS_DEMO,
               section.id
@@ -234,6 +250,12 @@ export const ShopPage: React.FC<ShopPageProps> = ({
             );
           })}
         </div>
+      ) : activeCategory === 'card_decks' ? (
+        <DeckCatalogSection
+          equippedDeckId={equippedDeckId}
+          ownedItemIds={ownedItemIds}
+          onSelectDeck={(deckId) => onSelectDeck?.(deckId)}
+        />
       ) : filteredItems.length === 0 ? (
         <section
           data-testid="shop-empty-category"

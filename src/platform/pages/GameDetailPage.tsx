@@ -46,8 +46,10 @@ interface GameDetailPageProps {
   ownedItemIds?: readonly string[];
   equippedTableSkinId?: string;
   equippedBannerCode?: string;
+  equippedDeckId?: string;
   onPurchaseItem?: (item: ShopItem) => void;
   onEquipItem?: (item: ShopItem) => void;
+  onSelectDeck?: (deckId: string) => void | Promise<void>;
   onRequireAuth?: () => void;
   onBack: () => void;
   onLaunchHokm: (req: GameHubLaunchRequest) => void;
@@ -130,8 +132,10 @@ export const GameDetailPage: React.FC<GameDetailPageProps> = ({
   ownedItemIds = [],
   equippedTableSkinId = 'tt-traditional',
   equippedBannerCode = 'royal',
+  equippedDeckId,
   onPurchaseItem,
   onEquipItem,
+  onSelectDeck,
   onRequireAuth,
   onBack,
   onLaunchHokm,
@@ -807,8 +811,10 @@ export const GameDetailPage: React.FC<GameDetailPageProps> = ({
             ownedItemIds={ownedItemIds}
             equippedTableSkinId={equippedTableSkinId}
             equippedBannerCode={equippedBannerCode}
+            equippedDeckId={equippedDeckId}
             onPurchaseItem={onPurchaseItem}
             onEquipItem={onEquipItem}
+            onSelectDeck={onSelectDeck}
             onRequireAuth={onRequireAuth}
             onOpenFullShop={onOpenFullShop}
           />

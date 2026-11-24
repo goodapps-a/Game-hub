@@ -1,0 +1,28 @@
+[
+  {
+    "id": "public-domain-cc0",
+    "version": "1.0.0",
+    "schemaVersion": 1,
+    "name": "کلاسیک جهانی (CC0)",
+    "subtitle": "طراحی مصور بین‌المللی · ۵۲ برگ کامل + پشت آبی کلاسیک",
+    "description": "دست ورق کلاسیک بین‌المللی با کارت‌های چهره مصور، خال‌های برداری تیز و پشت کارت توری آبی. پس از یک‌بار دریافت، به‌صورت کامل آفلاین در حافظه دستگاه ذخیره می‌شود.",
+    "author": "AustinGabriel (Public Domain / CC0)",
+    "sourceUrl": "https://github.com/AustinGabriel/Public-Domain-and-CC0-Playing-Cards",
+    "license": "CC0-1.0 (Public Domain)",
+    "manifestPath": "public-domain-cc0/manifest.json",
+    "previewPath": "public-domain-cc0/preview.webp",
+    "previewMimeType": "image/webp",
+    "aspectRatio": 0.714286,
+    "renderMode": "full_card",
+    "format": "mixed",
+    "totalBytes": 1175770,
+    "cardCount": 52,
+    "pricing": {
+      "access": "free",
+      "price": 0,
+      "currency": "coins",
+      "rarity": "rare",
+      "badge": "رایگان · ۵۲ برگ"
+    }
+  }
+]

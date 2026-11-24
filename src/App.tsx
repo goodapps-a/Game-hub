@@ -50,6 +50,11 @@ import {
   sendPresenceHeartbeat,
   sendPresenceOffline,
 } from './platform/social/socialClient';
+import {
+  DeckRegistry,
+  EYVAN_CLASSIC_DECK_ID,
+  deckRuntime,
+} from './platform/decks';
 
 type ActiveGameView = 'hokm-online' | 'hokm-offline' | null;
 
@@ -166,6 +171,7 @@ export default function App() {
           customAvatarUrl: next.customAvatarUrl ?? null,
           customBannerUrl: next.customBannerUrl ?? null,
           equippedTableSkinId: next.equippedTableSkinId ?? 'tt-traditional',
+          equippedDeckId: next.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID,
           ownedShopItemIds: next.ownedShopItemIds ?? [...DEFAULT_OWNED_SHOP_IDS],
           coins: next.coins,
           gems: next.gems,
@@ -320,6 +326,25 @@ export default function App() {
   // Initialize seamless looping background soundtrack
   useEffect(() => {
     eyvanBgMusic.init();
+  }, []);
+
+  // Initialize Multi-Deck catalog & preload the persisted equipped deck (falling back cleanly if evicted)
+  useEffect(() => {
+    let active = true;
+    const savedDeckId = profile.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID;
+    void DeckRegistry.fetchCatalog();
+    void deckRuntime.activateDeck(savedDeckId).then((res) => {
+      if (!active) return;
+      if (res.fallbackUsed && savedDeckId !== EYVAN_CLASSIC_DECK_ID) {
+        updateProfile((prev) => ({
+          ...prev,
+          equippedDeckId: EYVAN_CLASSIC_DECK_ID,
+        }));
+      }
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   // Track active text input so floating FAB stays out of the way of mobile keyboard
@@ -607,6 +632,17 @@ export default function App() {
     [updateProfile]
   );
 
+  const handleSelectDeck = useCallback(
+    async (deckId: string) => {
+      const res = await deckRuntime.activateDeck(deckId);
+      updateProfile((prev) => ({
+        ...prev,
+        equippedDeckId: res.activatedDeckId,
+      }));
+    },
+    [updateProfile]
+  );
+
   const handleLaunchFromGameHub = (req: GameHubLaunchRequest) => {
     setIsProfileOpen(false);
     setIsAuthModalOpen(false);
@@ -651,6 +687,7 @@ export default function App() {
         username={profile.username}
         avatarCode={profile.avatarCode}
         tableSkinId={profile.equippedTableSkinId}
+        deckId={profile.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID}
         isAuthenticated={Boolean(authUser)}
         initialRoomCode={initialRoomCode}
         autoJoinRoom={autoJoinInviteRoom}
@@ -700,6 +737,7 @@ export default function App() {
       <HokmGame
         playerName={profile.username}
         tableSkinId={profile.equippedTableSkinId}
+        deckId={profile.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID}
         targetMatchScore={hokmTargetScore}
         soundEnabled={profile.appSettings.soundEnabled}
         animationSpeed={profile.appSettings.animationSpeed}
@@ -751,8 +789,10 @@ export default function App() {
           ownedItemIds={profile.ownedShopItemIds}
           equippedTableSkinId={profile.equippedTableSkinId}
           equippedBannerCode={profile.bannerCode}
+          equippedDeckId={profile.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID}
           onPurchaseItem={handlePurchaseShopItem}
           onEquipItem={handleEquipShopItem}
+          onSelectDeck={handleSelectDeck}
           onRequireAuth={() => openAuthModal('login', null)}
           onBack={() => {
             setSelectedGameHub(null);
@@ -842,8 +882,10 @@ export default function App() {
               ownedItemIds={profile.ownedShopItemIds}
               equippedTableSkinId={profile.equippedTableSkinId}
               equippedBannerCode={profile.bannerCode}
+              equippedDeckId={profile.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID}
               onPurchaseItem={handlePurchaseShopItem}
               onEquipItem={handleEquipShopItem}
+              onSelectDeck={handleSelectDeck}
               initialCategory={shopInitialCategory}
               onRequireAuth={() => openAuthModal('login', null)}
               onBack={() => handleSelectTab('games')}

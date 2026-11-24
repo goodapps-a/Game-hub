@@ -75,6 +75,7 @@ export interface LocalCosmeticPreferences {
   customAvatarUrl?: string | null;
   customBannerUrl?: string | null;
   equippedTableSkinId?: string;
+  equippedDeckId?: string;
   ownedShopItemIds?: string[];
   coins?: number;
   gems?: number;
@@ -117,6 +118,12 @@ export function loadLocalCosmetics(): LocalCosmeticPreferences {
     }
     if (typeof parsed.equippedTableSkinId === 'string' && parsed.equippedTableSkinId.length <= 40) {
       out.equippedTableSkinId = parsed.equippedTableSkinId;
+    }
+    if (
+      typeof parsed.equippedDeckId === 'string' &&
+      /^[a-z0-9][a-z0-9._-]{1,60}$/i.test(parsed.equippedDeckId)
+    ) {
+      out.equippedDeckId = parsed.equippedDeckId;
     }
     if (Array.isArray(parsed.ownedShopItemIds)) {
       const validIds = parsed.ownedShopItemIds.filter(
@@ -163,6 +170,7 @@ export function createInitialGuestProfile(themeMode: ThemeMode): UserProfile {
     bannerCode: cosmetics.bannerCode ?? 'royal',
     customBannerUrl: cosmetics.customBannerUrl ?? null,
     equippedTableSkinId: cosmetics.equippedTableSkinId ?? 'tt-traditional',
+    equippedDeckId: cosmetics.equippedDeckId ?? 'eyvan-classic',
     ownedShopItemIds: cosmetics.ownedShopItemIds ?? [...DEFAULT_OWNED_SHOP_IDS],
     level: 1,
     xp: 0,

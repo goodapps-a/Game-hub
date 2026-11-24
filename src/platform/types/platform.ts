@@ -23,6 +23,7 @@ export interface UserProfile {
   bannerCode?: ProfileBannerCode;
   customBannerUrl?: string | null;
   equippedTableSkinId?: string;
+  equippedDeckId?: string;
   ownedShopItemIds?: string[];
   level: number;
   xp: number;
@@ -52,6 +53,7 @@ export type ShopRarity = 'common' | 'rare' | 'epic' | 'legendary';
 
 export type ShopSectionId =
   | 'daily_deals'
+  | 'card_decks'
   | 'card_backs'
   | 'table_themes'
   | 'avatars_frames'

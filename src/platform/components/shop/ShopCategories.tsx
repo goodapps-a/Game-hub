@@ -6,6 +6,7 @@ import {
   Layers,
   LayoutGrid,
   Sparkles,
+  Spade,
   SquareStack,
 } from 'lucide-react';
 import { ShopSectionId, ShopSectionMeta } from '../../types/platform';
@@ -22,6 +23,7 @@ const SECTION_ICONS: Record<
   React.ComponentType<{ className?: string }>
 > = {
   daily_deals: Sparkles,
+  card_decks: Spade,
   card_backs: SquareStack,
   table_themes: Layers,
   avatars_frames: Frame,

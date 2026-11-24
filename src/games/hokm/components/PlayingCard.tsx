@@ -1,6 +1,12 @@
 import React from 'react';
 import { Card, RANK_META, Rank, Suit, SUIT_META } from '../engine/types';
 import { CARD_ART_ASSETS } from '../../../platform/data/assets';
+import {
+  deckRuntime,
+  resolveCardBackVisual,
+  resolveCardFaceVisual,
+  useDeckRuntimeState,
+} from '../../../platform/decks';
 import { CardBackSvg } from './CardBackSvg';
 
 const CARD_RED = '#C8102E';
@@ -193,12 +199,22 @@ export const PlayingCard: React.FC<PlayingCardProps> = React.memo(
     size = 'md',
     className = '',
   }) => {
+    const runtime = useDeckRuntimeState();
     const sizeClass = SIZE_CLASSES[size];
 
     if (faceDown || !card) {
+      const backVisual = resolveCardBackVisual(runtime);
+      const backTokens = backVisual.styleTokens;
+      const backPad = backTokens.backPaddingPx ?? 2;
       return (
         <div
-          className={`${sizeClass} relative select-none overflow-hidden bg-white p-[2px] shadow-[0_4px_12px_rgba(0,0,0,0.42)] border border-[#D4CFC5] ${className}`}
+          data-deck-id={backVisual.deckId}
+          style={{
+            backgroundColor: backTokens.backBackground ?? '#FFFFFF',
+            borderColor: backTokens.backBorderColor ?? '#D4CFC5',
+            padding: `${backPad}px`,
+          }}
+          className={`${sizeClass} relative select-none overflow-hidden shadow-[0_4px_12px_rgba(0,0,0,0.42)] border ${className}`}
           aria-hidden="true"
         >
           <div className="w-full h-full rounded-[inherit] overflow-hidden">
@@ -210,10 +226,75 @@ export const PlayingCard: React.FC<PlayingCardProps> = React.memo(
 
     const suitMeta = SUIT_META[card.suit];
     const rankMeta = RANK_META[card.rank];
+    const label = `${rankMeta.faName} ${suitMeta.faName}`;
+    const faceVisual = resolveCardFaceVisual(card.id, runtime);
+
+    const stateHighlightClass = isWinningCard
+      ? 'border-[#E8C268] ring-[2.5px] ring-[#F3D179] shadow-[0_0_24px_rgba(243,209,121,0.72),0_8px_20px_rgba(0,0,0,0.45)]'
+      : isSelected
+        ? 'border-[#E8C268] ring-2 ring-[#F3D179]/85 shadow-[0_14px_28px_rgba(0,0,0,0.52)]'
+        : 'shadow-[0_4px_14px_rgba(0,0,0,0.38)]';
+
+    const unplayableClass = !isPlayable
+      ? 'brightness-[0.52] saturate-[0.2] contrast-[0.92]'
+      : '';
+
+    // Data-driven Multi-Deck image renderer (supports SVG, WebP, PNG & mixed formats)
+    if (faceVisual.mode === 'image') {
+      const tokens = faceVisual.styleTokens;
+      return (
+        <div
+          dir="ltr"
+          aria-label={label}
+          data-card-id={card.id}
+          data-deck-id={faceVisual.deckId}
+          style={{
+            backgroundColor: tokens.cardBackground,
+            borderColor:
+              isWinningCard || isSelected ? undefined : tokens.cardBorderColor,
+            padding: tokens.imagePaddingPx
+              ? `${tokens.imagePaddingPx}px`
+              : undefined,
+            filter:
+              !isPlayable && tokens.unplayableFilter
+                ? tokens.unplayableFilter
+                : undefined,
+          }}
+          className={`${sizeClass} relative border select-none overflow-hidden transform-gpu transition-[filter,box-shadow] duration-200 ${stateHighlightClass} ${
+            !isPlayable && !tokens.unplayableFilter ? unplayableClass : ''
+          } ${className}`}
+        >
+          {tokens.cardInnerFrame !== false && (
+            <div
+              className="absolute inset-0 pointer-events-none rounded-[inherit] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.04)] z-10"
+              aria-hidden="true"
+            />
+          )}
+          <img
+            src={faceVisual.src}
+            alt=""
+            aria-hidden="true"
+            decoding="sync"
+            loading="eager"
+            draggable={false}
+            onError={() =>
+              deckRuntime.markAssetBroken(
+                faceVisual.deckId,
+                faceVisual.assetKey
+              )
+            }
+            className={`w-full h-full block select-none pointer-events-none ${
+              tokens.imageFit === 'contain' ? 'object-contain' : 'object-cover'
+            }`}
+          />
+        </div>
+      );
+    }
+
+    // Built-in default Eyvan Classic composite card renderer (always available offline)
     const inkColor = suitMeta.isRed ? CARD_RED : CARD_BLACK;
     const pips = PIP_LAYOUTS[card.rank];
     const isCourt = card.rank === 'J' || card.rank === 'Q' || card.rank === 'K';
-    const label = `${rankMeta.faName} ${suitMeta.faName}`;
     const courtArt = isCourt
       ? getCourtArtwork(card.rank as 'J' | 'Q' | 'K', card.suit)
       : null;
@@ -223,13 +304,14 @@ export const PlayingCard: React.FC<PlayingCardProps> = React.memo(
         dir="ltr"
         aria-label={label}
         data-card-id={card.id}
+        data-deck-id={faceVisual.deckId}
         className={`${sizeClass} relative bg-[#FFFFFF] border select-none overflow-hidden transform-gpu transition-[filter,box-shadow] duration-200 ${
           isWinningCard
             ? 'border-[#E8C268] ring-[2.5px] ring-[#F3D179] shadow-[0_0_24px_rgba(243,209,121,0.72),0_8px_20px_rgba(0,0,0,0.45)]'
             : isSelected
               ? 'border-[#E8C268] ring-2 ring-[#F3D179]/85 shadow-[0_14px_28px_rgba(0,0,0,0.52)]'
               : 'border-[#CFCBC2] shadow-[0_4px_14px_rgba(0,0,0,0.38)]'
-        } ${!isPlayable ? 'brightness-[0.52] saturate-[0.2] contrast-[0.92]' : ''} ${className}`}
+        } ${unplayableClass} ${className}`}
       >
         {/* Subtle real poker-stock inner edge sheen */}
         <div

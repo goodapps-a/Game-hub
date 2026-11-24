@@ -14,6 +14,13 @@ export const SHOP_SECTIONS: readonly ShopSectionMeta[] = [
     badge: 'ویژه امروز',
   },
   {
+    id: 'card_decks',
+    title: 'دست‌های کارت',
+    subtitle: 'مجموعه‌های کامل ۵۲ برگ با سبک‌های متنوع و ذخیره آفلاین',
+    accentColor: '#19A2A2',
+    badge: 'چندمجموعه‌ای',
+  },
+  {
     id: 'card_backs',
     title: 'طرح‌های پشت کارت',
     subtitle: 'نقوش اصیل ایرانی و گره‌چینی برای دست ورق شما',

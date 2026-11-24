@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/games/hokm/engine/hokm.test.ts src/games/hokm/online/online.test.ts cloudflare/src/HokmRoomDO.test.ts server/stageB.migrations.test.ts server/stageC1.auth.test.ts server/stageC1.express.test.ts server/stageC2.auth.test.ts server/stageC2.hardening.test.ts server/uxRedesign.test.ts server/part1.identityStats.test.ts server/part2.socialD1.test.ts server/stage0.auditSecurity.test.ts server/stage1to4.identityOAuth.test.ts server/stage6to8.chatInvitesIntegration.test.ts server/hardening.securityConcurrency.test.ts server/finalHardening.test.ts server/stage10.auditReadiness.test.ts server/chatRealtime.test.ts server/gameHubAndAuthUx.test.ts",
+    "test": "tsx --test src/games/hokm/engine/hokm.test.ts src/games/hokm/online/online.test.ts cloudflare/src/HokmRoomDO.test.ts server/stageB.migrations.test.ts server/stageC1.auth.test.ts server/stageC1.express.test.ts server/stageC2.auth.test.ts server/stageC2.hardening.test.ts server/uxRedesign.test.ts server/part1.identityStats.test.ts server/part2.socialD1.test.ts server/stage0.auditSecurity.test.ts server/stage1to4.identityOAuth.test.ts server/stage6to8.chatInvitesIntegration.test.ts server/hardening.securityConcurrency.test.ts server/finalHardening.test.ts server/stage10.auditReadiness.test.ts server/chatRealtime.test.ts server/gameHubAndAuthUx.test.ts server/multiDeck.test.ts",
     "test:engine": "tsx --test src/games/hokm/engine/hokm.test.ts",
     "test:online": "tsx --test src/games/hokm/online/online.test.ts",
     "test:worker": "tsx --test cloudflare/src/HokmRoomDO.test.ts",
@@ -29,7 +29,8 @@
     "test:final-hardening": "tsx --test server/finalHardening.test.ts",
     "test:stage10": "tsx --test server/stage10.auditReadiness.test.ts",
     "test:chat-realtime": "tsx --test server/chatRealtime.test.ts",
-    "test:game-hub": "tsx --test server/gameHubAndAuthUx.test.ts"
+    "test:game-hub": "tsx --test server/gameHubAndAuthUx.test.ts",
+    "test:decks": "tsx --test server/multiDeck.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -48,14 +49,15 @@
     "ws": "^8.23.0"
   },
   "devDependencies": {
+    "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
+    "svgo": "^4.1.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
-    "typescript": "^7.0.2",
-    "@types/express": "^4.17.21"
+    "typescript": "^7.0.2"
   }
 }

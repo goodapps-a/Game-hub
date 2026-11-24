@@ -8,6 +8,8 @@ import {
 } from '../../utils/gameHubHelpers';
 import { ShopProductCard } from '../shop/ShopProductCard';
 import { ShopProductDetails } from '../shop/ShopProductDetails';
+import { DeckCatalogSection } from '../shop/DeckCatalogSection';
+import { EYVAN_CLASSIC_DECK_ID } from '../../decks';
 
 interface HokmShopTabProps {
   userCoins: number;
@@ -16,14 +18,17 @@ interface HokmShopTabProps {
   ownedItemIds?: readonly string[];
   equippedTableSkinId?: string;
   equippedBannerCode?: string;
+  equippedDeckId?: string;
   onPurchaseItem?: (item: ShopItem) => void;
   onEquipItem?: (item: ShopItem) => void;
+  onSelectDeck?: (deckId: string) => void | Promise<void>;
   onRequireAuth?: () => void;
   onOpenFullShop: () => void;
 }
 
 const SUB_FILTERS: ReadonlyArray<{ id: HokmShopSubFilter; label: string }> = [
   { id: 'all', label: 'همه آیتم‌های حکم' },
+  { id: 'card_decks', label: 'دست‌های کارت' },
   { id: 'card_backs', label: 'پشت کارت' },
   { id: 'table_themes', label: 'میز حکم' },
   { id: 'visual_effects', label: 'افکت‌ها' },
@@ -36,8 +41,10 @@ export const HokmShopTab: React.FC<HokmShopTabProps> = ({
   ownedItemIds = [],
   equippedTableSkinId = 'tt-traditional',
   equippedBannerCode = 'royal',
+  equippedDeckId = EYVAN_CLASSIC_DECK_ID,
   onPurchaseItem,
   onEquipItem,
+  onSelectDeck,
   onRequireAuth,
   onOpenFullShop,
 }) => {
@@ -86,6 +93,7 @@ export const HokmShopTab: React.FC<HokmShopTabProps> = ({
                 type="button"
                 role="tab"
                 aria-selected={active}
+                data-testid={`hokm-shop-filter-${f.id}`}
                 onClick={() => setSubFilter(f.id)}
                 className={`min-h-[38px] px-3 rounded-lg text-xs font-extrabold whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
                   active
@@ -110,16 +118,28 @@ export const HokmShopTab: React.FC<HokmShopTabProps> = ({
         </button>
       </div>
 
+      {/* Multi-Deck Card Sets Section */}
+      {(subFilter === 'all' || subFilter === 'card_decks') && (
+        <DeckCatalogSection
+          equippedDeckId={equippedDeckId}
+          ownedItemIds={ownedItemIds}
+          onSelectDeck={(deckId) => onSelectDeck?.(deckId)}
+          compactHeader={subFilter === 'card_decks'}
+        />
+      )}
+
       {/* Product Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-        {items.map((item) => (
-          <ShopProductCard
-            key={item.id}
-            item={item}
-            onSelect={setSelectedItem}
-          />
-        ))}
-      </div>
+      {subFilter !== 'card_decks' && (
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+          {items.map((item) => (
+            <ShopProductCard
+              key={item.id}
+              item={item}
+              onSelect={setSelectedItem}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 };

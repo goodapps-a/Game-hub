@@ -3,7 +3,12 @@ import { GameId, ShopItem } from '../types/platform';
 export type HokmMatchVariantId = 'quick_3' | 'classic_7' | 'single_1';
 export type HokmOpponentMode = 'random' | 'friends' | 'offline';
 export type GameHubTabId = 'play' | 'rules' | 'leaderboard' | 'shop';
-export type HokmShopSubFilter = 'all' | 'card_backs' | 'table_themes' | 'visual_effects';
+export type HokmShopSubFilter =
+  | 'all'
+  | 'card_decks'
+  | 'card_backs'
+  | 'table_themes'
+  | 'visual_effects';
 
 export interface HokmMatchVariant {
   id: HokmMatchVariantId;
@@ -50,6 +55,7 @@ export function getHokmVariantById(id: HokmMatchVariantId): HokmMatchVariant {
 }
 
 const HOKM_RELEVANT_SECTIONS = new Set<ShopItem['section']>([
+  'card_decks',
   'card_backs',
   'table_themes',
   'visual_effects',

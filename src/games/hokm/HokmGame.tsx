@@ -23,6 +23,10 @@ import { pickRandomLegalCard, pickRandomTrumpSuit } from './engine/simulator';
 import { hokmSound } from './audio/soundEffects';
 import { preloadCardArtwork } from './components/PlayingCard';
 import {
+  EYVAN_CLASSIC_DECK_ID,
+  deckRuntime,
+} from '../../platform/decks';
+import {
   FlyingDealCard,
   HokmTable,
   TrickCollectPhase,
@@ -35,6 +39,7 @@ import {
 interface HokmGameProps {
   playerName: string;
   tableSkinId?: string;
+  deckId?: string;
   targetMatchScore?: number;
   soundEnabled: boolean;
   animationSpeed: AnimationSpeed;
@@ -47,6 +52,7 @@ interface HokmGameProps {
 export const HokmGame: React.FC<HokmGameProps> = ({
   playerName,
   tableSkinId = 'tt-traditional',
+  deckId = EYVAN_CLASSIC_DECK_ID,
   targetMatchScore = HOKM_CONFIG.DEFAULT_MATCH_TARGET_SCORE,
   soundEnabled,
   animationSpeed,
@@ -89,6 +95,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
   const [osReducedMotion, setOsReducedMotion] = useState(false);
   useEffect(() => {
     preloadCardArtwork();
+    void deckRuntime.ensureDeckReady(deckId);
     hokmSound.prefetchRaw();
     if (typeof window === 'undefined' || !window.matchMedia) return;
     const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -96,7 +103,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
     const handler = (e: MediaQueryListEvent) => setOsReducedMotion(e.matches);
     mq.addEventListener('change', handler);
     return () => mq.removeEventListener('change', handler);
-  }, []);
+  }, [deckId]);
 
   const reducedMotion = reducedMotionPreference || osReducedMotion;
 
@@ -682,6 +689,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
       collectingWinnerTeam={collectingWinnerTeam}
       playerName={playerName}
       tableSkinId={tableSkinId}
+      deckId={deckId}
       reducedMotion={reducedMotion}
       canHumanPlay={canHumanPlay}
       exitConfirmOpen={exitConfirmOpen}

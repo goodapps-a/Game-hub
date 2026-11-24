@@ -1,0 +1,364 @@
+{
+  "id": "public-domain-cc0",
+  "version": "1.0.0",
+  "schemaVersion": 1,
+  "name": "کلاسیک جهانی (CC0)",
+  "description": "دست ورق کلاسیک بین‌المللی با کارت‌های چهره مصور، خال‌های برداری و پشت آبی کلاسیک (مالکیت عمومی CC0).",
+  "author": "AustinGabriel (Public Domain / CC0)",
+  "sourceUrl": "https://github.com/AustinGabriel/Public-Domain-and-CC0-Playing-Cards",
+  "license": "CC0-1.0 (Public Domain)",
+  "preview": {
+    "path": "preview.webp",
+    "hash": "0d601d1335db2ebe116f5db531d01944a76ffaedca13e932964731d46becc592",
+    "bytes": 19872,
+    "mimeType": "image/webp"
+  },
+  "aspectRatio": 0.714286,
+  "renderMode": "full_card",
+  "format": "mixed",
+  "styleTokens": {
+    "cardBackground": "#FFFFFF",
+    "cardBorderColor": "#CFCBC2",
+    "cardInnerFrame": false,
+    "imageFit": "cover",
+    "imagePaddingPx": 0,
+    "backBackground": "#FFFFFF",
+    "backBorderColor": "#D4CFC5",
+    "backPaddingPx": 0
+  },
+  "back": {
+    "path": "back.webp",
+    "hash": "94d6c1fba62113636a5e863d6feb2339fe748edef7cca86bd1c2c3082d36b0b5",
+    "bytes": 116058,
+    "mimeType": "image/webp"
+  },
+  "cards": {
+    "hearts-2": {
+      "path": "cards/hearts-2.svg",
+      "hash": "d038dfa533545f68ba2c85a651fa77db828a926c9458d774aec28aef03ee5d83",
+      "bytes": 3632,
+      "mimeType": "image/svg+xml"
+    },
+    "hearts-3": {
+      "path": "cards/hearts-3.svg",
+      "hash": "38879173f3ef8ce3f76f02c6b2646500808edd4cf919a0d2549747b63d5b4a96",
+      "bytes": 3792,
+      "mimeType": "image/svg+xml"
+    },
+    "hearts-4": {
+      "path": "cards/hearts-4.svg",
+      "hash": "5400bbbb272c6b23f56732aa1bb79d0112aeceb7f8abc698302e69efdf2d2b48",
+      "bytes": 3965,
+      "mimeType": "image/svg+xml"
+    },
+    "hearts-5": {
+      "path": "cards/hearts-5.svg",
+      "hash": "3a04237ae654ecce2cfa8dca82d22f006a073181fb5363079f29348467b24c43",
+      "bytes": 4827,
+      "mimeType": "image/svg+xml"
+    },
+    "hearts-6": {
+      "path": "cards/hearts-6.svg",
+      "hash": "c7a735e7e8f1fe3f4b0505e8455158cee3b607dcece054c5be38538fc9593286",
+      "bytes": 5398,
+      "mimeType": "image/svg+xml"
+    },
+    "hearts-7": {
+      "path": "cards/hearts-7.svg",
+      "hash": "3dc11848db9280f4b78b608f7924d0230f39ddc209b82689b13a7bd1322fa144",
+      "bytes": 5505,
+      "mimeType": "image/svg+xml"
+    },
+    "hearts-8": {
+      "path": "cards/hearts-8.svg",
+      "hash": "22db04be505b8c73445609dbf698f0ceff399e41f1e67dc556c82fe8b7a2afb8",
+      "bytes": 6225,
+      "mimeType": "image/svg+xml"
+    },
+    "hearts-9": {
+      "path": "cards/hearts-9.svg",
+      "hash": "4b015e0ac3f495592c3868af7f7b01a33aae47468c47bc2ba8801e8e718178ed",
+      "bytes": 6871,
+      "mimeType": "image/svg+xml"
+    },
+    "hearts-10": {
+      "path": "cards/hearts-10.svg",
+      "hash": "e3838c3fddc535ba233983bab8f9c5f9a5ed70c0dc5fb07a66e811cdf2eec2ff",
+      "bytes": 7148,
+      "mimeType": "image/svg+xml"
+    },
+    "hearts-J": {
+      "path": "cards/hearts-J.webp",
+      "hash": "447583cbb9b7aa0b22a1a73f5a8aac31ef3a99993c90442e6b130a9193d80466",
+      "bytes": 72782,
+      "mimeType": "image/webp"
+    },
+    "hearts-Q": {
+      "path": "cards/hearts-Q.webp",
+      "hash": "6a564d16410a6d68184ec45749b441ae17325cb18d7c8d4a3252b81257302af0",
+      "bytes": 69338,
+      "mimeType": "image/webp"
+    },
+    "hearts-K": {
+      "path": "cards/hearts-K.webp",
+      "hash": "91b681547914cb42b96de12210a0e429b4bac58d4af2ff79fff06814f3705ceb",
+      "bytes": 72890,
+      "mimeType": "image/webp"
+    },
+    "hearts-A": {
+      "path": "cards/hearts-A.svg",
+      "hash": "6faf0944f409f2520b053db82f19cb8e8e8b46ab469fa07598f620814651a591",
+      "bytes": 2508,
+      "mimeType": "image/svg+xml"
+    },
+    "diamonds-2": {
+      "path": "cards/diamonds-2.svg",
+      "hash": "fa7d2a1a8fa71c1f79b145229345fc60c60418040675fef8c47dddf464c2ec51",
+      "bytes": 2528,
+      "mimeType": "image/svg+xml"
+    },
+    "diamonds-3": {
+      "path": "cards/diamonds-3.svg",
+      "hash": "68c12e7237e339eff6d43e5f8df0e7468c84ce6f71a3edc67dfbde07cb12b730",
+      "bytes": 2411,
+      "mimeType": "image/svg+xml"
+    },
+    "diamonds-4": {
+      "path": "cards/diamonds-4.svg",
+      "hash": "fac9c35e38928f5db4ee32bb1a41b69b648ce0f45f8b58a23bff2f2ed0e8f33b",
+      "bytes": 2307,
+      "mimeType": "image/svg+xml"
+    },
+    "diamonds-5": {
+      "path": "cards/diamonds-5.svg",
+      "hash": "fc87ce8288a4b463afba2d43460e4d4a64a7d2eadb996276537aee244c8f197c",
+      "bytes": 2892,
+      "mimeType": "image/svg+xml"
+    },
+    "diamonds-6": {
+      "path": "cards/diamonds-6.svg",
+      "hash": "0a27561a3a46e9703e97cc743ba61b74f8a1d3a9202d469414d13a876ec2bb63",
+      "bytes": 3186,
+      "mimeType": "image/svg+xml"
+    },
+    "diamonds-7": {
+      "path": "cards/diamonds-7.svg",
+      "hash": "9df13e5c7f91408f1f8987e87ae782690a53dada7d7b8aea4d8b611b26bc02ee",
+      "bytes": 3016,
+      "mimeType": "image/svg+xml"
+    },
+    "diamonds-8": {
+      "path": "cards/diamonds-8.svg",
+      "hash": "13beac774230023f71b9a8491fe2bd33d37979c2d8c865b18fca6794d80ca644",
+      "bytes": 3460,
+      "mimeType": "image/svg+xml"
+    },
+    "diamonds-9": {
+      "path": "cards/diamonds-9.svg",
+      "hash": "5c15f4d91e5bba75d0275f81a555ce680a20999196bf02091f6fc0031af76dd7",
+      "bytes": 3830,
+      "mimeType": "image/svg+xml"
+    },
+    "diamonds-10": {
+      "path": "cards/diamonds-10.svg",
+      "hash": "a747bb7bb25883d2f060afd2ed48a815d44449687b065c7491d12cc981d2882f",
+      "bytes": 3831,
+      "mimeType": "image/svg+xml"
+    },
+    "diamonds-J": {
+      "path": "cards/diamonds-J.webp",
+      "hash": "02c1e218aeae764be56be2285413fa78944976d38dffd67c24fa2bff27c9b03f",
+      "bytes": 68028,
+      "mimeType": "image/webp"
+    },
+    "diamonds-Q": {
+      "path": "cards/diamonds-Q.webp",
+      "hash": "e6dea61c34cd7a3831ce4b8718da000f053f60c563a006937ad4dc940e2de597",
+      "bytes": 64062,
+      "mimeType": "image/webp"
+    },
+    "diamonds-K": {
+      "path": "cards/diamonds-K.webp",
+      "hash": "a8e6272c4c67272ba2766d3ed85f93a2348ca70d7c36e701d381e46e4de71e33",
+      "bytes": 67614,
+      "mimeType": "image/webp"
+    },
+    "diamonds-A": {
+      "path": "cards/diamonds-A.svg",
+      "hash": "bbd7cda0ea6fc201f13707d1562c2b2c4c064ca5ed836ed4d38b347dbea61b87",
+      "bytes": 1681,
+      "mimeType": "image/svg+xml"
+    },
+    "clubs-2": {
+      "path": "cards/clubs-2.svg",
+      "hash": "b923a8964553ec40f19be49baf721173f5a91cbf4c1c332fe5ca750e514e072a",
+      "bytes": 4898,
+      "mimeType": "image/svg+xml"
+    },
+    "clubs-3": {
+      "path": "cards/clubs-3.svg",
+      "hash": "6f7dbb2ecd246a46cb30b46764b3f61465649dff61dfe9b13f8fec15705a324c",
+      "bytes": 5246,
+      "mimeType": "image/svg+xml"
+    },
+    "clubs-4": {
+      "path": "cards/clubs-4.svg",
+      "hash": "810f4ce85a1867d9e54d17d5845cd4930d1c3728c52830c1e537a14a64ffa4d6",
+      "bytes": 5589,
+      "mimeType": "image/svg+xml"
+    },
+    "clubs-5": {
+      "path": "cards/clubs-5.svg",
+      "hash": "bc918967307dfc095abd00d15f153184ebbb7718eb86f2b22284b976aa1797b2",
+      "bytes": 6825,
+      "mimeType": "image/svg+xml"
+    },
+    "clubs-6": {
+      "path": "cards/clubs-6.svg",
+      "hash": "9ce7ba8202ee6034dae6b573db1443c94182fd8fc56a9fc862a16d3f4be67d61",
+      "bytes": 7960,
+      "mimeType": "image/svg+xml"
+    },
+    "clubs-7": {
+      "path": "cards/clubs-7.svg",
+      "hash": "9f9648f8e0f0628c1be82c771e763b4f20b51a7af12ed37804508af8a55fb4ff",
+      "bytes": 7961,
+      "mimeType": "image/svg+xml"
+    },
+    "clubs-8": {
+      "path": "cards/clubs-8.svg",
+      "hash": "80a490f0171c7eac88f042c43cc37f0b73590315d6e26063f5ebc9feb22a477b",
+      "bytes": 9609,
+      "mimeType": "image/svg+xml"
+    },
+    "clubs-9": {
+      "path": "cards/clubs-9.svg",
+      "hash": "084f6f68f43af9d523bef17c9cdfbd36992c2e7d84716394ebda6198f00ed468",
+      "bytes": 10309,
+      "mimeType": "image/svg+xml"
+    },
+    "clubs-10": {
+      "path": "cards/clubs-10.svg",
+      "hash": "6922c618b6403f09832943f8295122d13913ba2cc91b746167861d142c376960",
+      "bytes": 10715,
+      "mimeType": "image/svg+xml"
+    },
+    "clubs-J": {
+      "path": "cards/clubs-J.webp",
+      "hash": "b8daf8f5ffbae00dc870faee1077ed26ec01f6340fe8d43ef001e13687a7cd42",
+      "bytes": 67836,
+      "mimeType": "image/webp"
+    },
+    "clubs-Q": {
+      "path": "cards/clubs-Q.webp",
+      "hash": "f31c4d8c4cbb71947cb8b20ea47b49fa1066797efa1a6f41fbb3af549ef69b87",
+      "bytes": 67226,
+      "mimeType": "image/webp"
+    },
+    "clubs-K": {
+      "path": "cards/clubs-K.webp",
+      "hash": "a5bf96649f3e68aef834904a35e767a85b297ba8291c84b0de892f257c4736d3",
+      "bytes": 64102,
+      "mimeType": "image/webp"
+    },
+    "clubs-A": {
+      "path": "cards/clubs-A.svg",
+      "hash": "5cafe896268f55350ead31a998421a601deaed5b89ceb50f183ac99a9f6cf455",
+      "bytes": 3295,
+      "mimeType": "image/svg+xml"
+    },
+    "spades-2": {
+      "path": "cards/spades-2.svg",
+      "hash": "9206d6b3de7771deb6fa1ebbb6899018363bc81fd4c6c1f3100fb06dd4ed442b",
+      "bytes": 3955,
+      "mimeType": "image/svg+xml"
+    },
+    "spades-3": {
+      "path": "cards/spades-3.svg",
+      "hash": "fc29f77377c026c0f5d1ab88daea49d919fc7d9706a1d7018c20c15329afbb7e",
+      "bytes": 4061,
+      "mimeType": "image/svg+xml"
+    },
+    "spades-4": {
+      "path": "cards/spades-4.svg",
+      "hash": "68357f6768ea90249c9215c257a57cdc4f2230e42252334499f3e916e8da4fa7",
+      "bytes": 4158,
+      "mimeType": "image/svg+xml"
+    },
+    "spades-5": {
+      "path": "cards/spades-5.svg",
+      "hash": "2b4c0ae0aab6ca7634388ac0f3e3f05d24b18a273445abe23967aa4b4fc4f5ac",
+      "bytes": 5146,
+      "mimeType": "image/svg+xml"
+    },
+    "spades-6": {
+      "path": "cards/spades-6.svg",
+      "hash": "3462f247a321be3023cc77bc22fd090b36dfe65d34660119ad1d8b1cf5d63415",
+      "bytes": 6037,
+      "mimeType": "image/svg+xml"
+    },
+    "spades-7": {
+      "path": "cards/spades-7.svg",
+      "hash": "72a0e5729aab9c6b835113c74932fb35a6d625a3971c608e1fec5769f372753d",
+      "bytes": 5791,
+      "mimeType": "image/svg+xml"
+    },
+    "spades-8": {
+      "path": "cards/spades-8.svg",
+      "hash": "9ba455bdc45c40c0fc7b0a94b85f7ca601a693e9bbfe0c7d1ddcac83d1c1f2d7",
+      "bytes": 7196,
+      "mimeType": "image/svg+xml"
+    },
+    "spades-9": {
+      "path": "cards/spades-9.svg",
+      "hash": "4f54d002401c8b6d512c2e775cd98302f3cd2e9065019b76a0f349ad5ccb5a8c",
+      "bytes": 7662,
+      "mimeType": "image/svg+xml"
+    },
+    "spades-10": {
+      "path": "cards/spades-10.svg",
+      "hash": "decdddbfc7de541d0f272025e241d67f280e583e2d36cd3bffabdb5f959014fd",
+      "bytes": 7822,
+      "mimeType": "image/svg+xml"
+    },
+    "spades-J": {
+      "path": "cards/spades-J.webp",
+      "hash": "e16cf555a7eff76ca7c1cc92de811f6a1e4ef7e36e78b66917254d989206391e",
+      "bytes": 64016,
+      "mimeType": "image/webp"
+    },
+    "spades-Q": {
+      "path": "cards/spades-Q.webp",
+      "hash": "39bb2f36f4e825aa25cbaece1d23a272436348f55771b429fec004e65c03b9af",
+      "bytes": 64714,
+      "mimeType": "image/webp"
+    },
+    "spades-K": {
+      "path": "cards/spades-K.webp",
+      "hash": "968cdfdeb3919fd07e93a031040ddbc8d7d7d92fa2eeafb3165c84786aa1245a",
+      "bytes": 64258,
+      "mimeType": "image/webp"
+    },
+    "spades-A": {
+      "path": "cards/spades-A.webp",
+      "hash": "3d0bb5dbda21c5a9814eb8587e9c41ba38d20c7378029f10cd24c48a52165807",
+      "bytes": 15506,
+      "mimeType": "image/webp"
+    }
+  },
+  "jokers": {
+    "black": {
+      "path": "jokers/black.svg",
+      "hash": "d62f80bbfd88fcef71334c245de680880dd41e31334a94b1dae012afdddc09e7",
+      "bytes": 9277,
+      "mimeType": "image/svg+xml"
+    },
+    "red": {
+      "path": "jokers/red.svg",
+      "hash": "7b67cc2f949ccb15a6cb39ddd400a841d0d0b974b36c493c5be96ade1e949314",
+      "bytes": 4943,
+      "mimeType": "image/svg+xml"
+    }
+  },
+  "totalBytes": 1175770
+}

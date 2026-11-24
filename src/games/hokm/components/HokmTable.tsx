@@ -19,6 +19,11 @@ import { CardBackSvg } from './CardBackSvg';
 import { PersianCornerOrnament } from '../../../platform/theme/PersianPatterns';
 import { toPersianDigits } from '../../../platform/theme/tokens';
 import { PLATFORM_ASSETS } from '../../../platform/data/assets';
+import {
+  EYVAN_CLASSIC_DECK_ID,
+  resolveCardBackVisual,
+  useDeckRuntimeState,
+} from '../../../platform/decks';
 
 export interface FlyingDealCard {
   id: string;
@@ -55,6 +60,7 @@ interface HokmTableProps {
   collectingWinnerTeam: TeamId | null;
   playerName: string;
   tableSkinId?: string;
+  deckId?: string;
   reducedMotion: boolean;
   canHumanPlay: boolean;
   exitConfirmOpen: boolean;
@@ -204,7 +210,9 @@ const SeatProfile: React.FC<{
 const TeamTrickPile: React.FC<{
   count: number;
   team: TeamId;
-}> = ({ count, team }) => {
+  backBg?: string;
+  backBorder?: string;
+}> = ({ count, team, backBg = '#FFFFFF', backBorder = '#C9C4BA' }) => {
   if (count <= 0) return null;
   const visiblePackets = Math.min(count, 7);
 
@@ -222,8 +230,10 @@ const TeamTrickPile: React.FC<{
         {Array.from({ length: visiblePackets }).map((_, idx) => (
           <div
             key={idx}
-            className="absolute inset-0 rounded-[5px] bg-white p-[1.5px] border border-[#C9C4BA] shadow-[0_2px_6px_rgba(0,0,0,0.5)]"
+            className="absolute inset-0 rounded-[5px] p-[1.5px] border shadow-[0_2px_6px_rgba(0,0,0,0.5)]"
             style={{
+              backgroundColor: backBg,
+              borderColor: backBorder,
               transform: `translate(${idx * 2}px, ${-idx * 2.2}px) rotate(${
                 idx % 2 === 0 ? -4 + idx : 5 - idx
               }deg)`,
@@ -259,7 +269,16 @@ const HiddenHandFan: React.FC<{
   orientation: 'horizontal' | 'vertical';
   side?: 'north' | 'west' | 'east';
   isDesktop?: boolean;
-}> = ({ count, orientation, side = 'north', isDesktop = false }) => {
+  backBg?: string;
+  backBorder?: string;
+}> = ({
+  count,
+  orientation,
+  side = 'north',
+  isDesktop = false,
+  backBg = '#FFFFFF',
+  backBorder = '#D4CFC5',
+}) => {
   const displayCount = Math.min(count, 13);
 
   if (orientation === 'horizontal') {
@@ -292,8 +311,10 @@ const HiddenHandFan: React.FC<{
             return (
               <div
                 key={idx}
-                className="w-[92px] h-[130px] sm:w-[120px] sm:h-[168px] rounded-[9px] sm:rounded-[11px] bg-white p-[2.5px] sm:p-[3px] overflow-hidden shadow-[0_6px_18px_rgba(0,0,0,0.42)] border border-[#D4CFC5] shrink-0 transition-transform duration-200"
+                className="w-[92px] h-[130px] sm:w-[120px] sm:h-[168px] rounded-[9px] sm:rounded-[11px] p-[2.5px] sm:p-[3px] overflow-hidden shadow-[0_6px_18px_rgba(0,0,0,0.42)] border shrink-0 transition-transform duration-200"
                 style={{
+                  backgroundColor: backBg,
+                  borderColor: backBorder,
                   marginLeft: overlapMargin,
                   transform: `translateY(${arcY}px) rotate(${rot}deg)`,
                   zIndex: idx,
@@ -339,8 +360,10 @@ const HiddenHandFan: React.FC<{
           return (
             <div
               key={idx}
-              className="w-[130px] h-[92px] sm:w-[168px] sm:h-[120px] rounded-[9px] sm:rounded-[11px] bg-white p-[2.5px] sm:p-[3px] overflow-hidden shadow-[0_6px_16px_rgba(0,0,0,0.42)] border border-[#D4CFC5] shrink-0 flex items-center justify-center transition-transform duration-200"
+              className="w-[130px] h-[92px] sm:w-[168px] sm:h-[120px] rounded-[9px] sm:rounded-[11px] p-[2.5px] sm:p-[3px] overflow-hidden shadow-[0_6px_16px_rgba(0,0,0,0.42)] border shrink-0 flex items-center justify-center transition-transform duration-200"
               style={{
+                backgroundColor: backBg,
+                borderColor: backBorder,
                 marginTop: overlapMt,
                 transform: `translateX(${arcX}px) rotate(${rot}deg)`,
                 zIndex: idx,
@@ -885,6 +908,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
   collectingWinnerTeam,
   playerName,
   tableSkinId = 'tt-traditional',
+  deckId = EYVAN_CLASSIC_DECK_ID,
   reducedMotion,
   canHumanPlay,
   exitConfirmOpen,
@@ -901,6 +925,10 @@ export const HokmTable: React.FC<HokmTableProps> = ({
 }) => {
   const dropRingRef = useRef<HTMLDivElement | null>(null);
   const tableSkin = resolveTableSkinVisual(tableSkinId);
+  const deckRuntimeState = useDeckRuntimeState();
+  const backVisual = resolveCardBackVisual(deckRuntimeState);
+  const activeBackBg = backVisual.styleTokens.backBackground ?? '#FFFFFF';
+  const activeBackBorder = backVisual.styleTokens.backBorderColor ?? '#D4CFC5';
 
   // Measure South hand container width for silky-smooth dynamic card spacing as hand shrinks
   const handContainerRef = useRef<HTMLDivElement | null>(null);
@@ -1033,6 +1061,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
       className="min-h-[100dvh] w-full flex flex-col hokm-traditional-arena text-[#F6F3EC] relative overflow-clip select-none transform-gpu"
       data-testid="hokm-table"
       data-table-skin={tableSkinId}
+      data-deck-id={backVisual.deckId || deckId}
       data-phase={state.phase}
       data-turn={state.currentTurn}
     >
@@ -1137,6 +1166,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               count={visibleHandCounts.north}
               orientation="horizontal"
               isDesktop={handLayout.isDesktop}
+              backBg={activeBackBg}
+              backBorder={activeBackBorder}
             />
           </div>
           <div className="relative z-20">
@@ -1168,6 +1199,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               orientation="vertical"
               side="west"
               isDesktop={handLayout.isDesktop}
+              backBg={activeBackBg}
+              backBorder={activeBackBorder}
             />
           </div>
 
@@ -1178,6 +1211,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               orientation="vertical"
               side="east"
               isDesktop={handLayout.isDesktop}
+              backBg={activeBackBg}
+              backBorder={activeBackBorder}
             />
           </div>
 
@@ -1248,7 +1283,11 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                               }
                             : { duration: 0.22 }
                         }
-                        className="absolute inset-0 rounded-[8px] bg-white p-[2px] border border-[#D4CFC5] shadow-lg overflow-hidden"
+                        style={{
+                          backgroundColor: activeBackBg,
+                          borderColor: activeBackBorder,
+                        }}
+                        className="absolute inset-0 rounded-[8px] p-[2px] border shadow-lg overflow-hidden"
                       >
                         <div className="w-full h-full rounded-[6px] overflow-hidden">
                           <CardBackSvg />
@@ -1281,7 +1320,11 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                         duration: reducedMotion ? 0.05 : 0.29,
                         ease: [0.22, 1, 0.36, 1],
                       }}
-                      className="absolute w-[54px] h-[76px] rounded-[7px] bg-white p-[1.5px] border border-[#D4CFC5] shadow-lg overflow-hidden"
+                      style={{
+                        backgroundColor: activeBackBg,
+                        borderColor: activeBackBorder,
+                      }}
+                      className="absolute w-[54px] h-[76px] rounded-[7px] p-[1.5px] border shadow-lg overflow-hidden"
                     >
                       <div className="w-full h-full rounded-[5px] overflow-hidden">
                         <CardBackSvg />
@@ -1446,6 +1489,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                   <TeamTrickPile
                     count={state.trickCounts.opponentTeam}
                     team="opponentTeam"
+                    backBg={activeBackBg}
+                    backBorder={activeBackBorder}
                   />
                 </div>
               )}
@@ -1555,7 +1600,12 @@ export const HokmTable: React.FC<HokmTableProps> = ({
             {/* My Team Trick Pile anchored cleanly at bottom-left edge */}
             {state.trickCounts.myTeam > 0 && (
               <div className="pointer-events-none absolute left-2 sm:left-5 bottom-2 sm:bottom-4 z-30">
-                <TeamTrickPile count={state.trickCounts.myTeam} team="myTeam" />
+                <TeamTrickPile
+                  count={state.trickCounts.myTeam}
+                  team="myTeam"
+                  backBg={activeBackBg}
+                  backBorder={activeBackBorder}
+                />
               </div>
             )}
           </div>

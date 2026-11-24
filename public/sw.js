@@ -26,6 +26,7 @@ const APP_SHELL_URLS = [
 ];
 
 // Paths that MUST ALWAYS bypass the Service Worker completely
+// (includes `/decks/` and `/r2/decks/` so external card decks are stored solely in IndexedDB without double-caching)
 const BYPASS_PATH_PREFIXES = [
   '/api/',
   '/ws/',
@@ -34,6 +35,8 @@ const BYPASS_PATH_PREFIXES = [
   '/social/',
   '/rooms/',
   '/cdn-cgi/',
+  '/decks/',
+  '/r2/decks/',
   '/assets/aistudio/',
   '/@vite/',
   '/@react-refresh',
