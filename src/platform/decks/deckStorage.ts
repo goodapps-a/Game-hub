@@ -108,14 +108,33 @@ export class IndexedDBDeckBlobStore implements DeckBlobStore {
       const tx = db.transaction(storeName, mode);
       const store = tx.objectStore(storeName);
       const req = fn(store);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () =>
+      let settled = false;
+      let reqResult: T | undefined;
+      let hasResult = false;
+
+      const fail = () => {
+        if (settled) return;
+        settled = true;
         reject(
           new DeckSystemError(
             'STORAGE_UNAVAILABLE',
             'عملیات خواندن یا نوشتن حافظه آفلاین ناموفق بود.'
           )
         );
+      };
+
+      req.onsuccess = () => {
+        reqResult = req.result;
+        hasResult = true;
+      };
+      req.onerror = fail;
+      tx.onabort = fail;
+      tx.onerror = fail;
+      tx.oncomplete = () => {
+        if (settled) return;
+        settled = true;
+        resolve((hasResult ? reqResult : req.result) as T);
+      };
     });
   }
 
@@ -187,17 +206,27 @@ export class IndexedDBDeckBlobStore implements DeckBlobStore {
     return new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_ASSETS, 'readwrite');
       const store = tx.objectStore(STORE_ASSETS);
-      for (const asset of assets) {
-        store.put(asset);
-      }
-      tx.oncomplete = () => resolve();
-      tx.onerror = () =>
+      let settled = false;
+      const fail = () => {
+        if (settled) return;
+        settled = true;
         reject(
           new DeckSystemError(
             'STORAGE_QUOTA_EXCEEDED',
             'ذخیره‌سازی فایل‌های مجموعه در حافظه دستگاه با خطا مواجه شد.'
           )
         );
+      };
+      for (const asset of assets) {
+        store.put(asset);
+      }
+      tx.oncomplete = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      tx.onabort = fail;
+      tx.onerror = fail;
     });
   }
 
@@ -218,17 +247,27 @@ export class IndexedDBDeckBlobStore implements DeckBlobStore {
     return new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_ASSETS, 'readwrite');
       const store = tx.objectStore(STORE_ASSETS);
-      for (const ak of keysToDelete) {
-        store.delete(makeAssetCompositeKey(deckId, ak));
-      }
-      tx.oncomplete = () => resolve();
-      tx.onerror = () =>
+      let settled = false;
+      const fail = () => {
+        if (settled) return;
+        settled = true;
         reject(
           new DeckSystemError(
             'STORAGE_UNAVAILABLE',
             'خطا در حذف فایل‌های مجموعه.'
           )
         );
+      };
+      for (const ak of keysToDelete) {
+        store.delete(makeAssetCompositeKey(deckId, ak));
+      }
+      tx.oncomplete = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      tx.onabort = fail;
+      tx.onerror = fail;
     });
   }
 
@@ -743,8 +782,20 @@ export class DeckStorageManager {
       totalFiles,
     });
 
-    // 5. Commit newly downloaded blobs + complete manifest atomically
-    // NOTE: Only if all downloads succeeded do we persist the updated manifest as `complete: true`.
+    // 5. Commit newly downloaded blobs + complete manifest safely, preserving any valid prior version on write failure
+    let rollbackSnapshot: {
+      record: DeckInstallRecord;
+      assets: StoredDeckAsset[];
+    } | null = null;
+    if (existingRecord?.complete) {
+      try {
+        const prevAssets = await this.store.getAllAssetsForDeck(manifest.id);
+        rollbackSnapshot = { record: existingRecord, assets: prevAssets };
+      } catch {
+        rollbackSnapshot = null;
+      }
+    }
+
     try {
       await this.store.putAssetsBatch(stagedAssets);
 
@@ -769,6 +820,14 @@ export class DeckStorageManager {
       await this.store.putManifest(record);
       return record;
     } catch (err) {
+      if (rollbackSnapshot) {
+        try {
+          await this.store.putAssetsBatch(rollbackSnapshot.assets);
+          await this.store.putManifest(rollbackSnapshot.record);
+        } catch {
+          // Best-effort rollback
+        }
+      }
       if (err instanceof DeckSystemError) throw err;
       throw new DeckSystemError(
         'STORAGE_QUOTA_EXCEEDED',

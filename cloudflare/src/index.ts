@@ -23,7 +23,11 @@ import {
   ExecutionContextLike,
   ScheduledControllerLike,
 } from './lib/types';
-import { HokmRoomDO, INTERNAL_SESSION_TOKEN_HEADER } from './HokmRoomDO';
+import {
+  HokmRoomDO,
+  INTERNAL_SESSION_TOKEN_HEADER,
+  INTERNAL_VERIFIED_APPEARANCE_HEADER,
+} from './HokmRoomDO';
 import {
   CHAT_INTERNAL_ACTION_HEADER,
   CHAT_VERIFIED_CONVERSATION_HEADER,
@@ -81,6 +85,9 @@ import {
   listUserActiveDirectConversationIds,
 } from './lib/social/chatService';
 import { handleSocialHttpRequest } from './lib/social/httpHandler';
+import { handleItemsHttpRequest } from './lib/items/httpHandler';
+import { getPublicAppearanceForUser } from './lib/items/inventoryService';
+import { handlePaymentsHttpRequest } from './lib/payments/httpHandler';
 import { pruneExpiredGameInvitesBatched } from './lib/social/inviteService';
 import { pruneExpiredPresenceSessionsBatched } from './lib/social/socialService';
 import { RoomInviteCheckSummary } from './lib/social/types';
@@ -502,6 +509,41 @@ export default {
       if (socialRes) return socialRes;
     }
 
+    // 1d) Universal Shop Catalog, Inventory, Equip, Gift Lookup & Public Profile
+    if (
+      url.pathname.startsWith('/api/shop/') ||
+      url.pathname === '/api/inventory' ||
+      url.pathname.startsWith('/api/inventory/') ||
+      url.pathname === '/api/users/lookup' ||
+      /^\/api\/users\/[^/]+\/public-profile$/.test(url.pathname)
+    ) {
+      const itemsRes = await handleItemsHttpRequest(request, url.pathname, {
+        db: env.EYVAN_DB,
+        corsHeaders: cors,
+        originAllowed: isOriginAllowed(request, env),
+        shopTestMode: env.SHOP_TEST_MODE,
+      });
+      if (itemsRes) return itemsRes;
+    }
+
+    // 1e) Toman Coin/Gem Top-Up Payments (`/api/payments/*`)
+    if (url.pathname.startsWith('/api/payments/')) {
+      const publicAppBaseUrl = resolvePublicAppBaseUrl(
+        [env.PUBLIC_APP_URL, env.APP_URL, env.ALLOWED_ORIGINS],
+        request.url,
+        { isProduction: isWorkerProduction(request, env) }
+      );
+      const payRes = await handlePaymentsHttpRequest(request, url.pathname, {
+        db: env.EYVAN_DB,
+        corsHeaders: cors,
+        originAllowed: isOriginAllowed(request, env),
+        zarinpalMerchantId: env.ZARINPAL_MERCHANT_ID,
+        publicAppBaseUrl: publicAppBaseUrl ?? undefined,
+        shopTestMode: env.SHOP_TEST_MODE,
+      });
+      if (payRes) return payRes;
+    }
+
     // 2) R2 asset serving (card artwork, audio, avatars)
     if (url.pathname.startsWith('/r2/') && request.method === 'GET') {
       const key = url.pathname.slice(4);
@@ -857,6 +899,19 @@ export default {
         }
       }
 
+      let verifiedAppearanceHeader: string | null = null;
+      if (verifiedUser && env.EYVAN_DB) {
+        try {
+          const pubApp = await getPublicAppearanceForUser(
+            env.EYVAN_DB,
+            verifiedUser.userId
+          );
+          verifiedAppearanceHeader = JSON.stringify(pubApp);
+        } catch {
+          verifiedAppearanceHeader = null;
+        }
+      }
+
       let lastRes: Response | null = null;
       for (let attempt = 0; attempt < MAX_ROOM_CREATE_RETRIES; attempt++) {
         const code = generateShortRoomCode();
@@ -869,6 +924,10 @@ export default {
           forwardHeaders['X-Eyvan-Verified-User-Id'] = verifiedUser.userId;
           forwardHeaders['X-Eyvan-Verified-Username'] = verifiedUser.username;
           forwardHeaders['X-Eyvan-Verified-Avatar'] = verifiedUser.avatarCode;
+          if (verifiedAppearanceHeader) {
+            forwardHeaders[INTERNAL_VERIFIED_APPEARANCE_HEADER] =
+              verifiedAppearanceHeader;
+          }
         } else if (guestUserId) {
           forwardHeaders['X-Eyvan-Verified-User-Id'] = guestUserId;
         }
@@ -1019,6 +1078,19 @@ export default {
           }
         }
 
+        let verifiedAppearanceHeader: string | null = null;
+        if (verifiedUser && env.EYVAN_DB) {
+          try {
+            const pubApp = await getPublicAppearanceForUser(
+              env.EYVAN_DB,
+              verifiedUser.userId
+            );
+            verifiedAppearanceHeader = JSON.stringify(pubApp);
+          } catch {
+            verifiedAppearanceHeader = null;
+          }
+        }
+
         const forwardHeaders: Record<string, string> = {
           'Content-Type': 'application/json',
         };
@@ -1026,6 +1098,10 @@ export default {
           forwardHeaders['X-Eyvan-Verified-User-Id'] = verifiedUser.userId;
           forwardHeaders['X-Eyvan-Verified-Username'] = verifiedUser.username;
           forwardHeaders['X-Eyvan-Verified-Avatar'] = verifiedUser.avatarCode;
+          if (verifiedAppearanceHeader) {
+            forwardHeaders[INTERNAL_VERIFIED_APPEARANCE_HEADER] =
+              verifiedAppearanceHeader;
+          }
         } else if (guestUserId) {
           forwardHeaders['X-Eyvan-Verified-User-Id'] = guestUserId;
         }

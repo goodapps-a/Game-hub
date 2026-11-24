@@ -176,17 +176,19 @@ interface PlayingCardProps {
   isSelected?: boolean;
   isPlayable?: boolean;
   isWinningCard?: boolean;
+  deckId?: string;
+  cardBackId?: string;
   size?: 'xs' | 'sm' | 'md' | 'trick' | 'lg';
   className?: string;
 }
 
 const SIZE_CLASSES: Record<NonNullable<PlayingCardProps['size']>, string> = {
-  xs: 'w-9 h-[52px] rounded-[5px]',
-  sm: 'w-14 h-[78px] rounded-[7px]',
-  md: 'w-[92px] h-[130px] sm:w-[120px] sm:h-[168px] rounded-[9px] sm:rounded-[12px]',
+  xs: 'w-9 h-[52px] rounded-[4px]',
+  sm: 'w-14 h-[78px] rounded-[5px]',
+  md: 'w-[92px] h-[130px] sm:w-[120px] sm:h-[168px] rounded-[6px] sm:rounded-[8px]',
   trick:
-    'w-[82px] h-[116px] sm:w-[106px] sm:h-[150px] rounded-[9px] sm:rounded-[11px]',
-  lg: 'w-[108px] h-[152px] sm:w-[128px] sm:h-[180px] rounded-[10px] sm:rounded-[12px]',
+    'w-[82px] h-[116px] sm:w-[106px] sm:h-[150px] rounded-[6px] sm:rounded-[8px]',
+  lg: 'w-[108px] h-[152px] sm:w-[128px] sm:h-[180px] rounded-[7px] sm:rounded-[9px]',
 };
 
 export const PlayingCard: React.FC<PlayingCardProps> = React.memo(
@@ -196,29 +198,42 @@ export const PlayingCard: React.FC<PlayingCardProps> = React.memo(
     isSelected = false,
     isPlayable = true,
     isWinningCard = false,
+    deckId,
+    cardBackId,
     size = 'md',
     className = '',
   }) => {
-    const runtime = useDeckRuntimeState();
+    const runtime = useDeckRuntimeState(deckId);
     const sizeClass = SIZE_CLASSES[size];
 
     if (faceDown || !card) {
       const backVisual = resolveCardBackVisual(runtime);
       const backTokens = backVisual.styleTokens;
       const backPad = backTokens.backPaddingPx ?? 2;
+      const resolvedBackBg =
+        !backTokens.backBackground ||
+        backTokens.backBackground.toUpperCase() === '#FFFFFF'
+          ? '#EFECE3'
+          : backTokens.backBackground;
+      const resolvedBackBorder =
+        !backTokens.backBorderColor ||
+        backTokens.backBorderColor.toUpperCase() === '#D4CFC5'
+          ? '#C9C3B4'
+          : backTokens.backBorderColor;
       return (
         <div
           data-deck-id={backVisual.deckId}
+          data-card-back-id={cardBackId ?? undefined}
           style={{
-            backgroundColor: backTokens.backBackground ?? '#FFFFFF',
-            borderColor: backTokens.backBorderColor ?? '#D4CFC5',
+            backgroundColor: resolvedBackBg,
+            borderColor: resolvedBackBorder,
             padding: `${backPad}px`,
           }}
           className={`${sizeClass} relative select-none overflow-hidden shadow-[0_4px_12px_rgba(0,0,0,0.42)] border ${className}`}
           aria-hidden="true"
         >
           <div className="w-full h-full rounded-[inherit] overflow-hidden">
-            <CardBackSvg />
+            <CardBackSvg deckId={deckId} cardBackId={cardBackId} />
           </div>
         </div>
       );
@@ -242,6 +257,17 @@ export const PlayingCard: React.FC<PlayingCardProps> = React.memo(
     // Data-driven Multi-Deck image renderer (supports SVG, WebP, PNG & mixed formats)
     if (faceVisual.mode === 'image') {
       const tokens = faceVisual.styleTokens;
+      const isWhiteCardStock =
+        !tokens.cardBackground ||
+        tokens.cardBackground.toUpperCase() === '#FFFFFF';
+      const resolvedCardBg = isWhiteCardStock
+        ? '#F3EFE4'
+        : tokens.cardBackground;
+      const resolvedBorderColor =
+        !tokens.cardBorderColor ||
+        tokens.cardBorderColor.toUpperCase() === '#CFCBC2'
+          ? '#C9C3B4'
+          : tokens.cardBorderColor;
       return (
         <div
           dir="ltr"
@@ -249,9 +275,9 @@ export const PlayingCard: React.FC<PlayingCardProps> = React.memo(
           data-card-id={card.id}
           data-deck-id={faceVisual.deckId}
           style={{
-            backgroundColor: tokens.cardBackground,
+            backgroundColor: resolvedCardBg,
             borderColor:
-              isWinningCard || isSelected ? undefined : tokens.cardBorderColor,
+              isWinningCard || isSelected ? undefined : resolvedBorderColor,
             padding: tokens.imagePaddingPx
               ? `${tokens.imagePaddingPx}px`
               : undefined,
@@ -264,9 +290,15 @@ export const PlayingCard: React.FC<PlayingCardProps> = React.memo(
             !isPlayable && !tokens.unplayableFilter ? unplayableClass : ''
           } ${className}`}
         >
+          {isWhiteCardStock && (
+            <div
+              className="absolute inset-0 pointer-events-none bg-[#F3EFE4] mix-blend-multiply z-[5]"
+              aria-hidden="true"
+            />
+          )}
           {tokens.cardInnerFrame !== false && (
             <div
-              className="absolute inset-0 pointer-events-none rounded-[inherit] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.04)] z-10"
+              className="absolute inset-0 pointer-events-none rounded-[inherit] shadow-[inset_0_0_0_1px_rgba(32,26,18,0.06)] z-10"
               aria-hidden="true"
             />
           )}
@@ -305,17 +337,17 @@ export const PlayingCard: React.FC<PlayingCardProps> = React.memo(
         aria-label={label}
         data-card-id={card.id}
         data-deck-id={faceVisual.deckId}
-        className={`${sizeClass} relative bg-[#FFFFFF] border select-none overflow-hidden transform-gpu transition-[filter,box-shadow] duration-200 ${
+        className={`${sizeClass} relative bg-[#F3EFE4] border select-none overflow-hidden transform-gpu transition-[filter,box-shadow] duration-200 ${
           isWinningCard
             ? 'border-[#E8C268] ring-[2.5px] ring-[#F3D179] shadow-[0_0_24px_rgba(243,209,121,0.72),0_8px_20px_rgba(0,0,0,0.45)]'
             : isSelected
               ? 'border-[#E8C268] ring-2 ring-[#F3D179]/85 shadow-[0_14px_28px_rgba(0,0,0,0.52)]'
-              : 'border-[#CFCBC2] shadow-[0_4px_14px_rgba(0,0,0,0.38)]'
+              : 'border-[#C9C3B4] shadow-[0_4px_14px_rgba(0,0,0,0.38)]'
         } ${unplayableClass} ${className}`}
       >
-        {/* Subtle real poker-stock inner edge sheen */}
+        {/* Subtle matte linen paper rim */}
         <div
-          className="absolute inset-0 pointer-events-none rounded-[inherit] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.04)]"
+          className="absolute inset-0 pointer-events-none rounded-[inherit] shadow-[inset_0_0_0_1px_rgba(32,26,18,0.06)]"
           aria-hidden="true"
         />
 
@@ -366,7 +398,7 @@ export const PlayingCard: React.FC<PlayingCardProps> = React.memo(
             )}
           </div>
         ) : isCourt && courtArt ? (
-          <div className="absolute inset-y-[9px] inset-x-[18px] sm:inset-y-[12px] sm:inset-x-[24px] rounded-[2px] border border-[#2A3342]/45 bg-white overflow-hidden pointer-events-none">
+          <div className="absolute inset-y-[9px] inset-x-[18px] sm:inset-y-[12px] sm:inset-x-[24px] rounded-[2px] border border-[#2A3342]/45 bg-[#F3EFE4] overflow-hidden pointer-events-none">
             <img
               src={courtArt.src}
               alt=""
@@ -378,14 +410,14 @@ export const PlayingCard: React.FC<PlayingCardProps> = React.memo(
             />
             {!courtArt.hasBuiltInCornerPips && (
               <>
-                <div className="absolute top-[2px] left-[2px] sm:top-[3px] sm:left-[3px] bg-white/85 rounded-full p-[1px]">
+                <div className="absolute top-[2px] left-[2px] sm:top-[3px] sm:left-[3px] bg-[#F3EFE4]/90 rounded-full p-[1px]">
                   <SuitIconSvg
                     suit={card.suit}
                     colorOverride={inkColor}
                     className="w-[9px] h-[9px] sm:w-[12px] sm:h-[12px]"
                   />
                 </div>
-                <div className="absolute bottom-[2px] right-[2px] sm:bottom-[3px] sm:right-[3px] bg-white/85 rounded-full p-[1px] rotate-180">
+                <div className="absolute bottom-[2px] right-[2px] sm:bottom-[3px] sm:right-[3px] bg-[#F3EFE4]/90 rounded-full p-[1px] rotate-180">
                   <SuitIconSvg
                     suit={card.suit}
                     colorOverride={inkColor}

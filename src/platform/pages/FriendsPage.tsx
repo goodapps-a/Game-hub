@@ -12,6 +12,7 @@ import {
   MessageSquare,
   RefreshCw,
   Search,
+  Send,
   Shield,
   ShieldOff,
   UserCheck,
@@ -22,6 +23,7 @@ import {
   X,
 } from 'lucide-react';
 import { AuthUserSummary } from '../auth/authClient';
+import { createOnlineRoom } from '../../games/hokm/online/client';
 import { PrivateChatPanel } from '../components/PrivateChatPanel';
 import {
   EyvanBotAvatar,
@@ -32,46 +34,63 @@ import {
   getEyvanBotUnreadCount,
 } from '../social/eyvanBot';
 import { ProfileAvatar } from '../components/TopBar';
+import {
+  FramedPlayerAvatar,
+  PlayerBadgeInline,
+  PlayerBannerStage,
+} from '../components/profile/PlayerAppearanceParts';
+import {
+  PublicUserProfileResponse,
+  fetchPublicUserProfileRequest,
+} from '../items/inventoryClient';
 import { toPersianDigits } from '../theme/tokens';
 import { UserProfile } from '../types/platform';
 import {
   BlockedUserItem,
   ChatConversationItem,
+  FriendGroupSummary,
   FriendListItem,
   FriendRequestItem,
   GameInviteItem,
+  GroupMessageItem,
   SocialPrivacySettings,
   SocialUserSummary,
   acceptFriendRequestApi,
   acceptGameInviteApi,
+  addFriendToGroupApi,
   blockUserApi,
   cancelFriendRequestApi,
+  createFriendGroupApi,
   declineGameInviteApi,
   fetchBlockedUsersRequest,
   fetchChatConversationsRequest,
+  fetchFriendGroupsRequest,
   fetchFriendRequestsRequest,
   fetchFriendsPresenceRequest,
   fetchFriendsRequest,
   fetchGameInvitesRequest,
+  fetchGroupMessagesRequest,
   fetchSocialPrivacyRequest,
   openDirectConversationApi,
   rejectFriendRequestApi,
   removeFriendApi,
   searchSocialUsersRequest,
   sendFriendRequestApi,
+  sendGroupMessageApi,
   unblockUserApi,
   updateSocialPrivacyRequest,
 } from '../social/socialClient';
 
+export type SocialSubTab = 'friends' | 'groups' | 'incoming' | 'outgoing' | 'blocked';
+
 interface FriendsPageProps {
   authUser: AuthUserSummary | null;
   authLoading: boolean;
+  initialTab?: SocialSubTab;
   onOpenAccount: () => void;
   onJoinInvitedRoom?: (roomCode: string) => void;
   onBack?: () => void;
 }
-
-type SocialSubTab = 'friends' | 'incoming' | 'outgoing' | 'blocked';
 
 const PRESENCE_POLL_INTERVAL_MS = 20_000;
 const SEARCH_PAGE_SIZE = 15;
@@ -92,14 +111,28 @@ function toValidAvatarCode(code: string): UserProfile['avatarCode'] {
 export const FriendsPage: React.FC<FriendsPageProps> = ({
   authUser,
   authLoading,
+  initialTab = 'friends',
   onOpenAccount,
   onJoinInvitedRoom,
   onBack,
 }) => {
-  const [activeTab, setActiveTab] = useState<SocialSubTab>('friends');
+  const [activeTab, setActiveTab] = useState<SocialSubTab>(initialTab);
+
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
 
   // Server-backed social data
   const [friends, setFriends] = useState<FriendListItem[]>([]);
+  const [groups, setGroups] = useState<FriendGroupSummary[]>([]);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [groupMessages, setGroupMessages] = useState<GroupMessageItem[]>([]);
+  const [groupMessagesLoading, setGroupMessagesLoading] = useState(false);
+  const [newGroupName, setNewGroupName] = useState('');
+  const [newGroupMemberIds, setNewGroupMemberIds] = useState<string[]>([]);
+  const [showCreateGroupForm, setShowCreateGroupForm] = useState(false);
+  const [groupDraft, setGroupDraft] = useState('');
+  const [addMemberUserId, setAddMemberUserId] = useState('');
   const [incoming, setIncoming] = useState<FriendRequestItem[]>([]);
   const [outgoing, setOutgoing] = useState<FriendRequestItem[]>([]);
   const [blockedUsers, setBlockedUsers] = useState<BlockedUserItem[]>([]);
@@ -141,8 +174,36 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
     text: string;
   } | null>(null);
 
+  const [publicProfileModal, setPublicProfileModal] = useState<{
+    loading: boolean;
+    profile: NonNullable<PublicUserProfileResponse['profile']> | null;
+    error: string | null;
+  } | null>(null);
+
   const feedbackTimerRef = useRef<number | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
+
+  const handleOpenPublicProfile = useCallback(async (userId: string) => {
+    setPublicProfileModal({ loading: true, profile: null, error: null });
+    try {
+      const res = await fetchPublicUserProfileRequest(userId);
+      if (res.ok && res.profile) {
+        setPublicProfileModal({ loading: false, profile: res.profile, error: null });
+      } else {
+        setPublicProfileModal({
+          loading: false,
+          profile: null,
+          error: res.message ?? 'پروفایل بازیکن در دسترس نیست.',
+        });
+      }
+    } catch {
+      setPublicProfileModal({
+        loading: false,
+        profile: null,
+        error: 'خطا در دریافت پروفایل بازیکن.',
+      });
+    }
+  }, []);
 
   const showToast = useCallback((type: 'success' | 'error', text: string) => {
     setFeedback({ type, text });
@@ -175,6 +236,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
         blocksRes,
         convsRes,
         invitesRes,
+        groupsRes,
       ] = await Promise.all([
         fetchFriendsRequest(),
         fetchFriendRequestsRequest(),
@@ -182,6 +244,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
         fetchBlockedUsersRequest(),
         fetchChatConversationsRequest(),
         fetchGameInvitesRequest(),
+        fetchFriendGroupsRequest(),
       ]);
 
       if (friendsRes.ok && Array.isArray(friendsRes.friends)) {
@@ -203,6 +266,14 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
       if (invitesRes.ok && Array.isArray(invitesRes.incoming)) {
         setIncomingInvites(invitesRes.incoming);
       }
+      if (groupsRes.ok && Array.isArray(groupsRes.groups)) {
+        setGroups(groupsRes.groups);
+        setSelectedGroupId((prev) =>
+          prev && groupsRes.groups!.some((g) => g.groupId === prev)
+            ? prev
+            : groupsRes.groups![0]?.groupId ?? null
+        );
+      }
     } catch {
       if (!silent) {
         showToast('error', 'خطا در دریافت اطلاعات بخش دوستان از سرور.');
@@ -212,6 +283,20 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
       setRefreshing(false);
     }
   }, [showToast]);
+
+  const loadSelectedGroupMessages = useCallback(async (groupId: string) => {
+    setGroupMessagesLoading(true);
+    try {
+      const res = await fetchGroupMessagesRequest(groupId, 40);
+      if (res.ok && Array.isArray(res.messages)) {
+        setGroupMessages(res.messages);
+      }
+    } catch {
+      // Non-fatal
+    } finally {
+      setGroupMessagesLoading(false);
+    }
+  }, []);
 
   const refreshConversationsOnly = useCallback(async () => {
     try {
@@ -228,6 +313,9 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
   useEffect(() => {
     if (!authUser) {
       setFriends([]);
+      setGroups([]);
+      setSelectedGroupId(null);
+      setGroupMessages([]);
       setIncoming([]);
       setOutgoing([]);
       setBlockedUsers([]);
@@ -245,6 +333,11 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
     }
     void loadSocialSnapshot(false);
   }, [authUser, loadSocialSnapshot]);
+
+  useEffect(() => {
+    if (!authUser || activeTab !== 'groups' || !selectedGroupId) return;
+    void loadSelectedGroupMessages(selectedGroupId);
+  }, [authUser, activeTab, selectedGroupId, loadSelectedGroupMessages]);
 
   // Lightweight live presence, invites & chat unread polling while viewing Friends tab
   useEffect(() => {
@@ -582,6 +675,126 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
       setBusyKey(null);
     }
   };
+
+  const handleCreateGroup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = newGroupName.trim();
+    if (trimmed.length < 2) {
+      showToast('error', 'نام گروه باید حداقل ۲ کاراکتر باشد.');
+      return;
+    }
+    setBusyKey('group:create');
+    try {
+      const res = await createFriendGroupApi(trimmed, newGroupMemberIds);
+      if (!res.ok || !res.group) {
+        showToast('error', res.message ?? 'ساخت گروه انجام نشد.');
+        return;
+      }
+      setNewGroupName('');
+      setNewGroupMemberIds([]);
+      setShowCreateGroupForm(false);
+      setSelectedGroupId(res.group.groupId);
+      showToast('success', `گروه «${res.group.name}» ساخته شد.`);
+      await loadSocialSnapshot(true);
+      await loadSelectedGroupMessages(res.group.groupId);
+    } catch {
+      showToast('error', 'خطا در ایجاد گروه دوستان.');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleAddMemberToGroup = async () => {
+    if (!selectedGroupId || !addMemberUserId) return;
+    setBusyKey(`group:add:${addMemberUserId}`);
+    try {
+      const res = await addFriendToGroupApi(selectedGroupId, addMemberUserId);
+      if (!res.ok) {
+        showToast('error', res.message ?? 'افزودن عضو به گروه انجام نشد.');
+        return;
+      }
+      setAddMemberUserId('');
+      showToast('success', 'دوست انتخاب‌شده به گروه اضافه شد.');
+      await loadSocialSnapshot(true);
+    } catch {
+      showToast('error', 'خطا در افزودن عضو به گروه.');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleSendGroupMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedGroupId) return;
+    const trimmed = groupDraft.trim();
+    if (!trimmed) return;
+    setBusyKey('group:send');
+    try {
+      const res = await sendGroupMessageApi(selectedGroupId, {
+        kind: 'text',
+        body: trimmed,
+        clientMsgId: `gmsg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      });
+      if (!res.ok) {
+        showToast(
+          'error',
+          typeof res.message === 'string' ? res.message : 'ارسال پیام به گروه انجام نشد.'
+        );
+        return;
+      }
+      setGroupDraft('');
+      await loadSelectedGroupMessages(selectedGroupId);
+      await loadSocialSnapshot(true);
+    } catch {
+      showToast('error', 'خطا در ارسال پیام به گروه.');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleSendHokmGroupInvite = async () => {
+    if (!selectedGroupId || !authUser) return;
+    setBusyKey('group:hokm-invite');
+    try {
+      const created = await createOnlineRoom({
+        username: authUser.username,
+        avatarCode: authUser.avatarCode || 'portrait',
+        isPublic: false,
+        targetMatchScore: 3,
+      });
+      const res = await sendGroupMessageApi(selectedGroupId, {
+        kind: 'game_invite',
+        gameId: 'hokm',
+        roomCode: created.roomCode,
+        body: `دعوت به بازی حکم ۴ نفره · اتاق ${created.roomCode}`,
+        clientMsgId: `ginv_${Date.now().toString(36)}`,
+      });
+      if (!res.ok) {
+        showToast(
+          'error',
+          typeof res.message === 'string'
+            ? res.message
+            : 'ارسال دعوت حکم به گروه انجام نشد.'
+        );
+        return;
+      }
+      showToast('success', `دعوت بازی حکم ۴ نفره با کد ${created.roomCode} در گروه ارسال شد.`);
+      await loadSelectedGroupMessages(selectedGroupId);
+      await loadSocialSnapshot(true);
+    } catch (err) {
+      showToast(
+        'error',
+        err instanceof Error ? err.message : 'ساخت میز حکم برای گروه ناموفق بود.'
+      );
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const selectedGroup = useMemo(
+    () => groups.find((g) => g.groupId === selectedGroupId) ?? groups[0] ?? null,
+    [groups, selectedGroupId]
+  );
 
   const handleTogglePrivacyField = async (
     field: 'showOnlineStatus' | 'allowFriendRequests'
@@ -1015,6 +1228,10 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
             void refreshConversationsOnly();
           }}
           onConversationActivity={refreshConversationsOnly}
+          onOpenFriendGroups={() => {
+            setActiveConversation(null);
+            setActiveTab('groups');
+          }}
         />
       )}
 
@@ -1154,9 +1371,11 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                     >
                       <div className="flex items-center gap-3 min-w-0">
                         <div className="relative shrink-0">
-                          <ProfileAvatar
+                          <FramedPlayerAvatar
                             avatarCode={toValidAvatarCode(user.avatarCode)}
                             username={user.username}
+                            customAvatarUrl={user.avatarUrl}
+                            avatarFrameId={user.appearance?.avatarFrameId}
                             size="sm"
                           />
                           {user.relationshipStatus === 'friend' && (
@@ -1170,11 +1389,22 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                           )}
                         </div>
                         <div className="min-w-0">
-                          <div
-                            dir="ltr"
-                            className="text-sm font-extrabold theme-heading truncate text-right"
-                          >
-                            {user.username}
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span
+                              dir="ltr"
+                              className="text-sm font-extrabold theme-heading truncate text-right"
+                            >
+                              {user.username}
+                            </span>
+                            {user.accountCode && (
+                              <span
+                                dir="ltr"
+                                className="text-[10px] font-mono theme-muted shrink-0"
+                              >
+                                #{user.accountCode}
+                              </span>
+                            )}
+                            <PlayerBadgeInline badgeId={user.appearance?.badgeId} />
                           </div>
                           <div className="text-[11px] theme-muted mt-0.5">
                             {user.relationshipStatus === 'friend'
@@ -1277,12 +1507,12 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
         )}
       </section>
 
-      {/* 4-Tab Switcher: دوستان | دریافتی | ارسالی | مسدودشده‌ها */}
+      {/* 5-Tab Switcher: دوستان | گروه‌ها | دریافتی | ارسالی | مسدودشده‌ها */}
       <section className="eyvan-card rounded-xl p-1" data-testid="friends-tabs-card">
         <div
           role="tablist"
           aria-label="بخش‌های دوستان"
-          className="grid grid-cols-2 sm:grid-cols-4 gap-1 p-0.5 theme-tab-track rounded-lg border"
+          className="grid grid-cols-2 sm:grid-cols-5 gap-1 p-0.5 theme-tab-track rounded-lg border"
         >
           <button
             type="button"
@@ -1301,6 +1531,27 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
             <span className="text-[11px] opacity-85 tabular-nums">
               ({toPersianDigits(friends.length)})
             </span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'groups'}
+            data-testid="social-tab-groups"
+            onClick={() => setActiveTab('groups')}
+            className={`min-h-[40px] rounded-md text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'groups'
+                ? 'bg-gradient-to-b from-[#F3D179] to-[#C89B3C] text-[#0B1628] shadow-xs'
+                : 'theme-muted'
+            }`}
+          >
+            <MessageSquare className="w-3.5 h-3.5 shrink-0" />
+            <span>گروه‌ها</span>
+            {groups.length > 0 && (
+              <span className="text-[11px] opacity-85 tabular-nums">
+                ({toPersianDigits(groups.length)})
+              </span>
+            )}
           </button>
 
           <button
@@ -1381,6 +1632,297 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
             <Loader2 className="w-5 h-5 animate-spin theme-accent-teal" />
             <span>در حال بارگذاری اطلاعات...</span>
           </div>
+        ) : activeTab === 'groups' ? (
+          <div data-testid="friends-groups-panel" className="p-4 space-y-4">
+            {/* Groups Header + Create Group Toggle */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-black theme-heading">
+                  گروه‌های دوستان و دعوت حکم ۴ نفره
+                </h2>
+                <p className="text-[11px] theme-muted mt-0.5">
+                  دوستان خود را در یک گروه جمع کنید و با یک کلیک میز حکم ۴ نفره بسازید.
+                </p>
+              </div>
+              <button
+                type="button"
+                data-testid="toggle-create-group-btn"
+                onClick={() => setShowCreateGroupForm((p) => !p)}
+                className="min-h-[38px] px-3.5 rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89634] text-[#0B1628] text-xs font-black inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Users className="w-3.5 h-3.5 shrink-0" />
+                <span>{showCreateGroupForm ? 'بستن فرم' : 'ساخت گروه جدید'}</span>
+              </button>
+            </div>
+
+            {showCreateGroupForm && (
+              <form
+                onSubmit={(e) => void handleCreateGroup(e)}
+                data-testid="group-create-form"
+                className="rounded-xl theme-subcard border p-3.5 space-y-3"
+              >
+                <input
+                  type="text"
+                  value={newGroupName}
+                  onChange={(e) => setNewGroupName(e.target.value)}
+                  maxLength={40}
+                  placeholder="نام گروه (مثلاً دورهمی شبانه حکم)"
+                  data-testid="group-name-input"
+                  className="w-full min-h-[40px] px-3 rounded-xl theme-input border text-xs font-bold focus:outline-none focus:border-[#0D8A8A]"
+                />
+
+                {friends.length > 0 && (
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] font-bold theme-muted">
+                      انتخاب اعضای اولیه از دوستان تأییدشده:
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {friends.map((f) => {
+                        const checked = newGroupMemberIds.includes(f.userId);
+                        return (
+                          <button
+                            key={f.userId}
+                            type="button"
+                            onClick={() =>
+                              setNewGroupMemberIds((prev) =>
+                                checked
+                                  ? prev.filter((id) => id !== f.userId)
+                                  : [...prev, f.userId]
+                              )
+                            }
+                            className={`min-h-[30px] px-2.5 rounded-lg border text-[11px] font-bold cursor-pointer transition-colors ${
+                              checked
+                                ? 'bg-[#0D8A8A] border-[#2DD4BF] text-white'
+                                : 'theme-btn-secondary'
+                            }`}
+                          >
+                            {f.username}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={busyKey === 'group:create'}
+                  data-testid="group-create-submit-btn"
+                  className="min-h-[38px] px-4 rounded-xl bg-[#0D8A8A] hover:bg-[#11A3A3] disabled:opacity-55 text-white text-xs font-black cursor-pointer"
+                >
+                  {busyKey === 'group:create' ? 'در حال ساخت...' : 'ایجاد گروه'}
+                </button>
+              </form>
+            )}
+
+            {groups.length === 0 ? (
+              <div
+                data-testid="groups-empty-state"
+                className="rounded-xl theme-subcard border p-6 text-center space-y-1.5"
+              >
+                <p className="text-xs font-extrabold theme-heading">
+                  هنوز در هیچ گروهی عضو نیستید.
+                </p>
+                <p className="text-[11px] theme-muted">
+                  یک گروه بسازید، دوستانتان را اضافه کنید و دعوت بازی حکم ۴ نفره بفرستید.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {/* Group Switcher List */}
+                <div className="flex flex-wrap gap-2">
+                  {groups.map((grp) => {
+                    const active = selectedGroup?.groupId === grp.groupId;
+                    return (
+                      <button
+                        key={grp.groupId}
+                        type="button"
+                        data-testid={`group-select-${grp.groupId}`}
+                        onClick={() => setSelectedGroupId(grp.groupId)}
+                        className={`min-h-[38px] px-3 rounded-xl border text-xs font-extrabold inline-flex items-center gap-2 cursor-pointer transition-all ${
+                          active
+                            ? 'bg-[#0D8A8A]/20 border-[#0D8A8A] theme-heading'
+                            : 'theme-subcard hover:border-[var(--eyvan-gold-border)]'
+                        }`}
+                      >
+                        <span>{grp.name}</span>
+                        <span className="text-[10px] theme-muted tabular-nums">
+                          ({toPersianDigits(grp.memberCount)} عضو)
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Selected Group Chat & Hokm 4-Player Invite Area */}
+                {selectedGroup && (
+                  <div
+                    data-testid="active-group-panel"
+                    className="rounded-2xl theme-subcard border border-[var(--eyvan-line)] overflow-hidden"
+                  >
+                    <div className="px-3.5 py-2.5 border-b border-[var(--eyvan-line)] flex flex-wrap items-center justify-between gap-2 bg-black/10">
+                      <div className="min-w-0">
+                        <div className="text-xs sm:text-sm font-black theme-heading truncate">
+                          {selectedGroup.name}
+                        </div>
+                        <div className="text-[11px] theme-muted truncate">
+                          اعضا:{' '}
+                          {selectedGroup.members
+                            .map((m) =>
+                              m.accountCode
+                                ? `${m.username} (#${m.accountCode})`
+                                : m.username
+                            )
+                            .join('، ')}
+                        </div>
+                      </div>
+
+                      {friends.filter(
+                        (f) => !selectedGroup.members.some((m) => m.userId === f.userId)
+                      ).length > 0 && (
+                        <div className="flex items-center gap-1.5">
+                          <select
+                            value={addMemberUserId}
+                            onChange={(e) => setAddMemberUserId(e.target.value)}
+                            aria-label="افزودن دوست به گروه"
+                            data-testid="group-add-member-select"
+                            className="min-h-[32px] px-2 rounded-lg theme-input border text-[11px] font-bold"
+                          >
+                            <option value="">افزودن دوست...</option>
+                            {friends
+                              .filter(
+                                (f) =>
+                                  !selectedGroup.members.some(
+                                    (m) => m.userId === f.userId
+                                  )
+                              )
+                              .map((f) => (
+                                <option key={f.userId} value={f.userId}>
+                                  {f.username}
+                                </option>
+                              ))}
+                          </select>
+                          <button
+                            type="button"
+                            disabled={!addMemberUserId}
+                            data-testid="group-add-member-btn"
+                            onClick={() => void handleAddMemberToGroup()}
+                            className="min-h-[32px] px-2.5 rounded-lg bg-[#0D8A8A] disabled:opacity-50 text-white text-[11px] font-extrabold cursor-pointer"
+                          >
+                            افزودن
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Group Messages List */}
+                    <div
+                      data-testid="group-messages-list"
+                      className="min-h-[200px] max-h-[320px] overflow-y-auto p-3 space-y-2.5"
+                    >
+                      {groupMessagesLoading ? (
+                        <div className="py-10 flex items-center justify-center gap-2 text-xs theme-muted">
+                          <Loader2 className="w-4 h-4 animate-spin theme-accent-teal" />
+                          <span>در حال دریافت پیام‌های گروه...</span>
+                        </div>
+                      ) : groupMessages.length === 0 ? (
+                        <div className="py-10 text-center text-xs theme-muted">
+                          هنوز پیامی در این گروه ثبت نشده است.
+                        </div>
+                      ) : (
+                        groupMessages.map((msg) => {
+                          const isMine = msg.senderId === authUser.userId;
+                          return (
+                            <div
+                              key={msg.messageId}
+                              className={`flex ${isMine ? 'justify-start' : 'justify-end'}`}
+                            >
+                              <div
+                                className={`max-w-[85%] rounded-2xl px-3 py-2 text-xs border space-y-1.5 ${
+                                  msg.kind === 'game_invite'
+                                    ? 'bg-[#D4AE58]/16 border-[#D4AE58]/55 theme-heading'
+                                    : isMine
+                                      ? 'bg-[#0D8A8A]/20 border-[#0D8A8A]/45 theme-heading'
+                                      : 'eyvan-card theme-heading'
+                                }`}
+                              >
+                                <div
+                                  dir="ltr"
+                                  className="text-[10px] font-extrabold theme-accent-teal"
+                                >
+                                  {msg.senderUsername}
+                                </div>
+                                <div>{msg.body}</div>
+                                {msg.kind === 'game_invite' && msg.roomCode && (
+                                  <div className="pt-1 flex items-center justify-between gap-2 border-t border-[var(--eyvan-line)]">
+                                    <span className="text-[10px] font-mono font-bold theme-accent-gold">
+                                      کد میز: {msg.roomCode}
+                                    </span>
+                                    {onJoinInvitedRoom && (
+                                      <button
+                                        type="button"
+                                        data-testid={`group-join-room-${msg.roomCode}`}
+                                        onClick={() => onJoinInvitedRoom(msg.roomCode!)}
+                                        className="min-h-[30px] px-3 rounded-lg bg-gradient-to-b from-[#F3D179] to-[#C89B3C] text-[#0B1628] text-[11px] font-black cursor-pointer"
+                                      >
+                                        ورود به میز
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+
+                    {/* Hokm 4-Player Group Invite Bar + Group Composer */}
+                    <div className="p-3 border-t border-[var(--eyvan-line)] bg-black/10 space-y-2">
+                      <button
+                        type="button"
+                        disabled={busyKey === 'group:hokm-invite'}
+                        data-testid="group-send-hokm-invite-btn"
+                        onClick={() => void handleSendHokmGroupInvite()}
+                        className="w-full min-h-[38px] px-3 rounded-xl bg-gradient-to-b from-[#F5D98E] to-[#C89634] hover:brightness-105 disabled:opacity-55 text-[#0B1628] text-xs font-black inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Gamepad2 className="w-4 h-4 shrink-0" />
+                        <span>
+                          {busyKey === 'group:hokm-invite'
+                            ? 'در حال ساخت میز حکم...'
+                            : 'دعوت به بازی حکم ۴ نفره (ساخت میز و ارسال در گروه)'}
+                        </span>
+                      </button>
+
+                      <form
+                        onSubmit={(e) => void handleSendGroupMessage(e)}
+                        className="flex items-center gap-2"
+                      >
+                        <input
+                          type="text"
+                          value={groupDraft}
+                          onChange={(e) => setGroupDraft(e.target.value)}
+                          placeholder="پیام به گروه..."
+                          maxLength={1000}
+                          data-testid="group-message-input"
+                          className="flex-1 min-h-[38px] px-3 rounded-xl theme-input border text-xs focus:outline-none focus:border-[#0D8A8A]"
+                        />
+                        <button
+                          type="submit"
+                          disabled={groupDraft.trim().length === 0 || busyKey === 'group:send'}
+                          data-testid="group-send-msg-btn"
+                          className="min-h-[38px] px-3.5 rounded-xl bg-[#0D8A8A] hover:bg-[#11A3A3] disabled:opacity-50 text-white text-xs font-extrabold inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          <span>ارسال</span>
+                        </button>
+                      </form>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         ) : activeTab === 'friends' ? (
           <>
             {renderEyvanFriendRow()}
@@ -1412,11 +1954,18 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                   data-presence={friend.onlineStatus}
                   className="px-4 py-3.5 flex flex-wrap items-center justify-between gap-3"
                 >
-                  <div className="flex items-center gap-3 min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => void handleOpenPublicProfile(friend.userId)}
+                    className="flex items-center gap-3 min-w-0 text-right cursor-pointer group focus-visible:outline-none"
+                    title="مشاهده پروفایل عمومی"
+                  >
                     <div className="relative shrink-0">
-                      <ProfileAvatar
+                      <FramedPlayerAvatar
                         avatarCode={toValidAvatarCode(friend.avatarCode)}
                         username={friend.username}
+                        customAvatarUrl={friend.avatarUrl}
+                        avatarFrameId={friend.appearance?.avatarFrameId}
                         size="md"
                       />
                       <span
@@ -1432,11 +1981,22 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                     </div>
 
                     <div className="min-w-0">
-                      <div
-                        dir="ltr"
-                        className="text-sm sm:text-[15px] font-extrabold theme-heading truncate text-right"
-                      >
-                        {friend.username}
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span
+                          dir="ltr"
+                          className="text-sm sm:text-[15px] font-extrabold theme-heading truncate text-right group-hover:underline"
+                        >
+                          {friend.username}
+                        </span>
+                        {friend.accountCode && (
+                          <span
+                            dir="ltr"
+                            className="text-[10px] font-mono theme-muted shrink-0"
+                          >
+                            #{friend.accountCode}
+                          </span>
+                        )}
+                        <PlayerBadgeInline badgeId={friend.appearance?.badgeId} />
                       </div>
                       <div
                         className={`text-xs font-bold mt-0.5 flex items-center gap-1.5 ${
@@ -1457,7 +2017,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                         </span>
                       </div>
                     </div>
-                  </div>
+                  </button>
 
                   <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                     {isConfirmingRemove ? (
@@ -1750,6 +2310,111 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
           })
         )}
       </section>
+
+      {publicProfileModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="پروفایل عمومی بازیکن"
+          data-testid="public-profile-modal"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/68 backdrop-blur-sm"
+          onClick={() => setPublicProfileModal(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-[360px] rounded-[24px] theme-drawer border border-[var(--eyvan-gold-border)] shadow-[0_24px_64px_rgba(0,0,0,0.58)] overflow-hidden"
+          >
+            {publicProfileModal.loading ? (
+              <div className="p-8 flex items-center justify-center gap-2 text-xs font-bold theme-muted">
+                <Loader2 className="w-4 h-4 animate-spin theme-accent-teal" />
+                <span>در حال دریافت پروفایل عمومی...</span>
+              </div>
+            ) : publicProfileModal.error || !publicProfileModal.profile ? (
+              <div className="p-6 text-center space-y-3">
+                <p className="text-xs font-bold theme-loss">
+                  {publicProfileModal.error ?? 'پروفایل یافت نشد.'}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setPublicProfileModal(null)}
+                  className="min-h-[38px] px-4 rounded-xl theme-btn-secondary border text-xs font-bold cursor-pointer"
+                >
+                  بستن
+                </button>
+              </div>
+            ) : (
+              <div>
+                <div className="relative h-28 w-full overflow-hidden">
+                  <PlayerBannerStage
+                    bannerItemIdOrCode={
+                      publicProfileModal.profile.appearance.bannerItemId ??
+                      publicProfileModal.profile.appearance.bannerCode
+                    }
+                    emptyText=""
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setPublicProfileModal(null)}
+                    aria-label="بستن پروفایل"
+                    className="absolute top-3 left-3 w-8 h-8 rounded-full bg-black/60 text-white flex items-center justify-center cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="px-5 pb-5 -mt-9 flex flex-col items-center text-center space-y-2">
+                  <div className="rounded-full ring-4 ring-[var(--eyvan-modal-bg)]">
+                    <FramedPlayerAvatar
+                      avatarCode={toValidAvatarCode(publicProfileModal.profile.avatarCode)}
+                      username={publicProfileModal.profile.username}
+                      customAvatarUrl={publicProfileModal.profile.avatarUrl}
+                      avatarFrameId={publicProfileModal.profile.appearance.avatarFrameId}
+                      size="lg"
+                    />
+                  </div>
+                  <div className="flex items-center justify-center gap-1.5">
+                    <PlayerBadgeInline badgeId={publicProfileModal.profile.appearance.badgeId} />
+                    <h3 dir="ltr" className="text-base font-black theme-heading">
+                      {publicProfileModal.profile.username}
+                    </h3>
+                    {publicProfileModal.profile.accountCode && (
+                      <span
+                        dir="ltr"
+                        className="text-[11px] font-mono theme-muted"
+                      >
+                        #{publicProfileModal.profile.accountCode}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs font-bold theme-accent-teal tabular-nums">
+                    سطح {toPersianDigits(publicProfileModal.profile.level)}
+                  </div>
+                  <div className="w-full grid grid-cols-3 gap-2 pt-2 border-t border-[var(--eyvan-line)] text-center">
+                    <div>
+                      <div className="text-[10px] theme-muted">بازی</div>
+                      <div className="text-sm font-black theme-heading tabular-nums">
+                        {toPersianDigits(publicProfileModal.profile.stats.matchesPlayed)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] theme-muted">برد</div>
+                      <div className="text-sm font-black theme-win tabular-nums">
+                        {toPersianDigits(publicProfileModal.profile.stats.wins)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] theme-muted">باخت</div>
+                      <div className="text-sm font-black theme-loss tabular-nums">
+                        {toPersianDigits(publicProfileModal.profile.stats.losses)}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

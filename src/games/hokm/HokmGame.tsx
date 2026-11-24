@@ -40,6 +40,8 @@ interface HokmGameProps {
   playerName: string;
   tableSkinId?: string;
   deckId?: string;
+  cardBackId?: string;
+  gameEffectId?: string;
   targetMatchScore?: number;
   soundEnabled: boolean;
   animationSpeed: AnimationSpeed;
@@ -53,6 +55,8 @@ export const HokmGame: React.FC<HokmGameProps> = ({
   playerName,
   tableSkinId = 'tt-traditional',
   deckId = EYVAN_CLASSIC_DECK_ID,
+  cardBackId,
+  gameEffectId,
   targetMatchScore = HOKM_CONFIG.DEFAULT_MATCH_TARGET_SCORE,
   soundEnabled,
   animationSpeed,
@@ -690,6 +694,8 @@ export const HokmGame: React.FC<HokmGameProps> = ({
       playerName={playerName}
       tableSkinId={tableSkinId}
       deckId={deckId}
+      cardBackId={cardBackId}
+      gameEffectId={gameEffectId}
       reducedMotion={reducedMotion}
       canHumanPlay={canHumanPlay}
       exitConfirmOpen={exitConfirmOpen}

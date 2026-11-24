@@ -4,6 +4,7 @@ import {
   assertDeckIntegrity,
   createStandardDeck,
   shuffleDeck,
+  sortHand,
 } from './deck';
 import {
   COUNTER_CLOCKWISE_ORDER,
@@ -452,6 +453,35 @@ test('resolveNextHakem keeps Hakem on win and rotates counter-clockwise on Hakem
     ),
   };
   assert.equal(resolveNextHakem(lostByWest), 'south');
+});
+
+test('sortHand orders suits Left-to-Right (hearts -> spades -> diamonds -> clubs) and weakest (2) to strongest (A) left-to-right', () => {
+  const unsorted: Card[] = [
+    makeCard('clubs', 'A'),
+    makeCard('clubs', '2'),
+    makeCard('hearts', 'A'),
+    makeCard('hearts', '3'),
+    makeCard('hearts', '9'),
+    makeCard('diamonds', 'K'),
+    makeCard('diamonds', '4'),
+    makeCard('spades', 'Q'),
+    makeCard('spades', '2'),
+  ];
+  const sorted = sortHand(unsorted);
+  assert.deepEqual(
+    sorted.map((c) => c.id),
+    [
+      'hearts-3',
+      'hearts-9',
+      'hearts-A',
+      'spades-2',
+      'spades-Q',
+      'diamonds-4',
+      'diamonds-K',
+      'clubs-2',
+      'clubs-A',
+    ]
+  );
 });
 
 

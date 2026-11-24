@@ -9,10 +9,12 @@ import {
   PROTOCOL_VERSION,
   PublicRoomSummary,
   RoomEventNotice,
+  SeatPublicAppearance,
   ServerMessage,
   parseClientMessage,
   sanitizeAvatarCode,
   sanitizeRoomCode,
+  sanitizeSeatAppearance,
   sanitizeUsername,
 } from '../src/games/hokm/online/protocol';
 import {
@@ -249,6 +251,7 @@ export class HokmRoomManager {
     username: unknown;
     userId?: string | null;
     avatarCode?: unknown;
+    appearance?: SeatPublicAppearance;
     targetMatchScore?: unknown;
     isPublic?: boolean;
   }):
@@ -265,6 +268,7 @@ export class HokmRoomManager {
     }
 
     const avatarCode = sanitizeAvatarCode(input.avatarCode);
+    const appearance = sanitizeSeatAppearance(input.appearance);
     const rawTarget =
       typeof input.targetMatchScore === 'number' &&
       Number.isInteger(input.targetMatchScore) &&
@@ -295,6 +299,7 @@ export class HokmRoomManager {
       username,
       userId: input.userId ?? null,
       avatarCode,
+      appearance,
       preferredSeat: 'south',
     });
     if (joinRes.ok === false) {
@@ -350,6 +355,7 @@ export class HokmRoomManager {
     username: unknown;
     userId?: string | null;
     avatarCode?: unknown;
+    appearance?: SeatPublicAppearance;
     targetMatchScore?: unknown;
   }):
     | { ok: true; matchedExisting: boolean; response: CreateRoomResponse; sessionToken: string }
@@ -390,6 +396,7 @@ export class HokmRoomManager {
         username,
         userId: input.userId ?? null,
         avatarCode: input.avatarCode,
+        appearance: input.appearance,
       });
       if (joined.ok) {
         return {
@@ -405,6 +412,7 @@ export class HokmRoomManager {
       username,
       userId: input.userId ?? null,
       avatarCode: input.avatarCode,
+      appearance: input.appearance,
       targetMatchScore: desiredTarget,
       isPublic: true,
     });
@@ -425,6 +433,7 @@ export class HokmRoomManager {
       username: unknown;
       userId?: string | null;
       avatarCode?: unknown;
+      appearance?: SeatPublicAppearance;
       preferredSeat?: Seat;
     }
   ):
@@ -460,11 +469,13 @@ export class HokmRoomManager {
       };
     }
     const avatarCode = sanitizeAvatarCode(input.avatarCode);
+    const appearance = sanitizeSeatAppearance(input.appearance);
 
     const joinRes = room.controller.joinPlayer({
       username,
       userId: input.userId ?? null,
       avatarCode,
+      appearance,
       preferredSeat: input.preferredSeat,
     });
     if (joinRes.ok === false) {

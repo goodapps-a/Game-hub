@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Check,
   Download,
-  HardDrive,
   Lock,
   RefreshCw,
   Sparkles,
@@ -20,18 +19,26 @@ import {
   deckRuntime,
   defaultDeckStorageManager,
 } from '../../decks';
+import { ServerInventoryState } from '../../items/itemTypes';
 import { toPersianDigits } from '../../theme/tokens';
 import { SHOP_RARITY_META } from '../../utils/shopHelpers';
 import {
   DeckDetailsModal,
   DeckPreviewArtwork,
-  formatDeckBytes,
 } from './DeckDetailsModal';
 
 interface DeckCatalogSectionProps {
   equippedDeckId: string;
   ownedItemIds?: readonly string[];
+  userCoins?: number;
+  userGems?: number;
+  shopTestMode?: boolean;
+  isAuthenticated?: boolean;
   onSelectDeck: (deckId: string) => void | Promise<void>;
+  onClaimDeckItem?: (deckId: string) => void | Promise<void>;
+  onRequireAuth?: () => void;
+  onOpenTopUpShop?: () => void;
+  onInventorySync?: (inventory: ServerInventoryState) => void;
   compactHeader?: boolean;
 }
 
@@ -68,7 +75,15 @@ const STATUS_BADGE_MAP: Record<
 export const DeckCatalogSection: React.FC<DeckCatalogSectionProps> = ({
   equippedDeckId,
   ownedItemIds = [],
+  userCoins = 0,
+  userGems = 0,
+  shopTestMode = false,
+  isAuthenticated = false,
   onSelectDeck,
+  onClaimDeckItem,
+  onRequireAuth,
+  onOpenTopUpShop,
+  onInventorySync,
   compactHeader = false,
 }) => {
   const [entries, setEntries] = useState<DeckCatalogEntry[]>(() =>
@@ -207,6 +222,16 @@ export const DeckCatalogSection: React.FC<DeckCatalogSectionProps> = ({
     [downloadingId, equippedDeckId, refreshInstalled]
   );
 
+  const handleClaimAndDownload = useCallback(
+    async (entry: DeckCatalogEntry) => {
+      if (onClaimDeckItem) {
+        await onClaimDeckItem(entry.id);
+      }
+      await handleDownload(entry);
+    },
+    [handleDownload, onClaimDeckItem]
+  );
+
   const handleCancelDownload = useCallback(() => {
     abortRef.current?.abort();
   }, []);
@@ -281,10 +306,10 @@ export const DeckCatalogSection: React.FC<DeckCatalogSectionProps> = ({
         <div className="flex items-center justify-between gap-2 px-0.5">
           <div className="min-w-0">
             <h2 className="text-base sm:text-lg font-extrabold theme-heading truncate">
-              دست‌های کارت (مجموعه کامل ۵۲ برگ)
+              دست‌های کارت
             </h2>
             <p className="text-[11px] sm:text-xs theme-muted truncate mt-0.5">
-              دانلود یک‌باره در حافظه دستگاه و استفاده کاملاً آفلاین روی میز حکم
+              مجموعه‌های ۵۲ برگ قابل استفاده روی میز حکم
             </p>
           </div>
           <span className="text-[11px] font-extrabold theme-accent-teal shrink-0">
@@ -316,11 +341,19 @@ export const DeckCatalogSection: React.FC<DeckCatalogSectionProps> = ({
             errorBanner?.deckId === selectedEntry.id ? errorBanner.message : null
           }
           cachedPreviewUrl={cachedPreviews[selectedEntry.id]}
+          userCoins={userCoins}
+          userGems={userGems}
+          shopTestMode={shopTestMode}
+          isAuthenticated={isAuthenticated}
           onDownload={handleDownload}
+          onClaimAndDownload={handleClaimAndDownload}
           onCancelDownload={handleCancelDownload}
           onActivate={handleActivate}
           onDelete={handleDelete}
           onSwitchToClassic={() => handleActivate(EYVAN_CLASSIC_DECK_ID)}
+          onRequireAuth={onRequireAuth}
+          onOpenTopUpShop={onOpenTopUpShop}
+          onInventorySync={onInventorySync}
           onClose={() => setSelectedEntry(null)}
         />
       )}
@@ -383,18 +416,20 @@ export const DeckCatalogSection: React.FC<DeckCatalogSectionProps> = ({
 
                 <div className="space-y-1 min-w-0">
                   <div className="flex items-center justify-between gap-2">
-                    <span className={`text-[10px] font-extrabold ${rarity.textAccent}`}>
+                    <span className="text-[10px] font-extrabold theme-accent-teal">
+                      دسته کارت
+                      <span className={`font-bold ${rarity.textAccent}`}>
+                        {' · '}{rarity.label}
+                      </span>
+                    </span>
+                    <span className="text-[10px] font-bold theme-muted">
                       {entry.pricing.access === 'builtin'
-                        ? 'پیش‌فرض همیشه آماده'
+                        ? 'پیش‌فرض'
                         : entry.pricing.access === 'free'
                           ? 'رایگان'
-                          : 'ویژه'}
-                    </span>
-                    <span className="text-[10px] theme-muted inline-flex items-center gap-1">
-                      <HardDrive className="w-3 h-3" />
-                      <span>
-                        {isBuiltin ? 'داخلی' : formatDeckBytes(entry.totalBytes)}
-                      </span>
+                          : `${toPersianDigits(entry.pricing.price.toLocaleString())} ${
+                              entry.pricing.currency === 'gems' ? 'الماس' : 'سکه'
+                            }`}
                     </span>
                   </div>
 

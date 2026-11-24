@@ -310,7 +310,7 @@ describe('Multi-Deck Core, Validation, Storage, Fallback & Extensibility', () =>
       sourceUrl: '',
       license: 'CC0',
       aspectRatio: 0.71,
-      renderMode: 'full_card',
+      renderMode: 'partial_override',
       format: 'mixed',
       styleTokens: {
         cardBackground: '#FFFFFF',
@@ -348,7 +348,7 @@ describe('Multi-Deck Core, Validation, Storage, Fallback & Extensibility', () =>
       previewPath: '',
       previewMimeType: 'image/png',
       aspectRatio: 0.71,
-      renderMode: 'full_card',
+      renderMode: 'partial_override',
       format: 'mixed',
       totalBytes: manifestBadHash.totalBytes,
       cardCount: 1,

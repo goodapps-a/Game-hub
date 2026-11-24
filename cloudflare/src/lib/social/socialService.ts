@@ -24,6 +24,11 @@ import {
   consumeRateLimitSlot,
 } from '../auth/rateLimit';
 import {
+  getPublicAppearanceForUser,
+  getPublicAppearancesForUsers,
+} from '../items/inventoryService';
+import type { PublicAppearanceSnapshot } from '../../../../src/platform/items/itemTypes';
+import {
   FriendListItem,
   FriendPresenceItem,
   FriendRequestItem,
@@ -79,6 +84,7 @@ interface SearchUserDbRow {
   user_id: string;
   username: string;
   display_name: string;
+  account_code: string | null;
   avatar_code: string;
   avatar_url: string | null;
   privacy_show_online: number;
@@ -143,6 +149,7 @@ export async function searchSocialUsers(
   const escaped = escapeSqlLikePattern(validated.queryKey);
   const containsPattern = `%${escaped}%`;
   const prefixPattern = `${escaped}%`;
+  const isNumericQuery = /^\d{2,6}$/.test(validated.rawClean);
 
   // Fetch limit + 1 to accurately compute `hasMore` without a second COUNT query
   const res = await db
@@ -151,6 +158,7 @@ export async function searchSocialUsers(
          u.user_id,
          u.username,
          u.display_name,
+         u.account_code,
          u.avatar_code,
          u.avatar_url,
          u.privacy_show_online,
@@ -175,7 +183,10 @@ export async function searchSocialUsers(
        WHERE u.account_status = 'active'
          AND u.email_verified = 1
          AND u.user_id != ?
-         AND u.username_key LIKE ? ESCAPE '\\'
+         AND (
+           u.username_key LIKE ? ESCAPE '\\'
+           ${isNumericQuery ? "OR u.account_code = ? OR u.account_code LIKE ? ESCAPE '\\'" : ''}
+         )
          AND NOT EXISTS (
            SELECT 1
            FROM user_blocks ub
@@ -184,6 +195,7 @@ export async function searchSocialUsers(
          )
        ORDER BY
          CASE
+           ${isNumericQuery ? 'WHEN u.account_code = ? THEN 0' : ''}
            WHEN u.username_key = ? THEN 0
            WHEN u.username_key LIKE ? ESCAPE '\\' THEN 1
            ELSE 2
@@ -198,8 +210,10 @@ export async function searchSocialUsers(
       ctx.actorUserId,
       ctx.actorUserId,
       containsPattern,
+      ...(isNumericQuery ? [validated.rawClean, prefixPattern] : []),
       ctx.actorUserId,
       ctx.actorUserId,
+      ...(isNumericQuery ? [validated.rawClean] : []),
       validated.queryKey,
       prefixPattern,
       limit + 1,
@@ -210,6 +224,16 @@ export async function searchSocialUsers(
   const rows = res.results ?? [];
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
+
+  let appearanceMap = new Map<string, PublicAppearanceSnapshot>();
+  try {
+    appearanceMap = await getPublicAppearancesForUsers(
+      db,
+      pageRows.map((r) => r.user_id)
+    );
+  } catch {
+    // Non-fatal
+  }
 
   const users: SocialUserSummary[] = pageRows.map((row) => {
     let relationshipStatus: RelationshipStatus = 'none';
@@ -236,15 +260,18 @@ export async function searchSocialUsers(
           )
         : 'offline';
 
+    const appearance = appearanceMap.get(row.user_id);
     return {
       userId: row.user_id,
       username: row.username,
       displayName: row.display_name,
+      accountCode: row.account_code ?? null,
       avatarCode: row.avatar_code,
       avatarUrl: row.avatar_url,
       onlineStatus,
       relationshipStatus,
       friendshipId,
+      ...(appearance ? { appearance } : {}),
     };
   });
 
@@ -935,6 +962,7 @@ interface FriendListDbRow {
   user_id: string;
   username: string;
   display_name: string;
+  account_code: string | null;
   avatar_code: string;
   avatar_url: string | null;
   privacy_show_online: number;
@@ -959,6 +987,7 @@ export async function listFriends(
          u.user_id,
          u.username,
          u.display_name,
+         u.account_code,
          u.avatar_code,
          u.avatar_url,
          u.privacy_show_online,
@@ -999,20 +1028,36 @@ export async function listFriends(
     )
     .all<FriendListDbRow>();
 
-  return (res.results ?? []).map((row) => ({
-    friendshipId: row.friendship_id,
-    userId: row.user_id,
-    username: row.username,
-    displayName: row.display_name,
-    avatarCode: row.avatar_code,
-    avatarUrl: row.avatar_url,
-    onlineStatus: resolveVisiblePresence(
-      row.has_active_presence === 1,
-      row.privacy_show_online,
-      row.presence_preference
-    ),
-    friendsSince: row.friends_since,
-  }));
+  const rows = res.results ?? [];
+  let appearanceMap = new Map<string, PublicAppearanceSnapshot>();
+  try {
+    appearanceMap = await getPublicAppearancesForUsers(
+      db,
+      rows.map((r) => r.user_id)
+    );
+  } catch {
+    // Non-fatal
+  }
+
+  return rows.map((row) => {
+    const appearance = appearanceMap.get(row.user_id);
+    return {
+      friendshipId: row.friendship_id,
+      userId: row.user_id,
+      username: row.username,
+      displayName: row.display_name,
+      accountCode: row.account_code ?? null,
+      avatarCode: row.avatar_code,
+      avatarUrl: row.avatar_url,
+      onlineStatus: resolveVisiblePresence(
+        row.has_active_presence === 1,
+        row.privacy_show_online,
+        row.presence_preference
+      ),
+      friendsSince: row.friends_since,
+      ...(appearance ? { appearance } : {}),
+    };
+  });
 }
 
 interface FriendRequestDbRow {
@@ -1800,6 +1845,7 @@ export async function getPublicSocialProfile(
          u.user_id,
          u.username,
          u.display_name,
+         u.account_code,
          u.avatar_code,
          u.avatar_url,
          u.privacy_show_online,
@@ -1827,6 +1873,7 @@ export async function getPublicSocialProfile(
       user_id: string;
       username: string;
       display_name: string;
+      account_code: string | null;
       avatar_code: string;
       avatar_url: string | null;
       privacy_show_online: number;
@@ -1877,6 +1924,13 @@ export async function getPublicSocialProfile(
   const canSeeOnline =
     targetUserId === ctx.actorUserId || relationshipStatus === 'friend';
 
+  let appearance: PublicAppearanceSnapshot | undefined;
+  try {
+    appearance = await getPublicAppearanceForUser(db, userRow.user_id);
+  } catch {
+    // Non-fatal
+  }
+
   return {
     ok: true,
     status: 200,
@@ -1884,6 +1938,7 @@ export async function getPublicSocialProfile(
       userId: userRow.user_id,
       username: userRow.username,
       displayName: userRow.display_name,
+      accountCode: userRow.account_code ?? null,
       avatarCode: userRow.avatar_code,
       avatarUrl: userRow.avatar_url,
       onlineStatus: canSeeOnline
@@ -1900,6 +1955,7 @@ export async function getPublicSocialProfile(
         wins: Number(userRow.wins ?? 0),
         losses: Number(userRow.losses ?? 0),
       },
+      ...(appearance ? { appearance } : {}),
     },
   };
 }

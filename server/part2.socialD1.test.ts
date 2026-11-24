@@ -861,7 +861,7 @@ describe('Part 2 (Stage D1) — Friends System & Online Presence', () => {
       // Unimplemented legacy/out-of-scope routes must return 404
       for (const forbiddenPath of [
         '/api/social/messages',
-        '/api/social/groups',
+        '/api/social/unknown-route',
       ]) {
         const res404 = await worker.fetch(
           new Request(`https://api.eyvan.ir${forbiddenPath}`, {

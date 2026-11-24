@@ -8,6 +8,7 @@ import {
   Sparkles,
   Spade,
   SquareStack,
+  Wallet,
 } from 'lucide-react';
 import { ShopSectionId, ShopSectionMeta } from '../../types/platform';
 import { ShopCategoryFilter } from '../../utils/shopHelpers';
@@ -22,6 +23,7 @@ const SECTION_ICONS: Record<
   ShopSectionId,
   React.ComponentType<{ className?: string }>
 > = {
+  toman_topup: Wallet,
   daily_deals: Sparkles,
   card_decks: Spade,
   card_backs: SquareStack,
@@ -74,7 +76,9 @@ export const ShopCategories: React.FC<ShopCategoriesProps> = ({
               active
                 ? section.id === 'daily_deals'
                   ? 'bg-[#D4AE58] border-[#D4AE58] text-[#0B1528]'
-                  : 'bg-[#0D8A8A] border-[#0D8A8A] text-white'
+                  : section.id === 'toman_topup'
+                    ? 'bg-[#15803D] border-[#15803D] text-white'
+                    : 'bg-[#0D8A8A] border-[#0D8A8A] text-white'
                 : 'eyvan-card theme-muted hover:theme-heading'
             }`}
           >

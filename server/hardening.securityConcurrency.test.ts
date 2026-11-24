@@ -720,12 +720,14 @@ describe('Eyvan Hardening — Parts 1–4 Security & Concurrency Verification', 
         )
         .run(now - 1000, now - 1000, now + 60_000, now, now, now + 60_000);
 
-      // Run remaining migrations (0010 + 0011 + 0012) via runDatabaseMigrations
+      // Run remaining migrations (0010 .. latest) via runDatabaseMigrations
       const migResult = runDatabaseMigrations(rawDb);
       assert.deepEqual(migResult.applied, [
         '0010_hardening_oauth_and_invites.sql',
         '0011_oauth_multitab_and_invite_order.sql',
         '0012_cron_pruning_indexes.sql',
+        '0013_items_inventory_equip.sql',
+        '0014_account_code_gifts_toman_groups.sql',
       ]);
 
       const rows = rawDb

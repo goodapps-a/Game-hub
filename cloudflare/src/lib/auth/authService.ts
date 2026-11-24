@@ -58,6 +58,7 @@ import {
   validateProfileUpdatePayload,
   validateRegisterPayload,
 } from './validation';
+import { allocateUniqueAccountCode, ensureUserAccountCode } from './accountCode';
 
 const SESSION_LAST_SEEN_TOUCH_MS = 5 * 60 * 1000; // Throttle D1 writes to once per 5 min
 
@@ -66,6 +67,7 @@ interface UserDbRow {
   username: string;
   username_key: string;
   display_name: string;
+  account_code: string | null;
   email: string | null;
   email_key: string | null;
   email_verified: number;
@@ -97,6 +99,7 @@ function mapUserRowToPublic(row: UserDbRow): PublicAuthUser {
     userId: row.user_id,
     username: row.username,
     displayName: row.display_name,
+    accountCode: row.account_code ?? null,
     email: row.email,
     emailVerified: row.email_verified === 1,
     avatarCode: row.avatar_code,
@@ -191,6 +194,7 @@ export async function registerManualAccount(
 
   const userId = generatePrefixedId('usr', 12);
   const identityId = generatePrefixedId('idn', 12);
+  const accountCode = await allocateUniqueAccountCode(db);
   const rawVerifyToken = generateOpaqueToken(32);
   const verifyTokenHash = await sha256Hex(rawVerifyToken);
   const verifyExpiresAt = now + EMAIL_VERIFICATION_TTL_MS;
@@ -201,18 +205,19 @@ export async function registerManualAccount(
       db
         .prepare(
           `INSERT INTO users (
-             user_id, username, username_key, display_name,
+             user_id, username, username_key, display_name, account_code,
              email, email_key, email_verified,
              avatar_code, avatar_url,
              auth_provider, account_status,
              created_at, last_seen_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, 0, 'portrait', NULL, 'password', 'pending_verification', ?, ?, ?)`
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'portrait', NULL, 'password', 'pending_verification', ?, ?, ?)`
         )
         .bind(
           userId,
           validated.username,
           validated.usernameKey,
           validated.username,
+          accountCode,
           validated.email,
           validated.emailKey,
           now,
@@ -311,6 +316,7 @@ export async function registerManualAccount(
       userId,
       username: validated.username,
       displayName: validated.username,
+      accountCode,
       email: validated.email,
       emailVerified: false,
       avatarCode: 'portrait',
@@ -398,7 +404,7 @@ export async function loginWithCredentials(
   const row = await db
     .prepare(
       `SELECT
-         u.user_id, u.username, u.username_key, u.display_name,
+         u.user_id, u.username, u.username_key, u.display_name, u.account_code,
          u.email, u.email_key, u.email_verified,
          u.avatar_code, u.avatar_url, u.auth_provider, u.account_status,
          u.created_at, u.last_seen_at,
@@ -508,8 +514,12 @@ export async function loginWithCredentials(
 
   await db.batch(stmts);
 
+  const accountCode =
+    row.account_code ?? (await ensureUserAccountCode(db, row.user_id, now));
+
   const publicUser = mapUserRowToPublic({
     ...row,
+    account_code: accountCode,
     last_seen_at: now,
   });
 
@@ -554,7 +564,7 @@ export async function verifyAuthSession(
          s.last_seen_at AS session_last_seen_at,
          s.expires_at AS session_expires_at,
          s.revoked_at AS session_revoked_at,
-         u.user_id, u.username, u.username_key, u.display_name,
+         u.user_id, u.username, u.username_key, u.display_name, u.account_code,
          u.email, u.email_key, u.email_verified,
          u.avatar_code, u.avatar_url, u.auth_provider, u.account_status,
          u.created_at, u.last_seen_at
@@ -591,9 +601,15 @@ export async function verifyAuthSession(
     }
   }
 
+  const accountCode =
+    row.account_code ?? (await ensureUserAccountCode(db, row.user_id, now));
+
   return {
     authenticated: true,
-    user: mapUserRowToPublic(row),
+    user: mapUserRowToPublic({
+      ...row,
+      account_code: accountCode,
+    }),
     session: {
       sessionId: row.session_id,
       createdAt: row.session_created_at,
@@ -1069,7 +1085,7 @@ export async function updateAuthenticatedProfile(
   const updatedRow = await db
     .prepare(
       `SELECT
-         user_id, username, username_key, display_name,
+         user_id, username, username_key, display_name, account_code,
          email, email_key, email_verified,
          avatar_code, avatar_url, auth_provider, account_status,
          created_at, last_seen_at
@@ -1152,7 +1168,7 @@ export async function upgradeGuestAccountToRegistered(
     db
       .prepare(
         `SELECT
-           user_id, username, username_key, display_name,
+           user_id, username, username_key, display_name, account_code,
            email, email_key, email_verified,
            avatar_code, avatar_url, auth_provider, account_status,
            created_at, last_seen_at
@@ -1220,6 +1236,8 @@ export async function upgradeGuestAccountToRegistered(
     };
   }
 
+  const accountCode =
+    guestRow.account_code ?? (await allocateUniqueAccountCode(db));
   const identityId = generatePrefixedId('idn', 12);
   const rawVerifyToken = generateOpaqueToken(32);
   const verifyTokenHash = await sha256Hex(rawVerifyToken);
@@ -1241,6 +1259,7 @@ export async function upgradeGuestAccountToRegistered(
            SET username = ?,
                username_key = ?,
                display_name = ?,
+               account_code = COALESCE(account_code, ?),
                email = ?,
                email_key = ?,
                email_verified = 0,
@@ -1256,6 +1275,7 @@ export async function upgradeGuestAccountToRegistered(
           validated.username,
           validated.usernameKey,
           validated.username,
+          accountCode,
           validated.email,
           validated.emailKey,
           now,
@@ -1383,6 +1403,7 @@ export async function upgradeGuestAccountToRegistered(
       userId: guestUserId,
       username: validated.username,
       displayName: validated.username,
+      accountCode,
       email: validated.email,
       emailVerified: false,
       avatarCode: guestRow.avatar_code,

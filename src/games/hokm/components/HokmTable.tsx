@@ -24,6 +24,13 @@ import {
   resolveCardBackVisual,
   useDeckRuntimeState,
 } from '../../../platform/decks';
+import {
+  getAvatarFrameVisual,
+  getGameEffectAccent,
+  getProfileBadgeVisual,
+  getTableSkinVisual,
+} from '../../../platform/items';
+import type { SeatPublicAppearance } from '../online/protocol';
 
 export interface FlyingDealCard {
   id: string;
@@ -61,6 +68,9 @@ interface HokmTableProps {
   playerName: string;
   tableSkinId?: string;
   deckId?: string;
+  cardBackId?: string;
+  gameEffectId?: string;
+  seatAppearances?: Partial<Record<Seat, SeatPublicAppearance>>;
   reducedMotion: boolean;
   canHumanPlay: boolean;
   exitConfirmOpen: boolean;
@@ -117,6 +127,7 @@ const SeatProfile: React.FC<{
   isHakem: boolean;
   connected?: boolean;
   disconnectRemainingSec?: number | null;
+  appearance?: SeatPublicAppearance;
 }> = ({
   seat,
   displayName,
@@ -125,13 +136,22 @@ const SeatProfile: React.FC<{
   isHakem,
   connected = true,
   disconnectRemainingSec = null,
+  appearance,
 }) => {
+  const frameVisual = appearance?.avatarFrameId
+    ? getAvatarFrameVisual(appearance.avatarFrameId)
+    : null;
+  const badgeVisual = getProfileBadgeVisual(appearance?.badgeId);
+
   return (
     <div
       className="relative inline-flex flex-col items-center select-none shrink-0"
       data-seat={seat}
       data-active-turn={isTurn ? 'true' : 'false'}
       data-connected={connected ? 'true' : 'false'}
+      data-seat-deck={appearance?.deckId ?? undefined}
+      data-avatar-frame={appearance?.avatarFrameId ?? undefined}
+      data-profile-badge={appearance?.badgeId ?? undefined}
     >
       {/* Circular Avatar Medallion */}
       <div className="relative">
@@ -149,6 +169,14 @@ const SeatProfile: React.FC<{
                 ? 'border-[#F3D179] shadow-[0_0_20px_rgba(243,209,121,0.65)] scale-[1.04]'
                 : 'border-[#D4AE58]/60 shadow-[0_4px_12px_rgba(0,0,0,0.45)]'
           }`}
+          style={
+            connected && !isTurn && frameVisual
+              ? {
+                  borderColor: frameVisual.ringColor,
+                  boxShadow: `0 0 14px ${frameVisual.glowColor}`,
+                }
+              : undefined
+          }
         >
           <img
             src={avatarSrc}
@@ -173,7 +201,7 @@ const SeatProfile: React.FC<{
 
       {/* Uniform Centered Dark-Glass English Nameplate overlapping bottom edge of ring */}
       <div
-        className={`relative z-10 -mt-2 px-2.5 py-[2px] rounded-full border backdrop-blur-md transition-colors duration-200 ${
+        className={`relative z-10 -mt-2 px-2.5 py-[2px] rounded-full border backdrop-blur-md transition-colors duration-200 flex items-center gap-1 ${
           !connected
             ? 'bg-[#3B1D0A]/95 border-[#F59E0B] shadow-[0_2px_8px_rgba(0,0,0,0.5)]'
             : isTurn
@@ -187,6 +215,15 @@ const SeatProfile: React.FC<{
         >
           {displayName}
         </span>
+        {badgeVisual && (
+          <span
+            title={badgeVisual.label}
+            style={{ color: badgeVisual.color }}
+            className="text-[9px] font-black shrink-0"
+          >
+            {badgeVisual.symbol}
+          </span>
+        )}
       </div>
 
       {/* Disconnected Grace Countdown Badge (Online Mode Only) */}
@@ -210,9 +247,18 @@ const SeatProfile: React.FC<{
 const TeamTrickPile: React.FC<{
   count: number;
   team: TeamId;
+  deckId?: string;
+  cardBackId?: string;
   backBg?: string;
   backBorder?: string;
-}> = ({ count, team, backBg = '#FFFFFF', backBorder = '#C9C4BA' }) => {
+}> = ({
+  count,
+  team,
+  deckId,
+  cardBackId,
+  backBg = '#EFECE3',
+  backBorder = '#C9C3B4',
+}) => {
   if (count <= 0) return null;
   const visiblePackets = Math.min(count, 7);
 
@@ -241,7 +287,7 @@ const TeamTrickPile: React.FC<{
             }}
           >
             <div className="w-full h-full rounded-[3px] overflow-hidden">
-              <CardBackSvg />
+              <CardBackSvg deckId={deckId} cardBackId={cardBackId} />
             </div>
           </div>
         ))}
@@ -269,6 +315,8 @@ const HiddenHandFan: React.FC<{
   orientation: 'horizontal' | 'vertical';
   side?: 'north' | 'west' | 'east';
   isDesktop?: boolean;
+  deckId?: string;
+  cardBackId?: string;
   backBg?: string;
   backBorder?: string;
 }> = ({
@@ -276,8 +324,10 @@ const HiddenHandFan: React.FC<{
   orientation,
   side = 'north',
   isDesktop = false,
-  backBg = '#FFFFFF',
-  backBorder = '#D4CFC5',
+  deckId,
+  cardBackId,
+  backBg = '#EFECE3',
+  backBorder = '#C9C3B4',
 }) => {
   const displayCount = Math.min(count, 13);
 
@@ -311,7 +361,7 @@ const HiddenHandFan: React.FC<{
             return (
               <div
                 key={idx}
-                className="w-[92px] h-[130px] sm:w-[120px] sm:h-[168px] rounded-[9px] sm:rounded-[11px] p-[2.5px] sm:p-[3px] overflow-hidden shadow-[0_6px_18px_rgba(0,0,0,0.42)] border shrink-0 transition-transform duration-200"
+                className="w-[92px] h-[130px] sm:w-[120px] sm:h-[168px] rounded-[6px] sm:rounded-[8px] p-[2.5px] sm:p-[3px] overflow-hidden shadow-[0_6px_18px_rgba(0,0,0,0.42)] border shrink-0 transition-transform duration-200"
                 style={{
                   backgroundColor: backBg,
                   borderColor: backBorder,
@@ -320,8 +370,8 @@ const HiddenHandFan: React.FC<{
                   zIndex: idx,
                 }}
               >
-                <div className="w-full h-full rounded-[6px] sm:rounded-[8px] overflow-hidden">
-                  <CardBackSvg />
+                <div className="w-full h-full rounded-[4px] sm:rounded-[6px] overflow-hidden">
+                  <CardBackSvg deckId={deckId} cardBackId={cardBackId} />
                 </div>
               </div>
             );
@@ -360,7 +410,7 @@ const HiddenHandFan: React.FC<{
           return (
             <div
               key={idx}
-              className="w-[130px] h-[92px] sm:w-[168px] sm:h-[120px] rounded-[9px] sm:rounded-[11px] p-[2.5px] sm:p-[3px] overflow-hidden shadow-[0_6px_16px_rgba(0,0,0,0.42)] border shrink-0 flex items-center justify-center transition-transform duration-200"
+              className="w-[130px] h-[92px] sm:w-[168px] sm:h-[120px] rounded-[6px] sm:rounded-[8px] p-[2.5px] sm:p-[3px] overflow-hidden shadow-[0_6px_16px_rgba(0,0,0,0.42)] border shrink-0 flex items-center justify-center transition-transform duration-200"
               style={{
                 backgroundColor: backBg,
                 borderColor: backBorder,
@@ -369,8 +419,8 @@ const HiddenHandFan: React.FC<{
                 zIndex: idx,
               }}
             >
-              <div className="w-[86px] h-[124px] sm:w-[114px] sm:h-[162px] rounded-[6px] sm:rounded-[8px] overflow-hidden rotate-90 shrink-0">
-                <CardBackSvg />
+              <div className="w-[86px] h-[124px] sm:w-[114px] sm:h-[162px] rounded-[4px] sm:rounded-[6px] overflow-hidden rotate-90 shrink-0">
+                <CardBackSvg deckId={deckId} cardBackId={cardBackId} />
               </div>
             </div>
           );
@@ -508,35 +558,6 @@ const RoyalScoreboard: React.FC<{
   );
 };
 
-function resolveTableSkinVisual(tableSkinId?: string): {
-  imageSrc: string;
-  vignette: string;
-  railAccent: string;
-} {
-  if (tableSkinId === 'tt-lapis' || tableSkinId === 'tt-turquoise-palace') {
-    return {
-      imageSrc: PLATFORM_ASSETS.hokmTableLapis,
-      vignette:
-        'radial-gradient(ellipse at 50% 48%, rgba(8, 30, 62, 0.10) 0%, rgba(5, 19, 44, 0.42) 72%, rgba(3, 10, 26, 0.78) 100%)',
-      railAccent: 'border-[#67D5E8]/45',
-    };
-  }
-  if (tableSkinId === 'tt-tabriz') {
-    return {
-      imageSrc: PLATFORM_ASSETS.hokmTableRuby,
-      vignette:
-        'radial-gradient(ellipse at 50% 48%, rgba(58, 12, 24, 0.10) 0%, rgba(36, 7, 15, 0.42) 72%, rgba(20, 4, 9, 0.78) 100%)',
-      railAccent: 'border-[#F3D179]/48',
-    };
-  }
-  return {
-    imageSrc: PLATFORM_ASSETS.hokmTableTraditional,
-    vignette:
-      'radial-gradient(ellipse at 50% 48%, rgba(7, 46, 33, 0.08) 0%, rgba(4, 28, 20, 0.40) 72%, rgba(2, 16, 12, 0.76) 100%)',
-    railAccent: 'border-[#D4AE58]/42',
-  };
-}
-
 /**
  * Zero-Lag 60-120fps Direct-DOM Pure Drag-and-Drop Hand Card:
  * - Zero React re-renders during drag (drives transforms via rAF + direct DOM style & dropRingRef dataset).
@@ -552,6 +573,7 @@ interface DraggableHandCardProps {
   fanArcY: number;
   fanRotateDeg: number;
   cardWidthPx: number;
+  deckId?: string;
   isLegal: boolean;
   canHumanPlay: boolean;
   handGathered: boolean;
@@ -568,6 +590,7 @@ const DraggableHandCard: React.FC<DraggableHandCardProps> = React.memo(
     fanArcY,
     fanRotateDeg,
     cardWidthPx,
+    deckId,
     isLegal,
     canHumanPlay,
     handGathered,
@@ -877,7 +900,7 @@ const DraggableHandCard: React.FC<DraggableHandCardProps> = React.memo(
             transformOrigin: '50% 72%',
             transform: restTransform,
           }}
-          className={`touch-none select-none will-change-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F3D179] rounded-[11px] ${
+          className={`touch-none select-none will-change-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F3D179] rounded-[6px] sm:rounded-[8px] ${
             isCardActive
               ? 'cursor-grab active:cursor-grabbing'
               : 'cursor-not-allowed'
@@ -885,6 +908,7 @@ const DraggableHandCard: React.FC<DraggableHandCardProps> = React.memo(
         >
           <PlayingCard
             card={card}
+            deckId={deckId}
             isPlayable={isCardActive}
             size="md"
           />
@@ -909,6 +933,9 @@ export const HokmTable: React.FC<HokmTableProps> = ({
   playerName,
   tableSkinId = 'tt-traditional',
   deckId = EYVAN_CLASSIC_DECK_ID,
+  cardBackId,
+  gameEffectId,
+  seatAppearances,
   reducedMotion,
   canHumanPlay,
   exitConfirmOpen,
@@ -924,11 +951,53 @@ export const HokmTable: React.FC<HokmTableProps> = ({
   onNewMatch,
 }) => {
   const dropRingRef = useRef<HTMLDivElement | null>(null);
-  const tableSkin = resolveTableSkinVisual(tableSkinId);
-  const deckRuntimeState = useDeckRuntimeState();
-  const backVisual = resolveCardBackVisual(deckRuntimeState);
-  const activeBackBg = backVisual.styleTokens.backBackground ?? '#FFFFFF';
-  const activeBackBorder = backVisual.styleTokens.backBorderColor ?? '#D4CFC5';
+  // Owner-only visual: tableSkin ALWAYS comes strictly from local player's own equipped skin
+  const tableSkin = getTableSkinVisual(tableSkinId);
+  const effectAccent = getGameEffectAccent(gameEffectId);
+
+  const southDeckId = seatAppearances?.south?.deckId ?? deckId;
+  const northDeckId = seatAppearances?.north?.deckId ?? deckId;
+  const eastDeckId = seatAppearances?.east?.deckId ?? deckId;
+  const westDeckId = seatAppearances?.west?.deckId ?? deckId;
+
+  const southCardBackId = seatAppearances?.south?.cardBackId ?? cardBackId;
+  const northCardBackId = seatAppearances?.north?.cardBackId ?? undefined;
+  const eastCardBackId = seatAppearances?.east?.cardBackId ?? undefined;
+  const westCardBackId = seatAppearances?.west?.cardBackId ?? undefined;
+
+  const southRuntime = useDeckRuntimeState(southDeckId);
+  const northRuntime = useDeckRuntimeState(northDeckId);
+  const eastRuntime = useDeckRuntimeState(eastDeckId);
+  const westRuntime = useDeckRuntimeState(westDeckId);
+
+  const southBackVisual = resolveCardBackVisual(southRuntime);
+  const northBackVisual = resolveCardBackVisual(northRuntime);
+  const eastBackVisual = resolveCardBackVisual(eastRuntime);
+  const westBackVisual = resolveCardBackVisual(westRuntime);
+
+  const seatDeckMap: Record<Seat, string> = {
+    south: southDeckId,
+    north: northDeckId,
+    east: eastDeckId,
+    west: westDeckId,
+  };
+  const seatCardBackMap: Record<Seat, string | undefined> = {
+    south: southCardBackId,
+    north: northCardBackId,
+    east: eastCardBackId,
+    west: westCardBackId,
+  };
+
+  const activeBackBg =
+    !southBackVisual.styleTokens.backBackground ||
+    southBackVisual.styleTokens.backBackground.toUpperCase() === '#FFFFFF'
+      ? '#EFECE3'
+      : southBackVisual.styleTokens.backBackground;
+  const activeBackBorder =
+    !southBackVisual.styleTokens.backBorderColor ||
+    southBackVisual.styleTokens.backBorderColor.toUpperCase() === '#D4CFC5'
+      ? '#C9C3B4'
+      : southBackVisual.styleTokens.backBorderColor;
 
   // Measure South hand container width for silky-smooth dynamic card spacing as hand shrinks
   const handContainerRef = useRef<HTMLDivElement | null>(null);
@@ -1061,7 +1130,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
       className="min-h-[100dvh] w-full flex flex-col hokm-traditional-arena text-[#F6F3EC] relative overflow-clip select-none transform-gpu"
       data-testid="hokm-table"
       data-table-skin={tableSkinId}
-      data-deck-id={backVisual.deckId || deckId}
+      data-deck-id={southBackVisual.deckId || southDeckId}
+      data-game-effect={gameEffectId ?? undefined}
       data-phase={state.phase}
       data-turn={state.currentTurn}
     >
@@ -1166,8 +1236,20 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               count={visibleHandCounts.north}
               orientation="horizontal"
               isDesktop={handLayout.isDesktop}
-              backBg={activeBackBg}
-              backBorder={activeBackBorder}
+              deckId={northDeckId}
+              cardBackId={northCardBackId}
+              backBg={
+                !northBackVisual.styleTokens.backBackground ||
+                northBackVisual.styleTokens.backBackground.toUpperCase() === '#FFFFFF'
+                  ? '#EFECE3'
+                  : northBackVisual.styleTokens.backBackground
+              }
+              backBorder={
+                !northBackVisual.styleTokens.backBorderColor ||
+                northBackVisual.styleTokens.backBorderColor.toUpperCase() === '#D4CFC5'
+                  ? '#C9C3B4'
+                  : northBackVisual.styleTokens.backBorderColor
+              }
             />
           </div>
           <div className="relative z-20">
@@ -1177,6 +1259,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               avatarSrc={resolvedSeats.north.avatarSrc}
               connected={resolvedSeats.north.connected}
               disconnectRemainingSec={resolvedSeats.north.disconnectRemainingSec}
+              appearance={seatAppearances?.north}
               isTurn={
                 (state.phase === 'PLAYING_TRICK' ||
                   state.phase === 'CHOOSING_TRUMP') &&
@@ -1199,8 +1282,20 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               orientation="vertical"
               side="west"
               isDesktop={handLayout.isDesktop}
-              backBg={activeBackBg}
-              backBorder={activeBackBorder}
+              deckId={westDeckId}
+              cardBackId={westCardBackId}
+              backBg={
+                !westBackVisual.styleTokens.backBackground ||
+                westBackVisual.styleTokens.backBackground.toUpperCase() === '#FFFFFF'
+                  ? '#EFECE3'
+                  : westBackVisual.styleTokens.backBackground
+              }
+              backBorder={
+                !westBackVisual.styleTokens.backBorderColor ||
+                westBackVisual.styleTokens.backBorderColor.toUpperCase() === '#D4CFC5'
+                  ? '#C9C3B4'
+                  : westBackVisual.styleTokens.backBorderColor
+              }
             />
           </div>
 
@@ -1211,8 +1306,20 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               orientation="vertical"
               side="east"
               isDesktop={handLayout.isDesktop}
-              backBg={activeBackBg}
-              backBorder={activeBackBorder}
+              deckId={eastDeckId}
+              cardBackId={eastCardBackId}
+              backBg={
+                !eastBackVisual.styleTokens.backBackground ||
+                eastBackVisual.styleTokens.backBackground.toUpperCase() === '#FFFFFF'
+                  ? '#EFECE3'
+                  : eastBackVisual.styleTokens.backBackground
+              }
+              backBorder={
+                !eastBackVisual.styleTokens.backBorderColor ||
+                eastBackVisual.styleTokens.backBorderColor.toUpperCase() === '#D4CFC5'
+                  ? '#C9C3B4'
+                  : eastBackVisual.styleTokens.backBorderColor
+              }
             />
           </div>
 
@@ -1228,6 +1335,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               avatarSrc={resolvedSeats.west.avatarSrc}
               connected={resolvedSeats.west.connected}
               disconnectRemainingSec={resolvedSeats.west.disconnectRemainingSec}
+              appearance={seatAppearances?.west}
               isTurn={
                 (state.phase === 'PLAYING_TRICK' ||
                   state.phase === 'CHOOSING_TRUMP') &&
@@ -1247,6 +1355,13 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               ref={dropRingRef}
               data-drag-active="false"
               data-drop-over="false"
+              style={
+                effectAccent
+                  ? {
+                      boxShadow: `inset 0 0 24px ${effectAccent}22`,
+                    }
+                  : undefined
+              }
               className="w-[192px] h-[192px] sm:w-[268px] sm:h-[268px] rounded-full border border-[#D4AE58]/28 bg-black/8 flex items-center justify-center relative transition-all duration-150 data-[drag-active=true]:border-[#F3D179]/60 data-[drag-active=true]:bg-black/16 data-[drop-over=true]:border-[#F3D179] data-[drop-over=true]:bg-[#F3D179]/18 data-[drop-over=true]:shadow-[0_0_38px_rgba(243,209,121,0.42)] data-[drop-over=true]:scale-[1.05]"
               aria-hidden="true"
             />
@@ -1290,7 +1405,10 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                         className="absolute inset-0 rounded-[8px] p-[2px] border shadow-lg overflow-hidden"
                       >
                         <div className="w-full h-full rounded-[6px] overflow-hidden">
-                          <CardBackSvg />
+                          <CardBackSvg
+                            deckId={southDeckId}
+                            cardBackId={southCardBackId}
+                          />
                         </div>
                       </motion.div>
                     ))}
@@ -1327,7 +1445,10 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                       className="absolute w-[54px] h-[76px] rounded-[7px] p-[1.5px] border shadow-lg overflow-hidden"
                     >
                       <div className="w-full h-full rounded-[5px] overflow-hidden">
-                        <CardBackSvg />
+                        <CardBackSvg
+                          deckId={seatDeckMap[fc.targetSeat]}
+                          cardBackId={seatCardBackMap[fc.targetSeat]}
+                        />
                       </div>
                     </motion.div>
                   );
@@ -1364,10 +1485,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                   const isStacking =
                     trickCollectPhase === 'stacking' ||
                     trickCollectPhase === 'sliding';
-                  const isWinnerCard =
-                    state.phase === 'TRICK_COMPLETE' &&
-                    trickCollectPhase === 'idle' &&
-                    state.lastCompletedTrick?.winnerSeat === play.seat;
+                  const shouldFlip3D = !reducedMotion && play.seat !== 'south';
 
                   return (
                     <motion.div
@@ -1379,8 +1497,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                               x: origin.x * 0.72,
                               y: origin.y * 0.72,
                               scale: 0.86,
-                              opacity: 0.4,
-                              rotate: origin.rotate * 0.08,
+                              opacity: 0.55,
+                              rotate: origin.rotate * 0.1,
                             }
                       }
                       animate={
@@ -1396,23 +1514,67 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                               x: slot.x,
                               y: slot.y,
                               rotate: slot.rotate,
-                              scale: isWinnerCard ? 1.07 : 1,
+                              scale: 1,
                               opacity: 1,
                             }
                       }
                       exit={{ opacity: 0, scale: 0.7 }}
                       transition={{
-                        duration: reducedMotion ? 0.05 : 0.24,
+                        duration: reducedMotion ? 0.05 : 0.34,
                         ease: [0.16, 1, 0.3, 1],
                       }}
-                      style={{ zIndex: isWinnerCard ? 30 : idx + 5 }}
+                      style={{ zIndex: idx + 5, perspective: 900 }}
                       className="absolute"
                     >
-                      <PlayingCard
-                        card={play.card}
-                        isWinningCard={isWinnerCard}
-                        size="trick"
-                      />
+                      {shouldFlip3D ? (
+                        <motion.div
+                          initial={{ rotateY: 180 }}
+                          animate={{ rotateY: 0 }}
+                          transition={{
+                            duration: 0.42,
+                            ease: [0.16, 1, 0.3, 1],
+                          }}
+                          style={{ transformStyle: 'preserve-3d' }}
+                          className="relative"
+                        >
+                          <div
+                            style={{
+                              backfaceVisibility: 'hidden',
+                              WebkitBackfaceVisibility: 'hidden',
+                            }}
+                          >
+                            <PlayingCard
+                              card={play.card}
+                              deckId={seatDeckMap[play.seat]}
+                              cardBackId={seatCardBackMap[play.seat]}
+                              size="trick"
+                            />
+                          </div>
+                          <div
+                            className="absolute inset-0"
+                            style={{
+                              backfaceVisibility: 'hidden',
+                              WebkitBackfaceVisibility: 'hidden',
+                              transform: 'rotateY(180deg)',
+                            }}
+                            aria-hidden="true"
+                          >
+                            <PlayingCard
+                              faceDown
+                              deckId={seatDeckMap[play.seat]}
+                              cardBackId={seatCardBackMap[play.seat]}
+                              size="trick"
+                            />
+                          </div>
+                        </motion.div>
+                      ) : (
+                        <PlayingCard
+                          card={play.card}
+                          deckId={seatDeckMap[play.seat]}
+                          cardBackId={seatCardBackMap[play.seat]}
+                          size="trick"
+                        />
+                      )}
                     </motion.div>
                   );
                 })}
@@ -1477,6 +1639,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                 avatarSrc={resolvedSeats.east.avatarSrc}
                 connected={resolvedSeats.east.connected}
                 disconnectRemainingSec={resolvedSeats.east.disconnectRemainingSec}
+                appearance={seatAppearances?.east}
                 isTurn={
                   (state.phase === 'PLAYING_TRICK' ||
                     state.phase === 'CHOOSING_TRUMP') &&
@@ -1489,8 +1652,12 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                   <TeamTrickPile
                     count={state.trickCounts.opponentTeam}
                     team="opponentTeam"
-                    backBg={activeBackBg}
-                    backBorder={activeBackBorder}
+                    deckId={eastDeckId}
+                    cardBackId={eastCardBackId}
+                    backBg={eastBackVisual.styleTokens.backBackground ?? '#FFFFFF'}
+                    backBorder={
+                      eastBackVisual.styleTokens.backBorderColor ?? '#D4CFC5'
+                    }
                   />
                 </div>
               )}
@@ -1565,6 +1732,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                   fanArcY={fanArcY}
                   fanRotateDeg={fanRotateDeg}
                   cardWidthPx={cardWidthPx}
+                  deckId={southDeckId}
                   isLegal={legalIds.has(card.id)}
                   canHumanPlay={canHumanPlay}
                   handGathered={handGathered}
@@ -1588,6 +1756,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                 disconnectRemainingSec={
                   resolvedSeats.south.disconnectRemainingSec
                 }
+                appearance={seatAppearances?.south}
                 isTurn={
                   (state.phase === 'PLAYING_TRICK' ||
                     state.phase === 'CHOOSING_TRUMP') &&
@@ -1603,6 +1772,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                 <TeamTrickPile
                   count={state.trickCounts.myTeam}
                   team="myTeam"
+                  deckId={southDeckId}
+                  cardBackId={southCardBackId}
                   backBg={activeBackBg}
                   backBorder={activeBackBorder}
                 />

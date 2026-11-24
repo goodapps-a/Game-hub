@@ -7,6 +7,13 @@ import { PLATFORM_ASSETS } from './assets';
  */
 export const SHOP_SECTIONS: readonly ShopSectionMeta[] = [
   {
+    id: 'toman_topup',
+    title: 'خرید سکه و الماس (تومانی)',
+    subtitle: 'شارژ فوری حساب با درگاه بانکی امن (ریال / تومان)',
+    accentColor: '#22C55E',
+    badge: 'تومانی',
+  },
+  {
     id: 'daily_deals',
     title: 'پیشنهادهای ویژه امروز',
     subtitle: 'تخفیف‌های محدود و آیتم‌های برگزیده روزانه',
@@ -58,9 +65,9 @@ export const SHOP_ITEMS_DEMO: readonly ShopItem[] = [
     id: 'dd-gold-chest',
     section: 'daily_deals',
     name: 'صندوق گنج فیروزه‌ای',
-    subtitle: '۵٬۰۰۰ سکه + طرح ویژه',
+    subtitle: '۵٬۰۰۰ سکه مجازی',
     description:
-      'بسته ویژه امروز شامل ۵٬۰۰۰ سکه مجازی و یک آیتم تزئینی تصادفی از مجموعه اصیل ایوان.',
+      'بسته ویژه امروز شامل ۵٬۰۰۰ سکه مجازی برای گسترش کلکسیون ایوان.',
     price: 120,
     currency: 'gems',
     rarity: 'legendary',
@@ -180,6 +187,19 @@ export const SHOP_ITEMS_DEMO: readonly ShopItem[] = [
     rarity: 'legendary',
     palette: ['#0A3B49', '#19A2A2', '#F3D179'],
     motif: 'shamsa',
+  },
+  {
+    id: 'cb-yazd-termeh',
+    section: 'card_backs',
+    name: 'ترمه زرین یزد',
+    subtitle: 'نقش بته‌جقه سنتی',
+    description:
+      'پشت کارت بافت‌دار با نقش بته‌جقه اصیل یزد بر زمینه لاجوردی و طلاکوب.',
+    price: 1100,
+    currency: 'coins',
+    rarity: 'rare',
+    palette: ['#18294A', '#9E2B3B', '#E5C67E'],
+    motif: 'cypress',
   },
 
   // 3. Table Themes (پوسته‌های میز بازی)
@@ -340,6 +360,19 @@ export const SHOP_ITEMS_DEMO: readonly ShopItem[] = [
     rarity: 'common',
     palette: ['#148A8A', '#155947', '#B88B36'],
     motif: 'cypress',
+  },
+  {
+    id: 'af-hakem-seal',
+    section: 'avatars_frames',
+    name: 'نشان حاکم ایوان',
+    subtitle: 'نشان تاج طلایی پروفایل',
+    description:
+      'نشان ویژه حاکم که در کنار نام کاربری شما در میز بازی و فهرست دوستان نمایش داده می‌شود.',
+    price: 850,
+    currency: 'coins',
+    rarity: 'epic',
+    palette: ['#18122B', '#C89B3C', '#F3D179'],
+    motif: 'shamsa',
   },
 
   // 5. Visual Effects (افکت‌ها و انیمیشن‌ها)

@@ -5,6 +5,7 @@ import {
   PublicRoomSummary,
   isValidSeat,
   sanitizeRoomCode,
+  sanitizeSeatAppearance,
   sanitizeUsername,
 } from '../src/games/hokm/online/protocol';
 import {
@@ -22,6 +23,9 @@ import {
 } from '../cloudflare/src/lib/auth/guestSession';
 import { handleAuthHttpRequest } from '../cloudflare/src/lib/auth/httpHandler';
 import { listUserActiveDirectConversationIds } from '../cloudflare/src/lib/social/chatService';
+import { handleItemsHttpRequest } from '../cloudflare/src/lib/items/httpHandler';
+import { getPublicAppearanceForUser } from '../cloudflare/src/lib/items/inventoryService';
+import { handlePaymentsHttpRequest } from '../cloudflare/src/lib/payments/httpHandler';
 import { handleSocialHttpRequest } from '../cloudflare/src/lib/social/httpHandler';
 import { RoomInviteCheckSummary } from '../cloudflare/src/lib/social/types';
 import { ChatRealtimePublisher } from '../src/platform/social/chatRealtimeProtocol';
@@ -57,6 +61,8 @@ export interface ExpressAppConfig {
   readonly googleOAuthClientSecret?: string;
   readonly googleOAuthRedirectUri?: string;
   readonly googleOAuthFetch?: typeof fetch;
+  readonly shopTestMode?: boolean | string;
+  readonly zarinpalMerchantId?: string;
 }
 
 export interface CreateEyvanExpressAppDeps {
@@ -495,6 +501,153 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
     }
   });
 
+  // Stage E Universal Items, Inventory, Equip, Gift Lookup & Public Profile
+  app.all(
+    [
+      '/api/shop/*',
+      '/api/inventory',
+      '/api/inventory/*',
+      '/api/users/lookup',
+      '/api/users/:userId/public-profile',
+    ],
+    async (req: Request, res: Response) => {
+      try {
+        const secure = isSecureIncomingReq(req);
+        const protocol = secure ? 'https' : 'http';
+        const host = req.headers.host ?? `localhost:${defaultPort}`;
+        const fullUrl = `${protocol}://${host}${req.originalUrl}`;
+        const headers = new Headers();
+        for (const [key, val] of Object.entries(req.headers)) {
+          const lower = key.toLowerCase();
+          if (
+            lower === 'content-length' ||
+            lower === 'transfer-encoding' ||
+            lower === 'connection'
+          ) {
+            continue;
+          }
+          if (typeof val === 'string') {
+            headers.set(key, val);
+          } else if (Array.isArray(val)) {
+            headers.set(key, val.join(', '));
+          }
+        }
+
+        const method = req.method.toUpperCase();
+        const hasBody = method !== 'GET' && method !== 'HEAD';
+        const bodyStr =
+          hasBody && req.body !== undefined && typeof req.body === 'object' && req.body !== null
+            ? JSON.stringify(req.body)
+            : undefined;
+
+        const webReq = new Request(fullUrl, {
+          method,
+          headers,
+          body: bodyStr,
+        });
+
+        const webRes = await handleItemsHttpRequest(webReq, req.path, {
+          db: db.getD1Adapter(),
+          corsHeaders: {},
+          originAllowed: isRequestOriginAllowed(req),
+          shopTestMode: config.shopTestMode ?? process.env.SHOP_TEST_MODE,
+        });
+
+        if (!webRes) {
+          res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'مسیر فروشگاه یافت نشد.' });
+          return;
+        }
+
+        forwardWebHeadersToExpress(webRes.headers, res);
+        const responseText = await webRes.text();
+        res.status(webRes.status).send(responseText);
+      } catch (err) {
+        console.error(
+          '[Items] Express route adapter error:',
+          err instanceof Error ? err.message : 'unknown'
+        );
+        res.status(500).json({
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'خطای داخلی سرور رخ داد.',
+        });
+      }
+    }
+  );
+
+  // Toman Coin/Gem Top-Up Payments (`/api/payments/*`)
+  app.all('/api/payments/*', async (req: Request, res: Response) => {
+    try {
+      const secure = isSecureIncomingReq(req);
+      const protocol = secure ? 'https' : 'http';
+      const host = req.headers.host ?? `localhost:${defaultPort}`;
+      const fullUrl = `${protocol}://${host}${req.originalUrl}`;
+      const headers = new Headers();
+      for (const [key, val] of Object.entries(req.headers)) {
+        const lower = key.toLowerCase();
+        if (
+          lower === 'content-length' ||
+          lower === 'transfer-encoding' ||
+          lower === 'connection'
+        ) {
+          continue;
+        }
+        if (typeof val === 'string') {
+          headers.set(key, val);
+        } else if (Array.isArray(val)) {
+          headers.set(key, val.join(', '));
+        }
+      }
+
+      const method = req.method.toUpperCase();
+      const hasBody = method !== 'GET' && method !== 'HEAD';
+      const bodyStr =
+        hasBody && req.body !== undefined && typeof req.body === 'object' && req.body !== null
+          ? JSON.stringify(req.body)
+          : undefined;
+
+      const webReq = new Request(fullUrl, {
+        method,
+        headers,
+        body: bodyStr,
+      });
+
+      const publicAppBaseUrl = resolvePublicAppBaseUrl(
+        [config.publicAppUrl, config.appUrl, config.allowedOrigins],
+        fullUrl,
+        { isProduction: config.isProduction }
+      );
+
+      const webRes = await handlePaymentsHttpRequest(webReq, req.path, {
+        db: db.getD1Adapter(),
+        corsHeaders: {},
+        originAllowed: isRequestOriginAllowed(req),
+        zarinpalMerchantId: config.zarinpalMerchantId ?? process.env.ZARINPAL_MERCHANT_ID,
+        publicAppBaseUrl: publicAppBaseUrl ?? undefined,
+        shopTestMode: config.shopTestMode ?? process.env.SHOP_TEST_MODE,
+      });
+
+      if (!webRes) {
+        res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'مسیر پرداخت یافت نشد.' });
+        return;
+      }
+
+      forwardWebHeadersToExpress(webRes.headers, res);
+      const responseText = await webRes.text();
+      res.status(webRes.status).send(responseText);
+    } catch (err) {
+      console.error(
+        '[Payments] Express route adapter error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      res.status(500).json({
+        ok: false,
+        code: 'DATABASE_ERROR',
+        message: 'خطای داخلی سرور رخ داد.',
+      });
+    }
+  });
+
   const resolveOptionalVerifiedAuthUser = async (
     req: Request
   ): Promise<{ userId: string; username: string; avatarCode: string } | null> => {
@@ -533,6 +686,10 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
       }
     }
 
+    const appearance = verifiedUser
+      ? await getPublicAppearanceForUser(db.getD1Adapter(), verifiedUser.userId)
+      : sanitizeSeatAppearance(body.appearance);
+
     const result = roomManager.createRoom({
       username: verifiedUser ? verifiedUser.username : body.username,
       userId: verifiedUser
@@ -541,6 +698,7 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
           ? guestIdentity.userId
           : null,
       avatarCode: verifiedUser ? verifiedUser.avatarCode : body.avatarCode,
+      appearance,
       targetMatchScore: body.targetMatchScore,
       isPublic: body.isPublic === true,
     });
@@ -596,6 +754,10 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
       }
     }
 
+    const appearance = verifiedUser
+      ? await getPublicAppearanceForUser(db.getD1Adapter(), verifiedUser.userId)
+      : sanitizeSeatAppearance(body.appearance);
+
     const result = roomManager.quickMatchRoom({
       username: verifiedUser ? verifiedUser.username : body.username,
       userId: verifiedUser
@@ -604,6 +766,7 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
           ? guestIdentity.userId
           : null,
       avatarCode: verifiedUser ? verifiedUser.avatarCode : body.avatarCode,
+      appearance,
       targetMatchScore: body.targetMatchScore,
     });
     if (result.ok === false) {
@@ -677,6 +840,10 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
       }
     }
 
+    const appearance = verifiedUser
+      ? await getPublicAppearanceForUser(db.getD1Adapter(), verifiedUser.userId)
+      : sanitizeSeatAppearance(body.appearance);
+
     const result = roomManager.joinRoom(String(req.params.code ?? ''), {
       username: verifiedUser ? verifiedUser.username : body.username,
       userId: verifiedUser
@@ -685,6 +852,7 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
           ? guestIdentity.userId
           : null,
       avatarCode: verifiedUser ? verifiedUser.avatarCode : body.avatarCode,
+      appearance,
       preferredSeat,
     });
     if (result.ok === false) {

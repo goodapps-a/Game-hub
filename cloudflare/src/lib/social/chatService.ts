@@ -918,6 +918,29 @@ export async function sendDirectMessage(
     };
   }
 
+  const requestedKind = payload.kind === 'game_invite' ? 'game_invite' : 'text';
+  if (requestedKind === 'game_invite') {
+    const requestedGameId =
+      typeof payload.gameId === 'string' ? payload.gameId.trim().toLowerCase() : '';
+    if (requestedGameId === 'hokm') {
+      return {
+        ok: false,
+        status: 400,
+        code: 'INVALID_INPUT',
+        message: 'بازی حکم ۴ نفره است — برای دعوت دوستان، یک گروه بسازید.',
+      };
+    }
+    const allowedTwoPlayerGames = new Set(['chess', 'backgammon', 'pasoor', 'ludo']);
+    if (!allowedTwoPlayerGames.has(requestedGameId)) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'INVALID_INPUT',
+        message: 'در گفتگوی خصوصی تنها دعوت بازی‌های دونفره مجاز است.',
+      };
+    }
+  }
+
   const cleanBody = sanitizeMessageBody(payload.body);
   if (!cleanBody) {
     return {
@@ -1031,9 +1054,9 @@ export async function sendDirectMessage(
                       OR (ub.blocker_id = ? AND ub.blocked_id = ?)
                  )
                LIMIT 1
-             ),
-             'text', ?, ?, ?, NULL
-           )`
+              ),
+              ?, ?, ?, ?, NULL
+            )`
         )
         .bind(
           messageId,
@@ -1045,6 +1068,7 @@ export async function sendDirectMessage(
           membership.partnerUserId,
           membership.partnerUserId,
           ctx.actorUserId,
+          requestedKind,
           cleanBody,
           clientMsgId,
           now
@@ -1155,7 +1179,7 @@ export async function sendDirectMessage(
       messageId,
       conversationId,
       senderId: ctx.actorUserId,
-      kind: 'text',
+      kind: requestedKind,
       body: cleanBody,
       clientMsgId,
       createdAt: now,

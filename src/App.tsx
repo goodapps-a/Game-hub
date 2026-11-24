@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   GameId,
   PlatformTabId,
-  ProfileBannerCode,
   ShopItem,
   ThemeMode,
   UserProfile,
@@ -35,7 +34,7 @@ import {
   GameHubLaunchRequest,
   HokmHubSubView,
 } from './platform/pages/GameDetailPage';
-import { FriendsPage } from './platform/pages/FriendsPage';
+import { FriendsPage, SocialSubTab } from './platform/pages/FriendsPage';
 import { HokmGame } from './games/hokm/HokmGame';
 import {
   OnlineHokmGame,
@@ -55,6 +54,20 @@ import {
   EYVAN_CLASSIC_DECK_ID,
   deckRuntime,
 } from './platform/decks';
+import {
+  DEFAULT_EQUIPPED_SLOTS,
+  ItemSlot,
+  SHOP_TEST_MODE_DEFAULT,
+  ServerInventoryState,
+  buildPublicAppearanceFromSlots,
+  claimShopItemRequest,
+  equipInventoryItemRequest,
+  fetchMyInventoryRequest,
+  fetchShopCatalogRequest,
+  resolveCatalogItemDefinition,
+  toDeckItemId,
+  unequipInventorySlotRequest,
+} from './platform/items';
 
 type ActiveGameView = 'hokm-online' | 'hokm-offline' | null;
 
@@ -73,6 +86,24 @@ function getInitialGameFromQuery(): ActiveGameView {
   if (params.get('autostart') === '1') return 'hokm-offline';
   if (params.get('room')) return 'hokm-online';
   return null;
+}
+
+function consumeTomanOrderFromQuery(): string | null {
+  if (typeof window === 'undefined') return null;
+  const params = new URLSearchParams(window.location.search);
+  const raw = params.get('tomanOrder')?.trim() ?? '';
+  if (!raw) return null;
+  params.delete('tomanOrder');
+  params.delete('Authority');
+  params.delete('Status');
+  const nextQuery = params.toString();
+  const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`;
+  try {
+    window.history.replaceState(window.history.state, '', nextUrl);
+  } catch {
+    // Ignore history restrictions
+  }
+  return raw;
 }
 
 function getInitialThemeMode(): ThemeMode {
@@ -106,17 +137,19 @@ function isEditableElement(el: EventTarget | null): boolean {
   return el.isContentEditable;
 }
 
-function resolveBannerCodeFromShopItem(itemId: string): ProfileBannerCode | null {
-  if (itemId === 'af-banner-garden') return 'garden';
-  if (itemId === 'af-banner-ruby') return 'ruby';
-  if (itemId === 'af-banner-royal') return 'royal';
-  return null;
-}
-
 export default function App() {
-  const [activeTab, setActiveTab] = useState<PlatformTabId>('games');
+  const [pendingTomanOrderId, setPendingTomanOrderId] = useState<string | null>(() =>
+    consumeTomanOrderFromQuery()
+  );
+  const [activeTab, setActiveTab] = useState<PlatformTabId>(() =>
+    pendingTomanOrderId ? 'shop' : 'games'
+  );
   const [shopInitialCategory, setShopInitialCategory] =
-    useState<ShopCategoryFilter>('all');
+    useState<ShopCategoryFilter>(() =>
+      pendingTomanOrderId ? 'toman_topup' : 'all'
+    );
+  const [friendsInitialTab, setFriendsInitialTab] =
+    useState<SocialSubTab>('friends');
   const [selectedGameHub, setSelectedGameHub] = useState<GameId | null>(null);
   const [hokmHubSubView, setHokmHubSubView] =
     useState<HokmHubSubView>('hub');
@@ -159,6 +192,9 @@ export default function App() {
 
   const themeMode = profile.appSettings.themeMode;
 
+  const [shopTestMode, setShopTestMode] = useState<boolean>(SHOP_TEST_MODE_DEFAULT);
+  const [shopNotice, setShopNotice] = useState<string | null>(null);
+
   const updateProfile = useCallback(
     (updater: UserProfile | ((prev: UserProfile) => UserProfile)) => {
       setProfile((prev) => {
@@ -172,12 +208,44 @@ export default function App() {
           customBannerUrl: next.customBannerUrl ?? null,
           equippedTableSkinId: next.equippedTableSkinId ?? 'tt-traditional',
           equippedDeckId: next.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID,
+          equippedCardBackId: next.equippedCardBackId ?? 'cb-shamsa',
+          equippedAvatarFrameId: next.equippedAvatarFrameId,
+          equippedBadgeId: next.equippedBadgeId,
+          equippedNameplateId: next.equippedNameplateId,
+          equippedGameEffectId: next.equippedGameEffectId,
           ownedShopItemIds: next.ownedShopItemIds ?? [...DEFAULT_OWNED_SHOP_IDS],
           coins: next.coins,
           gems: next.gems,
         });
         return next;
       });
+    },
+    []
+  );
+
+  const applyServerInventoryToProfile = useCallback(
+    (inv: ServerInventoryState) => {
+      setShopTestMode(inv.shopTestMode);
+      const pub = inv.publicAppearance ?? buildPublicAppearanceFromSlots(inv.equippedSlots);
+      setProfile((prev) => ({
+        ...prev,
+        coins: inv.coins,
+        gems: inv.gems,
+        ownedShopItemIds: inv.ownedItemIds,
+        equippedSlots: inv.equippedSlots,
+        equippedTableSkinId: inv.equippedSlots.table_skin ?? 'tt-traditional',
+        equippedDeckId: pub.deckId || EYVAN_CLASSIC_DECK_ID,
+        equippedCardBackId: pub.cardBackId ?? 'cb-shamsa',
+        equippedAvatarFrameId: pub.avatarFrameId ?? undefined,
+        equippedBadgeId: pub.badgeId ?? undefined,
+        equippedNameplateId: pub.nameplateId ?? undefined,
+        equippedGameEffectId: pub.gameEffectId ?? undefined,
+        bannerCode: pub.bannerCode ?? 'royal',
+        customBannerUrl: null,
+      }));
+      if (pub.deckId && pub.deckId !== EYVAN_CLASSIC_DECK_ID) {
+        void deckRuntime.activateDeck(pub.deckId);
+      }
     },
     []
   );
@@ -196,6 +264,7 @@ export default function App() {
       setProfile((prev) => ({
         ...prev,
         id: user.userId,
+        accountCode: user.accountCode ?? prev.accountCode ?? null,
         username: user.username,
         avatarCode: validAvatar,
       }));
@@ -229,6 +298,50 @@ export default function App() {
       active = false;
     };
   }, []);
+
+  // Sync central shop test mode flag from server catalog
+  useEffect(() => {
+    let active = true;
+    fetchShopCatalogRequest()
+      .then((res) => {
+        if (active && res.ok && typeof res.shopTestMode === 'boolean') {
+          setShopTestMode(res.shopTestMode);
+        }
+      })
+      .catch(() => {
+        // Offline / local fallback keeps SHOP_TEST_MODE_DEFAULT
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Hydrate authoritative server inventory, wallet & equipped slots when authenticated
+  useEffect(() => {
+    if (!authUser) return;
+    let active = true;
+    fetchMyInventoryRequest()
+      .then((res) => {
+        if (!active || !res.ok || !res.ownedItemIds || !res.equippedSlots) return;
+        applyServerInventoryToProfile({
+          userId: res.userId ?? authUser.userId,
+          coins: res.coins ?? 0,
+          gems: res.gems ?? 0,
+          ownedItemIds: res.ownedItemIds,
+          inventory: res.inventory ?? [],
+          equippedSlots: res.equippedSlots,
+          publicAppearance:
+            res.publicAppearance ?? buildPublicAppearanceFromSlots(res.equippedSlots),
+          shopTestMode: res.shopTestMode ?? shopTestMode,
+        });
+      })
+      .catch(() => {
+        // Non-fatal if offline
+      });
+    return () => {
+      active = false;
+    };
+  }, [authUser?.userId, applyServerInventoryToProfile]);
 
   // Hydrate real permanent game stats bound strictly to `user_id` (`/api/stats/me`)
   useEffect(() => {
@@ -542,6 +655,9 @@ export default function App() {
     if (tab === 'shop') {
       setShopInitialCategory('all');
     }
+    if (tab === 'friends') {
+      setFriendsInitialTab('friends');
+    }
     if (tab !== activeTab) {
       setActiveTab(tab);
     }
@@ -577,32 +693,33 @@ export default function App() {
     }
   };
 
-  const handlePurchaseShopItem = useCallback(
-    (item: ShopItem) => {
+  const applyEquippedDefinitionLocally = useCallback(
+    (itemId: string) => {
+      const def = resolveCatalogItemDefinition(
+        itemId,
+        DeckRegistry.getAllCatalogEntries(false)
+      );
+      if (!def || !def.isEquippable || !def.slot) return;
+      const slot = def.slot;
+
       updateProfile((prev) => {
-        const owned = new Set(prev.ownedShopItemIds ?? DEFAULT_OWNED_SHOP_IDS);
-        if (owned.has(item.id)) return prev;
-
-        const nextCoins =
-          item.currency === 'coins' ? prev.coins - item.price : prev.coins;
-        const nextGems =
-          item.currency === 'gems' ? prev.gems - item.price : prev.gems;
-        if (nextCoins < 0 || nextGems < 0) return prev;
-
-        owned.add(item.id);
-        const bannerFromItem = resolveBannerCodeFromShopItem(item.id);
-
+        const nextSlots = {
+          ...(prev.equippedSlots ?? DEFAULT_EQUIPPED_SLOTS),
+          [slot]: def.id,
+        };
+        const pub = buildPublicAppearanceFromSlots(nextSlots);
         return {
           ...prev,
-          coins: nextCoins,
-          gems: nextGems,
-          ownedShopItemIds: Array.from(owned),
-          equippedTableSkinId:
-            item.section === 'table_themes'
-              ? item.id
-              : prev.equippedTableSkinId,
-          bannerCode: bannerFromItem ?? prev.bannerCode,
-          customBannerUrl: bannerFromItem ? null : prev.customBannerUrl,
+          equippedSlots: nextSlots,
+          equippedTableSkinId: nextSlots.table_skin ?? prev.equippedTableSkinId,
+          equippedDeckId: pub.deckId || prev.equippedDeckId,
+          equippedCardBackId: pub.cardBackId ?? prev.equippedCardBackId,
+          equippedAvatarFrameId: pub.avatarFrameId ?? undefined,
+          equippedBadgeId: pub.badgeId ?? undefined,
+          equippedNameplateId: pub.nameplateId ?? undefined,
+          equippedGameEffectId: pub.gameEffectId ?? undefined,
+          bannerCode: slot === 'banner' ? pub.bannerCode : prev.bannerCode,
+          customBannerUrl: slot === 'banner' ? null : prev.customBannerUrl,
         };
       });
     },
@@ -610,37 +727,163 @@ export default function App() {
   );
 
   const handleEquipShopItem = useCallback(
-    (item: ShopItem) => {
+    async (item: ShopItem) => {
+      setShopNotice(null);
+      const def = resolveCatalogItemDefinition(
+        item.id,
+        DeckRegistry.getAllCatalogEntries(false)
+      );
+      if (!def || !def.isEquippable || !def.slot) return;
+
+      if (def.deckId) {
+        const res = await deckRuntime.activateDeck(def.deckId);
+        if (res.fallbackUsed && def.deckId !== EYVAN_CLASSIC_DECK_ID) {
+          setShopNotice('برای فعال‌سازی این دست ورق ابتدا باید بسته‌ی آن دانلود شود.');
+          return;
+        }
+      }
+
+      if (authUser) {
+        try {
+          const equipRes = await equipInventoryItemRequest(def.id, def.slot);
+          if (equipRes.ok && equipRes.inventory) {
+            applyServerInventoryToProfile(equipRes.inventory);
+            return;
+          }
+          if (equipRes.message) {
+            setShopNotice(equipRes.message);
+          }
+          return;
+        } catch {
+          setShopNotice('خطا در ذخیره انتخاب روی سرور.');
+          return;
+        }
+      }
+
+      applyEquippedDefinitionLocally(def.id);
+    },
+    [authUser, applyEquippedDefinitionLocally, applyServerInventoryToProfile]
+  );
+
+  const handleUnequipSlot = useCallback(
+    async (slot: ItemSlot) => {
+      setShopNotice(null);
+      if (authUser) {
+        try {
+          const res = await unequipInventorySlotRequest(slot);
+          if (res.ok && res.inventory) {
+            applyServerInventoryToProfile(res.inventory);
+          }
+          return;
+        } catch {
+          return;
+        }
+      }
+
       updateProfile((prev) => {
-        if (item.section === 'table_themes') {
-          return {
-            ...prev,
-            equippedTableSkinId: item.id,
-          };
-        }
-        const bannerFromItem = resolveBannerCodeFromShopItem(item.id);
-        if (bannerFromItem) {
-          return {
-            ...prev,
-            bannerCode: bannerFromItem,
-            customBannerUrl: null,
-          };
-        }
-        return prev;
+        const nextSlots = { ...(prev.equippedSlots ?? DEFAULT_EQUIPPED_SLOTS) };
+        if (slot === 'card_deck') nextSlots.card_deck = 'deck-eyvan-classic';
+        else if (slot === 'card_back') nextSlots.card_back = 'cb-shamsa';
+        else if (slot === 'table_skin') nextSlots.table_skin = 'tt-traditional';
+        else if (slot === 'banner') nextSlots.banner = 'af-banner-royal';
+        else delete nextSlots[slot];
+
+        const pub = buildPublicAppearanceFromSlots(nextSlots);
+        return {
+          ...prev,
+          equippedSlots: nextSlots,
+          equippedTableSkinId: nextSlots.table_skin ?? 'tt-traditional',
+          equippedDeckId: pub.deckId || EYVAN_CLASSIC_DECK_ID,
+          equippedCardBackId: pub.cardBackId ?? 'cb-shamsa',
+          equippedAvatarFrameId: pub.avatarFrameId ?? undefined,
+          equippedBadgeId: pub.badgeId ?? undefined,
+          equippedNameplateId: pub.nameplateId ?? undefined,
+          equippedGameEffectId: pub.gameEffectId ?? undefined,
+          bannerCode: pub.bannerCode,
+        };
       });
     },
-    [updateProfile]
+    [authUser, applyServerInventoryToProfile, updateProfile]
+  );
+
+  const handlePurchaseShopItem = useCallback(
+    async (item: ShopItem) => {
+      setShopNotice(null);
+      const def = resolveCatalogItemDefinition(
+        item.id,
+        DeckRegistry.getAllCatalogEntries(false)
+      );
+      if (!def) return;
+
+      if (!authUser) {
+        openAuthModal('login', 'برای دریافت آیتم‌ها و ذخیره دائمی در حساب، ابتدا وارد شوید.');
+        return;
+      }
+
+      try {
+        const claimRes = await claimShopItemRequest(def.id);
+        if (!claimRes.ok || !claimRes.inventory) {
+          setShopNotice(claimRes.message ?? 'دریافت آیتم انجام نشد.');
+          return;
+        }
+        applyServerInventoryToProfile(claimRes.inventory);
+
+        if (claimRes.grantedCoins || claimRes.grantedGems) {
+          const parts: string[] = [];
+          if (claimRes.grantedCoins) {
+            parts.push(`${claimRes.grantedCoins.toLocaleString('fa-IR')} سکه`);
+          }
+          if (claimRes.grantedGems) {
+            parts.push(`${claimRes.grantedGems.toLocaleString('fa-IR')} الماس`);
+          }
+          setShopNotice(`تبریک! ${parts.join(' و ')} به حساب شما اضافه شد.`);
+        } else if (def.isEquippable && def.slot && def.kind !== 'card_deck') {
+          // Automatically equip non-deck cosmetics upon claim for instant feedback
+          const equipRes = await equipInventoryItemRequest(def.id, def.slot);
+          if (equipRes.ok && equipRes.inventory) {
+            applyServerInventoryToProfile(equipRes.inventory);
+          }
+        }
+      } catch {
+        setShopNotice('ارتباط با سرور فروشگاه برقرار نشد.');
+      }
+    },
+    [authUser, applyServerInventoryToProfile]
   );
 
   const handleSelectDeck = useCallback(
     async (deckId: string) => {
+      setShopNotice(null);
       const res = await deckRuntime.activateDeck(deckId);
+      const targetDeckId = res.activatedDeckId;
+      const deckItemId = toDeckItemId(targetDeckId);
+
+      if (authUser) {
+        try {
+          const ownedSet = new Set(profile.ownedShopItemIds ?? []);
+          if (!ownedSet.has(deckItemId)) {
+            await claimShopItemRequest(deckItemId);
+          }
+          const equipRes = await equipInventoryItemRequest(deckItemId, 'card_deck');
+          if (equipRes.ok && equipRes.inventory) {
+            applyServerInventoryToProfile(equipRes.inventory);
+            return;
+          }
+        } catch {
+          // Fall back locally when offline so downloaded offline decks still equip smoothly
+        }
+      }
+
       updateProfile((prev) => ({
         ...prev,
-        equippedDeckId: res.activatedDeckId,
+        equippedDeckId: targetDeckId,
+        equippedSlots: {
+          ...(prev.equippedSlots ?? DEFAULT_EQUIPPED_SLOTS),
+          card_deck: deckItemId,
+        },
       }));
     },
-    [updateProfile]
+    [authUser, profile.ownedShopItemIds, applyServerInventoryToProfile, updateProfile]
   );
 
   const handleLaunchFromGameHub = (req: GameHubLaunchRequest) => {
@@ -682,12 +925,19 @@ export default function App() {
   // ACTIVE GAME VIEWS (Full-Screen)
   // =========================================================================
   if (activeGame === 'hokm-online') {
+    const publicAppearance = buildPublicAppearanceFromSlots(
+      profile.equippedSlots ?? DEFAULT_EQUIPPED_SLOTS,
+      Boolean(!profile.customBannerUrl && profile.bannerCode === 'none')
+    );
     return (
       <OnlineHokmGame
         username={profile.username}
         avatarCode={profile.avatarCode}
         tableSkinId={profile.equippedTableSkinId}
         deckId={profile.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID}
+        cardBackId={profile.equippedCardBackId}
+        gameEffectId={profile.equippedGameEffectId}
+        appearance={publicAppearance}
         isAuthenticated={Boolean(authUser)}
         initialRoomCode={initialRoomCode}
         autoJoinRoom={autoJoinInviteRoom}
@@ -738,6 +988,8 @@ export default function App() {
         playerName={profile.username}
         tableSkinId={profile.equippedTableSkinId}
         deckId={profile.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID}
+        cardBackId={profile.equippedCardBackId}
+        gameEffectId={profile.equippedGameEffectId}
         targetMatchScore={hokmTargetScore}
         soundEnabled={profile.appSettings.soundEnabled}
         animationSpeed={profile.appSettings.animationSpeed}
@@ -787,22 +1039,33 @@ export default function App() {
           userGems={profile.gems}
           isAuthenticated={Boolean(authUser)}
           ownedItemIds={profile.ownedShopItemIds}
+          equippedSlots={profile.equippedSlots}
           equippedTableSkinId={profile.equippedTableSkinId}
           equippedBannerCode={profile.bannerCode}
           equippedDeckId={profile.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID}
+          shopTestMode={shopTestMode}
+          shopNotice={shopNotice}
           onPurchaseItem={handlePurchaseShopItem}
           onEquipItem={handleEquipShopItem}
+          onUnequipSlot={handleUnequipSlot}
           onSelectDeck={handleSelectDeck}
           onRequireAuth={() => openAuthModal('login', null)}
+          onInventorySync={applyServerInventoryToProfile}
+          onOpenFriendGroups={() => {
+            setSelectedGameHub(null);
+            setHokmHubSubView('hub');
+            setFriendsInitialTab('groups');
+            setActiveTab('friends');
+          }}
           onBack={() => {
             setSelectedGameHub(null);
             setHokmHubSubView('hub');
           }}
           onLaunchHokm={handleLaunchFromGameHub}
-          onOpenFullShop={() => {
+          onOpenFullShop={(category = 'all') => {
             setSelectedGameHub(null);
             setHokmHubSubView('hub');
-            setShopInitialCategory('all');
+            setShopInitialCategory(category);
             setActiveTab('shop');
           }}
         />
@@ -880,12 +1143,25 @@ export default function App() {
               userGems={profile.gems}
               isAuthenticated={Boolean(authUser)}
               ownedItemIds={profile.ownedShopItemIds}
+              equippedSlots={profile.equippedSlots}
               equippedTableSkinId={profile.equippedTableSkinId}
               equippedBannerCode={profile.bannerCode}
               equippedDeckId={profile.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID}
+              shopTestMode={shopTestMode}
+              shopNotice={shopNotice}
               onPurchaseItem={handlePurchaseShopItem}
               onEquipItem={handleEquipShopItem}
+              onUnequipSlot={handleUnequipSlot}
               onSelectDeck={handleSelectDeck}
+              onOpenTopUpShop={() => {
+                setSelectedGameHub(null);
+                setHokmHubSubView('hub');
+                setShopInitialCategory('toman_topup');
+                setActiveTab('shop');
+              }}
+              onInventorySync={applyServerInventoryToProfile}
+              pendingTomanOrderId={pendingTomanOrderId}
+              onClearPendingTomanOrder={() => setPendingTomanOrderId(null)}
               initialCategory={shopInitialCategory}
               onRequireAuth={() => openAuthModal('login', null)}
               onBack={() => handleSelectTab('games')}
@@ -901,6 +1177,7 @@ export default function App() {
             <FriendsPage
               authUser={authUser}
               authLoading={authLoading}
+              initialTab={friendsInitialTab}
               onOpenAccount={() => openAuthModal('login', null)}
               onBack={() => handleSelectTab('games')}
               onJoinInvitedRoom={(roomCode) => {

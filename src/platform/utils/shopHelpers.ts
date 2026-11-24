@@ -1,3 +1,4 @@
+import { ItemKind } from '../items/itemTypes';
 import {
   ShopItem,
   ShopRarity,
@@ -5,6 +6,9 @@ import {
 } from '../types/platform';
 
 export type ShopCategoryFilter = ShopSectionId | 'all';
+export type ShopItemTypeFilter = ItemKind | 'all';
+export type ShopRarityFilter = ShopRarity | 'all';
+export type ShopOwnershipFilter = 'all' | 'owned' | 'unowned';
 
 export interface ShopRarityStyleMeta {
   readonly label: string;
@@ -52,6 +56,123 @@ export function getShopItemsByCategory(
 
 export function getFeaturedShopItems(items: readonly ShopItem[]): ShopItem[] {
   return items.filter((item) => item.section === 'daily_deals');
+}
+
+export interface CatalogFilterableItem {
+  readonly id: string;
+  readonly name: string;
+  readonly subtitle: string;
+  readonly description: string;
+  readonly section: ShopSectionId;
+  readonly rarity: ShopRarity;
+  readonly kind?: ItemKind;
+  readonly isDefaultOwned?: boolean;
+  readonly tags?: readonly string[];
+}
+
+export interface FilterCatalogItemsInput<T extends CatalogFilterableItem> {
+  readonly items: readonly T[];
+  readonly searchQuery?: string;
+  readonly category?: ShopCategoryFilter;
+  readonly itemType?: ShopItemTypeFilter;
+  readonly rarity?: ShopRarityFilter;
+  readonly ownershipFilter?: ShopOwnershipFilter;
+  readonly ownedItemIds?: ReadonlySet<string> | readonly string[];
+}
+
+export function filterCatalogItems<T extends CatalogFilterableItem>(
+  input: FilterCatalogItemsInput<T>
+): T[] {
+  const query = (input.searchQuery ?? '').trim().toLowerCase();
+  const category = input.category ?? 'all';
+  const itemType = input.itemType ?? 'all';
+  const rarity = input.rarity ?? 'all';
+  const ownershipFilter = input.ownershipFilter ?? 'all';
+  const ownedSet =
+    input.ownedItemIds instanceof Set
+      ? input.ownedItemIds
+      : new Set(input.ownedItemIds ?? []);
+
+  return input.items.filter((item) => {
+    if (category !== 'all' && item.section !== category) return false;
+    if (itemType !== 'all' && item.kind !== itemType) return false;
+    if (rarity !== 'all' && item.rarity !== rarity) return false;
+
+    if (ownershipFilter !== 'all') {
+      const isOwned = Boolean(item.isDefaultOwned || ownedSet.has(item.id));
+      if (ownershipFilter === 'owned' && !isOwned) return false;
+      if (ownershipFilter === 'unowned' && isOwned) return false;
+    }
+
+    if (query.length > 0) {
+      const haystack = [
+        item.name,
+        item.subtitle,
+        item.description,
+        item.id,
+        ...(item.tags ?? []),
+      ]
+        .join(' ')
+        .toLowerCase();
+      if (!haystack.includes(query)) return false;
+    }
+
+    return true;
+  });
+}
+
+export interface PaginatedCatalogResult<T> {
+  readonly visibleItems: T[];
+  readonly hasMore: boolean;
+  readonly totalCount: number;
+  readonly pageCount: number;
+}
+
+export function paginateCatalogItems<T>(
+  items: readonly T[],
+  page: number,
+  pageSize = 24
+): PaginatedCatalogResult<T> {
+  const safePageSize = Math.max(1, Math.floor(pageSize));
+  const safePage = Math.max(1, Math.floor(page));
+  const totalCount = items.length;
+  const pageCount = Math.max(1, Math.ceil(totalCount / safePageSize));
+  const end = Math.min(totalCount, safePage * safePageSize);
+  return {
+    visibleItems: items.slice(0, end),
+    hasMore: end < totalCount,
+    totalCount,
+    pageCount,
+  };
+}
+
+export interface EffectiveShopPriceBreakdown {
+  readonly realPrice: number;
+  readonly effectivePrice: number;
+  readonly isTestModeFree: boolean;
+}
+
+export function getEffectiveShopPriceBreakdown(
+  item: {
+    readonly price: number;
+    readonly currency: 'coins' | 'gems';
+    readonly isDefaultOwned?: boolean;
+  },
+  shopTestMode: boolean
+): EffectiveShopPriceBreakdown {
+  const realPrice = Number.isFinite(item.price) && item.price > 0 ? item.price : 0;
+  if (shopTestMode && realPrice > 0 && !item.isDefaultOwned) {
+    return {
+      realPrice,
+      effectivePrice: 0,
+      isTestModeFree: true,
+    };
+  }
+  return {
+    realPrice,
+    effectivePrice: realPrice,
+    isTestModeFree: false,
+  };
 }
 
 export type ShopAvailabilityStatus =

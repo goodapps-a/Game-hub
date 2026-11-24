@@ -79,16 +79,13 @@ function shouldBypassRequest(request, url) {
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches
-      .open(APP_SHELL_CACHE)
-      .then((cache) =>
-        Promise.allSettled(
-          APP_SHELL_URLS.map((url) =>
-            cache.add(new Request(url, { cache: 'reload' })).catch(() => undefined)
-          )
+    caches.open(APP_SHELL_CACHE).then((cache) =>
+      Promise.allSettled(
+        APP_SHELL_URLS.map((url) =>
+          cache.add(new Request(url, { cache: 'reload' })).catch(() => undefined)
         )
       )
-      .then(() => self.skipWaiting())
+    )
   );
 });
 

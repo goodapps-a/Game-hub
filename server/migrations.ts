@@ -192,6 +192,36 @@ function detectLegacyBaselineMigrations(
     detected.push('0012_cron_pruning_indexes.sql');
   }
 
+  const has0013 =
+    has0012 &&
+    tableExists(db, 'user_wallets') &&
+    tableExists(db, 'user_inventory') &&
+    tableExists(db, 'user_equipped_items') &&
+    tableExists(db, 'user_wallet_claims');
+
+  if (
+    has0013 &&
+    availableFiles.includes('0013_items_inventory_equip.sql')
+  ) {
+    detected.push('0013_items_inventory_equip.sql');
+  }
+
+  const has0014 =
+    has0013 &&
+    columnExists(db, 'users', 'account_code') &&
+    tableExists(db, 'gift_transactions') &&
+    tableExists(db, 'toman_payment_orders') &&
+    tableExists(db, 'friend_groups') &&
+    tableExists(db, 'friend_group_members') &&
+    tableExists(db, 'group_messages');
+
+  if (
+    has0014 &&
+    availableFiles.includes('0014_account_code_gifts_toman_groups.sql')
+  ) {
+    detected.push('0014_account_code_gifts_toman_groups.sql');
+  }
+
   return detected;
 }
 

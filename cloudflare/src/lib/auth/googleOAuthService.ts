@@ -39,6 +39,7 @@ import {
   PublicAuthUser,
 } from './types';
 import { validateAuthUsername, validateEmail } from './validation';
+import { allocateUniqueAccountCode, ensureUserAccountCode } from './accountCode';
 
 export const OAUTH_BIND_COOKIE_NAME = 'eyvan_oauth_bind';
 export const OAUTH_BIND_COOKIE_PREFIX = 'eyvan_oauth_bind_';
@@ -596,6 +597,7 @@ interface UserRow {
   username: string;
   username_key: string;
   display_name: string;
+  account_code: string | null;
   email: string | null;
   email_key: string | null;
   email_verified: number;
@@ -992,6 +994,7 @@ function mapUserRowToPublic(row: UserRow): PublicAuthUser {
     userId: row.user_id,
     username: row.username,
     displayName: row.display_name,
+    accountCode: row.account_code ?? null,
     email: row.email,
     emailVerified: row.email_verified === 1,
     avatarCode: row.avatar_code,
@@ -1568,7 +1571,7 @@ export async function completeGoogleOAuthCallback(
     const targetUser = await db
       .prepare(
         `SELECT
-           user_id, username, username_key, display_name,
+           user_id, username, username_key, display_name, account_code,
            email, email_key, email_verified,
            avatar_code, avatar_url, auth_provider, account_status,
            created_at, last_seen_at
@@ -1745,7 +1748,7 @@ export async function completeGoogleOAuthCallback(
     const userRow = await db
       .prepare(
         `SELECT
-           user_id, username, username_key, display_name,
+           user_id, username, username_key, display_name, account_code,
            email, email_key, email_verified,
            avatar_code, avatar_url, auth_provider, account_status,
            created_at, last_seen_at
@@ -1816,6 +1819,9 @@ export async function completeGoogleOAuthCallback(
         .bind(now, claims.picture, now, userRow.user_id),
     ]);
 
+    const accountCode =
+      userRow.account_code ?? (await ensureUserAccountCode(db, userRow.user_id, now));
+
     return {
       ok: true,
       status: 200,
@@ -1824,7 +1830,10 @@ export async function completeGoogleOAuthCallback(
       openerOrigin,
       redirectUri: stateRedirectUri,
       user: {
-        ...mapUserRowToPublic(userRow),
+        ...mapUserRowToPublic({
+          ...userRow,
+          account_code: accountCode,
+        }),
         avatarUrl: userRow.avatar_url ?? claims.picture,
         lastSeenAt: now,
       },
@@ -1877,7 +1886,7 @@ export async function completeGoogleOAuthCallback(
       db
         .prepare(
           `SELECT
-             user_id, username, username_key, display_name,
+             user_id, username, username_key, display_name, account_code,
              email, email_key, email_verified,
              avatar_code, avatar_url, auth_provider, account_status,
              created_at, last_seen_at
@@ -1936,6 +1945,8 @@ export async function completeGoogleOAuthCallback(
       };
     }
 
+    const accountCode =
+      candidateGuest.account_code ?? (await allocateUniqueAccountCode(db));
     const allocated = await allocateUniqueUsernameForGoogle(
       db,
       [candidateGuest.username, claims.email, claims.name],
@@ -1957,6 +1968,7 @@ export async function completeGoogleOAuthCallback(
              SET username = ?,
                  username_key = ?,
                  display_name = ?,
+                 account_code = COALESCE(account_code, ?),
                  email = ?,
                  email_key = ?,
                  email_verified = 1,
@@ -1973,6 +1985,7 @@ export async function completeGoogleOAuthCallback(
             allocated.username,
             allocated.usernameKey,
             claims.name ?? allocated.username,
+            accountCode,
             claims.email,
             claims.emailKey,
             claims.picture,
@@ -2072,6 +2085,7 @@ export async function completeGoogleOAuthCallback(
         userId: candidateGuest.user_id,
         username: allocated.username,
         displayName: claims.name ?? allocated.username,
+        accountCode,
         email: claims.email,
         emailVerified: true,
         avatarCode: candidateGuest.avatar_code,
@@ -2096,6 +2110,7 @@ export async function completeGoogleOAuthCallback(
 
   // B4) Create brand-new active Google user
   const newUserId = generatePrefixedId('usr', 12);
+  const newAccountCode = await allocateUniqueAccountCode(db);
   const allocated = await allocateUniqueUsernameForGoogle(db, [
     claims.email,
     claims.name,
@@ -2106,17 +2121,18 @@ export async function completeGoogleOAuthCallback(
       db
         .prepare(
           `INSERT INTO users (
-             user_id, username, username_key, display_name,
+             user_id, username, username_key, display_name, account_code,
              email, email_key, email_verified,
              avatar_code, avatar_url, auth_provider, account_status,
              created_at, last_seen_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, 1, 'portrait', ?, 'google', 'active', ?, ?, ?)`
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'portrait', ?, 'google', 'active', ?, ?, ?)`
         )
         .bind(
           newUserId,
           allocated.username,
           allocated.usernameKey,
           claims.name ?? allocated.username,
+          newAccountCode,
           claims.email,
           claims.emailKey,
           claims.picture,
@@ -2179,6 +2195,7 @@ export async function completeGoogleOAuthCallback(
       userId: newUserId,
       username: allocated.username,
       displayName: claims.name ?? allocated.username,
+      accountCode: newAccountCode,
       email: claims.email,
       emailVerified: true,
       avatarCode: 'portrait',

@@ -5,6 +5,7 @@ import {
   CompletedMatchRecord,
   RoomEventNotice,
   RoomSnapshot,
+  SeatPublicAppearance,
 } from './online/protocol';
 import { projectedToTableState } from './online/perspective';
 import {
@@ -28,8 +29,10 @@ import { OnlineLobby, getAvatarSrcByCode } from './components/OnlineLobby';
 import { hokmSound } from './audio/soundEffects';
 import { preloadCardArtwork } from './components/PlayingCard';
 import {
+  DeckRegistry,
   EYVAN_CLASSIC_DECK_ID,
   deckRuntime,
+  defaultDeckStorageManager,
 } from '../../platform/decks';
 
 export type OnlineHokmLaunchAction =
@@ -43,6 +46,9 @@ interface OnlineHokmGameProps {
   avatarCode: string;
   tableSkinId?: string;
   deckId?: string;
+  cardBackId?: string;
+  gameEffectId?: string;
+  appearance?: SeatPublicAppearance;
   isAuthenticated?: boolean;
   initialRoomCode?: string;
   autoJoinRoom?: boolean;
@@ -61,6 +67,9 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
   avatarCode,
   tableSkinId = 'tt-traditional',
   deckId = EYVAN_CLASSIC_DECK_ID,
+  cardBackId,
+  gameEffectId,
+  appearance,
   isAuthenticated = false,
   initialRoomCode = '',
   autoJoinRoom = false,
@@ -113,8 +122,64 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
     setOsReducedMotion(mq.matches);
     const handler = (e: MediaQueryListEvent) => setOsReducedMotion(e.matches);
     mq.addEventListener('change', handler);
-    return () => mq.removeEventListener('change', handler);
+    return () => {
+      mq.removeEventListener('change', handler);
+      deckRuntime.releaseRoomDecks(new Set([deckId]));
+    };
   }, [deckId]);
+
+  const seatDeckKey =
+    snapshot?.seats
+      .map((s) => `${s.visualSeat}:${s.appearance?.deckId ?? ''}`)
+      .join('|') ?? '';
+
+  // Load every distinct player's Multi-Deck concurrently for authentic display at the table
+  // WITHOUT modifying the viewer's own ownedShopItemIds or equippedDeckId!
+  useEffect(() => {
+    if (!snapshot?.seats) return;
+    let active = true;
+    const distinctDecks = new Set<string>();
+    for (const s of snapshot.seats) {
+      const seatDeck = s.appearance?.deckId;
+      if (seatDeck && seatDeck !== EYVAN_CLASSIC_DECK_ID) {
+        distinctDecks.add(seatDeck);
+      }
+    }
+    if (distinctDecks.size === 0) return;
+
+    void (async () => {
+      for (const seatDeckId of distinctDecks) {
+        if (!active) break;
+        const firstLoad = await deckRuntime.loadDeck(seatDeckId, 'room_seat');
+        if (!active) break;
+        if (
+          firstLoad.fallbackUsed &&
+          typeof navigator !== 'undefined' &&
+          navigator.onLine !== false
+        ) {
+          let entry = DeckRegistry.getCatalogEntry(seatDeckId);
+          if (!entry) {
+            await DeckRegistry.fetchCatalog();
+            entry = DeckRegistry.getCatalogEntry(seatDeckId);
+          }
+          if (entry && active) {
+            try {
+              await defaultDeckStorageManager.installOrUpdateDeck({ entry });
+              if (active) {
+                await deckRuntime.loadDeck(seatDeckId, 'room_seat');
+              }
+            } catch {
+              // Seamless silent fallback to Eyvan Classic if display assets cannot download
+            }
+          }
+        }
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [seatDeckKey]);
 
   const reducedMotion = reducedMotionPreference || osReducedMotion;
 
@@ -397,6 +462,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
         username,
         avatarCode,
         targetMatchScore,
+        appearance,
       });
       setSessionCreds(creds);
     } catch (err) {
@@ -406,7 +472,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
     } finally {
       setBusy(false);
     }
-  }, [avatarCode, targetMatchScore, username]);
+  }, [appearance, avatarCode, targetMatchScore, username]);
 
   const handleQuickMatch = useCallback(async () => {
     setBusy(true);
@@ -417,6 +483,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
         username,
         avatarCode,
         targetMatchScore,
+        appearance,
       });
       setSessionCreds(creds);
       showTransientNotice(
@@ -432,7 +499,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
     } finally {
       setBusy(false);
     }
-  }, [avatarCode, showTransientNotice, targetMatchScore, username]);
+  }, [appearance, avatarCode, showTransientNotice, targetMatchScore, username]);
 
   const handleJoinRoom = useCallback(
     async (roomCode: string) => {
@@ -444,6 +511,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
           roomCode,
           username,
           avatarCode,
+          appearance,
         });
         setSessionCreds(creds);
       } catch (err) {
@@ -454,7 +522,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
         setBusy(false);
       }
     },
-    [avatarCode, username]
+    [appearance, avatarCode, username]
   );
 
   // One-click real-room launch from Game Hub or accepted game invite
@@ -493,6 +561,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
       clientRef.current = null;
     }
     void clearOnlineSession();
+    deckRuntime.releaseRoomDecks(new Set([deckId]));
     try {
       const nextUrl = new URL(window.location.href);
       if (nextUrl.searchParams.has('room')) {
@@ -510,7 +579,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
     setRttMs(null);
     setConnectionState('disconnected');
     refreshMatches();
-  }, [refreshMatches]);
+  }, [deckId, refreshMatches]);
 
   // Build visual seat metadata from authoritative snapshot
   const seatPlayers = useMemo<Record<Seat, OnlineSeatPlayerMeta> | undefined>(() => {
@@ -530,6 +599,19 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
     }
     return map;
   }, [nowTick, snapshot]);
+
+  const seatAppearances = useMemo<
+    Partial<Record<Seat, SeatPublicAppearance>> | undefined
+  >(() => {
+    if (!snapshot) return undefined;
+    const map: Partial<Record<Seat, SeatPublicAppearance>> = {};
+    for (const s of snapshot.seats) {
+      if (s.appearance) {
+        map[s.visualSeat] = s.appearance;
+      }
+    }
+    return map;
+  }, [snapshot]);
 
   // If playing or match finished -> render Phase 1 HokmTable seamlessly!
   if (
@@ -565,6 +647,9 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
           playerName={username}
           tableSkinId={tableSkinId}
           deckId={deckId}
+          cardBackId={cardBackId}
+          gameEffectId={gameEffectId}
+          seatAppearances={seatAppearances}
           reducedMotion={reducedMotion}
           canHumanPlay={canHumanPlay}
           exitConfirmOpen={exitConfirmOpen}

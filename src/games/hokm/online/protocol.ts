@@ -37,6 +37,17 @@ export type OnlineErrorCode =
   | 'RATE_LIMITED'
   | 'SUPERSEDED_CONNECTION';
 
+export interface SeatPublicAppearance {
+  readonly bannerCode?: string;
+  readonly bannerItemId?: string | null;
+  readonly avatarFrameId?: string | null;
+  readonly badgeId?: string | null;
+  readonly nameplateId?: string | null;
+  readonly deckId?: string;
+  readonly cardBackId?: string | null;
+  readonly gameEffectId?: string | null;
+}
+
 export interface RoomSeatView {
   /** Visual seat on the receiving player's screen ('south' is ALWAYS the receiving player) */
   readonly visualSeat: Seat;
@@ -45,6 +56,7 @@ export interface RoomSeatView {
   readonly playerId: string | null;
   readonly username: string | null;
   readonly avatarCode: string;
+  readonly appearance?: SeatPublicAppearance;
   readonly isHost: boolean;
   readonly isReady: boolean;
   readonly connected: boolean;
@@ -315,6 +327,69 @@ export function sanitizeRoomCode(input: unknown): string | null {
   if (typeof input !== 'string') return null;
   const cleaned = input.trim().toUpperCase();
   return ROOM_CODE_RE.test(cleaned) ? cleaned : null;
+}
+
+const APPEARANCE_ID_RE = /^[a-zA-Z0-9._-]{1,80}$/;
+
+function sanitizeAppearanceId(val: unknown): string | undefined {
+  if (typeof val !== 'string') return undefined;
+  const trimmed = val.trim();
+  return APPEARANCE_ID_RE.test(trimmed) ? trimmed : undefined;
+}
+
+function sanitizeNullableAppearanceId(val: unknown): string | null | undefined {
+  if (val === null) return null;
+  return sanitizeAppearanceId(val);
+}
+
+/**
+ * Strictly extracts ONLY public profile/gameplay appearance fields for room seats.
+ * Owner-only items (`tableSkinId`, `table_skin`, `tableBackgroundId`, `table_background`)
+ * are NEVER allowed or forwarded between players.
+ */
+export function sanitizeSeatAppearance(
+  raw: unknown
+): SeatPublicAppearance | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return undefined;
+  }
+  const obj = raw as Record<string, unknown>;
+  const out: {
+    bannerCode?: string;
+    bannerItemId?: string | null;
+    avatarFrameId?: string | null;
+    badgeId?: string | null;
+    nameplateId?: string | null;
+    deckId?: string;
+    cardBackId?: string;
+    gameEffectId?: string | null;
+  } = {};
+
+  const bannerCode = sanitizeAppearanceId(obj.bannerCode);
+  if (bannerCode) out.bannerCode = bannerCode;
+
+  const bannerItemId = sanitizeNullableAppearanceId(obj.bannerItemId);
+  if (bannerItemId !== undefined) out.bannerItemId = bannerItemId;
+
+  const avatarFrameId = sanitizeNullableAppearanceId(obj.avatarFrameId);
+  if (avatarFrameId !== undefined) out.avatarFrameId = avatarFrameId;
+
+  const badgeId = sanitizeNullableAppearanceId(obj.badgeId);
+  if (badgeId !== undefined) out.badgeId = badgeId;
+
+  const nameplateId = sanitizeNullableAppearanceId(obj.nameplateId);
+  if (nameplateId !== undefined) out.nameplateId = nameplateId;
+
+  const deckId = sanitizeAppearanceId(obj.deckId);
+  if (deckId) out.deckId = deckId;
+
+  const cardBackId = sanitizeAppearanceId(obj.cardBackId);
+  if (cardBackId) out.cardBackId = cardBackId;
+
+  const gameEffectId = sanitizeNullableAppearanceId(obj.gameEffectId);
+  if (gameEffectId !== undefined) out.gameEffectId = gameEffectId;
+
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export function sanitizeAvatarCode(input: unknown): string {

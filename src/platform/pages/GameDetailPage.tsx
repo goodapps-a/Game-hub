@@ -17,9 +17,11 @@ import {
   Zap,
 } from 'lucide-react';
 import { GAME_REGISTRY } from '../../games/registry';
+import { EquippedSlotsMap, ItemSlot, ServerInventoryState } from '../items/itemTypes';
 import { toPersianDigits } from '../theme/tokens';
 import { GameId, ShopItem, ThemeMode } from '../types/platform';
 import { HokmMatchVariantId } from '../utils/gameHubHelpers';
+import { ShopCategoryFilter } from '../utils/shopHelpers';
 import { HokmRulesTab } from '../components/gameHub/HokmRulesTab';
 import { HokmLeaderboardTab } from '../components/gameHub/HokmLeaderboardTab';
 import { HokmShopTab } from '../components/gameHub/HokmShopTab';
@@ -44,16 +46,22 @@ interface GameDetailPageProps {
   userGems: number;
   isAuthenticated?: boolean;
   ownedItemIds?: readonly string[];
+  equippedSlots?: EquippedSlotsMap;
   equippedTableSkinId?: string;
   equippedBannerCode?: string;
   equippedDeckId?: string;
+  shopTestMode?: boolean;
+  shopNotice?: string | null;
   onPurchaseItem?: (item: ShopItem) => void;
   onEquipItem?: (item: ShopItem) => void;
+  onUnequipSlot?: (slot: ItemSlot) => void;
   onSelectDeck?: (deckId: string) => void | Promise<void>;
   onRequireAuth?: () => void;
+  onInventorySync?: (inventory: ServerInventoryState) => void;
+  onOpenFriendGroups?: () => void;
   onBack: () => void;
   onLaunchHokm: (req: GameHubLaunchRequest) => void;
-  onOpenFullShop: () => void;
+  onOpenFullShop: (category?: ShopCategoryFilter) => void;
 }
 
 type ModeLaunchTarget = 'random' | 'friends_create' | 'offline';
@@ -130,13 +138,19 @@ export const GameDetailPage: React.FC<GameDetailPageProps> = ({
   userGems,
   isAuthenticated = false,
   ownedItemIds = [],
+  equippedSlots,
   equippedTableSkinId = 'tt-traditional',
   equippedBannerCode = 'royal',
   equippedDeckId,
+  shopTestMode = false,
+  shopNotice = null,
   onPurchaseItem,
   onEquipItem,
+  onUnequipSlot,
   onSelectDeck,
   onRequireAuth,
+  onInventorySync,
+  onOpenFriendGroups,
   onBack,
   onLaunchHokm,
   onOpenFullShop,
@@ -455,6 +469,22 @@ export const GameDetailPage: React.FC<GameDetailPageProps> = ({
                     <p className="text-[11px] font-bold text-[#EF4444]">
                       {roomCodeError}
                     </p>
+                  )}
+
+                  {onOpenFriendGroups && (
+                    <button
+                      type="button"
+                      data-testid="hokm-open-friend-groups-btn"
+                      onClick={onOpenFriendGroups}
+                      className={`w-full min-h-[40px] px-3.5 rounded-xl border text-xs font-extrabold inline-flex items-center justify-center gap-2 cursor-pointer transition-colors ${
+                        isLight
+                          ? 'bg-[#F8FAFC] hover:bg-[#F1F5F9] border-[#CBD5E1] text-[#0F172A]'
+                          : 'bg-white/8 hover:bg-white/14 border-white/15 text-[#E2E8F0]'
+                      }`}
+                    >
+                      <Users className="w-3.5 h-3.5 text-[#2DD4BF] shrink-0" />
+                      <span>گروه‌های دوستان (چت و دعوت حکم)</span>
+                    </button>
                   )}
                 </div>
               )}
@@ -809,13 +839,18 @@ export const GameDetailPage: React.FC<GameDetailPageProps> = ({
             userGems={userGems}
             isAuthenticated={isAuthenticated}
             ownedItemIds={ownedItemIds}
+            equippedSlots={equippedSlots}
             equippedTableSkinId={equippedTableSkinId}
             equippedBannerCode={equippedBannerCode}
             equippedDeckId={equippedDeckId}
+            shopTestMode={shopTestMode}
+            shopNotice={shopNotice}
             onPurchaseItem={onPurchaseItem}
             onEquipItem={onEquipItem}
+            onUnequipSlot={onUnequipSlot}
             onSelectDeck={onSelectDeck}
             onRequireAuth={onRequireAuth}
+            onInventorySync={onInventorySync}
             onOpenFullShop={onOpenFullShop}
           />
         )}

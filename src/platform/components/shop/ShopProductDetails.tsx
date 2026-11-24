@@ -1,9 +1,34 @@
-import React, { useEffect } from 'react';
-import { Check, Lock, Sparkles, UserPlus, X } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import {
+  Check,
+  Coins,
+  Gift,
+  Lock,
+  RotateCcw,
+  Sparkles,
+  UserPlus,
+  Wallet,
+  X,
+} from 'lucide-react';
+import { DeckRegistry } from '../../decks';
+import { SLOT_FALLBACK_ITEMS } from '../../items/catalogData';
+import {
+  getItemCategoryLabel,
+  resolveCatalogItemDefinition,
+} from '../../items/itemCatalog';
+import {
+  EquippedSlotsMap,
+  ItemSlot,
+  ServerInventoryState,
+} from '../../items/itemTypes';
 import { toPersianDigits } from '../../theme/tokens';
 import { ShopItem, ShopSectionMeta } from '../../types/platform';
-import { SHOP_RARITY_META } from '../../utils/shopHelpers';
+import {
+  SHOP_RARITY_META,
+  getEffectiveShopPriceBreakdown,
+} from '../../utils/shopHelpers';
 import { GoldCoinSvg, PurpleGemSvg } from '../TopBar';
+import { ShopGiftPanel } from './ShopGiftPanel';
 import { ShopItemArtwork } from './ShopItemArtwork';
 
 interface ShopProductDetailsProps {
@@ -13,51 +38,79 @@ interface ShopProductDetailsProps {
   userGems: number;
   isAuthenticated?: boolean;
   ownedItemIds?: readonly string[];
+  equippedSlots?: EquippedSlotsMap;
   equippedTableSkinId?: string;
   equippedBannerCode?: string;
+  shopTestMode?: boolean;
   onPurchaseItem?: (item: ShopItem) => void;
   onEquipItem?: (item: ShopItem) => void;
+  onUnequipSlot?: (slot: ItemSlot) => void;
   onRequireAuth?: () => void;
+  onOpenTopUpShop?: () => void;
+  onInventorySync?: (inventory: ServerInventoryState) => void;
   onBack: () => void;
 }
 
-const BANNER_ID_TO_CODE: Record<string, 'royal' | 'garden' | 'ruby'> = {
-  'af-banner-royal': 'royal',
-  'af-banner-garden': 'garden',
-  'af-banner-ruby': 'ruby',
-};
-
 /**
  * Compact Floating Shop Product Modal (NOT full-screen).
- * Displays concise artwork, rarity, brief description, price, and instant Buy / Equip actions.
+ * Uses catalog item definitions so all item kinds (banners, frames, badges, card backs,
+ * table skins, effects, decks, and chests) work cleanly without technical clutter.
  */
 export const ShopProductDetails: React.FC<ShopProductDetailsProps> = ({
   item,
-  sectionMeta,
   userCoins,
   userGems,
   isAuthenticated = false,
   ownedItemIds = [],
+  equippedSlots,
   equippedTableSkinId = 'tt-traditional',
   equippedBannerCode = 'royal',
+  shopTestMode = false,
   onPurchaseItem,
   onEquipItem,
+  onUnequipSlot,
   onRequireAuth,
+  onOpenTopUpShop,
+  onInventorySync,
   onBack,
 }) => {
+  const [giftOpen, setGiftOpen] = useState(false);
+
   const rarity = SHOP_RARITY_META[item.rarity];
+  const def = resolveCatalogItemDefinition(
+    item.id,
+    DeckRegistry.getAllCatalogEntries(false)
+  );
+  const categoryLabel = getItemCategoryLabel(def?.kind, item.section);
+  const slot = def?.slot ?? null;
+  const isEquippable = Boolean(def?.isEquippable && slot);
+  const isChest = def?.kind === 'chest' || def?.kind === 'bundle';
+  const isGiftable = Boolean(!def?.isDefaultOwned && !item.isDefaultOwned && !isChest);
+
   const isOwned = Boolean(item.isDefaultOwned || ownedItemIds.includes(item.id));
   const currentBalance = item.currency === 'gems' ? userGems : userCoins;
-  const canAfford = currentBalance >= item.price;
+  const priceBreakdown = getEffectiveShopPriceBreakdown(item, shopTestMode);
+  const canAfford = shopTestMode || currentBalance >= priceBreakdown.effectivePrice;
   const currencyLabel = item.currency === 'gems' ? 'الماس' : 'سکه';
 
-  const isTableTheme = item.section === 'table_themes';
-  const bannerCodeForItem = BANNER_ID_TO_CODE[item.id];
-  const isEquipped = isTableTheme
-    ? equippedTableSkinId === item.id
-    : bannerCodeForItem
-      ? equippedBannerCode === bannerCodeForItem
-      : false;
+  let isEquipped = false;
+  if (slot && isEquippable) {
+    if (equippedSlots && slot in equippedSlots) {
+      isEquipped = equippedSlots[slot] === item.id;
+    } else if (slot === 'table_skin') {
+      isEquipped = equippedTableSkinId === item.id;
+    } else if (slot === 'banner' && def?.visualMeta?.bannerCode) {
+      isEquipped = equippedBannerCode === def.visualMeta.bannerCode;
+    }
+  }
+
+  const fallbackForSlot = slot ? SLOT_FALLBACK_ITEMS[slot] : undefined;
+  const canUnequip = Boolean(
+    isEquipped &&
+      slot &&
+      onUnequipSlot &&
+      (!fallbackForSlot || fallbackForSlot !== item.id)
+  );
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -75,17 +128,17 @@ export const ShopProductDetails: React.FC<ShopProductDetailsProps> = ({
       aria-modal="true"
       aria-label={`جزئیات ${item.name}`}
       data-testid="shop-product-details"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/68 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/68 backdrop-blur-sm overflow-y-auto"
       onClick={onBack}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="relative w-full max-w-[388px] rounded-[24px] theme-drawer border border-[var(--eyvan-gold-border)] shadow-[0_24px_64px_rgba(0,0,0,0.58)] overflow-hidden"
+        className="relative w-full max-w-[396px] my-auto rounded-[24px] theme-drawer border border-[var(--eyvan-gold-border)] shadow-[0_24px_64px_rgba(0,0,0,0.58)] overflow-hidden"
       >
         {/* Top Compact Artwork Header */}
         <div className="relative">
           <div className="h-[184px] w-full overflow-hidden">
-            <ShopItemArtwork item={item} variant="card" />
+            <ShopItemArtwork item={item} variant="detail" />
           </div>
 
           <button
@@ -115,48 +168,99 @@ export const ShopProductDetails: React.FC<ShopProductDetailsProps> = ({
               >
                 {item.name}
               </h2>
-              {sectionMeta && (
-                <span className="text-[11px] font-bold theme-muted shrink-0">
-                  {sectionMeta.title}
-                </span>
-              )}
+              <span
+                data-testid="shop-detail-category-label"
+                className="text-[11px] font-extrabold theme-accent-teal shrink-0"
+              >
+                {categoryLabel}
+              </span>
             </div>
-            <p className="text-xs theme-muted leading-relaxed line-clamp-2">
+            <p className="text-xs theme-muted leading-relaxed line-clamp-3">
               {item.description}
             </p>
           </div>
 
-          {/* Compact Price / Balance Row */}
-          {!isOwned && (
+          {/* Chest Reward Summary */}
+          {isChest && def?.rewardPayload && (
             <div className="rounded-xl theme-subcard border px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs">
-              <span className="font-bold theme-muted">قیمت</span>
-              <span className="inline-flex items-center gap-1.5 font-black theme-heading tabular-nums text-sm">
-                {item.currency === 'gems' ? (
-                  <PurpleGemSvg size={18} />
-                ) : (
-                  <GoldCoinSvg size={18} />
-                )}
-                <span>
-                  {toPersianDigits(item.price.toLocaleString())} {currencyLabel}
-                </span>
+              <span className="font-bold theme-muted inline-flex items-center gap-1.5">
+                <Coins className="w-3.5 h-3.5 theme-accent-gold" />
+                <span>پاداش دریافتی</span>
+              </span>
+              <span className="font-black theme-win tabular-nums">
+                {def.rewardPayload.coins
+                  ? `${toPersianDigits(def.rewardPayload.coins.toLocaleString())} سکه`
+                  : ''}
+                {def.rewardPayload.coins && def.rewardPayload.gems ? ' + ' : ''}
+                {def.rewardPayload.gems
+                  ? `${toPersianDigits(def.rewardPayload.gems.toLocaleString())} الماس`
+                  : ''}
               </span>
             </div>
           )}
 
+          {/* Compact Price / Test-Mode Row */}
+          {(!isOwned || isChest) && (
+            <div
+              data-testid="shop-detail-price-row"
+              className="rounded-xl theme-subcard border px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs"
+            >
+              <span className="font-bold theme-muted">قیمت</span>
+              {priceBreakdown.isTestModeFree ? (
+                <span
+                  data-testid="shop-test-mode-price"
+                  className="inline-flex items-center gap-2 font-black tabular-nums text-sm"
+                >
+                  <span className="line-through opacity-55 theme-muted text-xs">
+                    {toPersianDigits(priceBreakdown.realPrice.toLocaleString())} {currencyLabel}
+                  </span>
+                  <span className="theme-accent-teal">رایگان در حالت تست</span>
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 font-black theme-heading tabular-nums text-sm">
+                  {item.currency === 'gems' ? (
+                    <PurpleGemSvg size={18} />
+                  ) : (
+                    <GoldCoinSvg size={18} />
+                  )}
+                  <span>
+                    {priceBreakdown.realPrice === 0
+                      ? 'رایگان'
+                      : `${toPersianDigits(priceBreakdown.realPrice.toLocaleString())} ${currencyLabel}`}
+                  </span>
+                </span>
+              )}
+            </div>
+          )}
+
           {/* Direct Action CTA */}
-          <div className="pt-0.5">
-            {isOwned ? (
-              isTableTheme || bannerCodeForItem ? (
+          <div className="space-y-2 pt-0.5">
+            {isOwned && !isChest ? (
+              isEquippable ? (
                 isEquipped ? (
-                  <div
-                    data-testid="shop-item-equipped-badge"
-                    className="w-full min-h-[44px] px-4 rounded-xl bg-[#0D8A8A]/15 border border-[#0D8A8A]/45 theme-win text-xs sm:text-sm font-black flex items-center justify-center gap-2"
-                  >
-                    <Check className="w-4 h-4 shrink-0" />
-                    <span>
-                      {isTableTheme ? 'فعال روی میز حکم' : 'فعال روی پروفایل'}
-                    </span>
-                  </div>
+                  <>
+                    <div
+                      data-testid="shop-item-equipped-badge"
+                      className="w-full min-h-[44px] px-4 rounded-xl bg-[#0D8A8A]/15 border border-[#0D8A8A]/45 theme-win text-xs sm:text-sm font-black flex items-center justify-center gap-2"
+                    >
+                      <Check className="w-4 h-4 shrink-0" />
+                      <span>هم‌اکنون فعال است</span>
+                    </div>
+                    {canUnequip && slot && (
+                      <button
+                        type="button"
+                        data-testid="shop-unequip-btn"
+                        onClick={() => {
+                          onUnequipSlot?.(slot);
+                          onBack();
+                        }}
+                        className="w-full min-h-[38px] px-4 rounded-xl theme-btn-secondary border text-xs font-extrabold flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+                        <span>لغو انتخاب و بازگشت به پیش‌فرض</span>
+                      </button>
+                    )}
+                  </>
                 ) : (
                   <button
                     type="button"
@@ -168,11 +272,7 @@ export const ShopProductDetails: React.FC<ShopProductDetailsProps> = ({
                     className="w-full min-h-[44px] px-4 rounded-xl bg-gradient-to-b from-[#19A2A2] to-[#0D7A7A] hover:brightness-105 text-white text-xs sm:text-sm font-black flex items-center justify-center gap-2 cursor-pointer transition-all shadow-xs"
                   >
                     <Sparkles className="w-4 h-4 shrink-0" />
-                    <span>
-                      {isTableTheme
-                        ? 'فعال‌سازی روی میز حکم'
-                        : 'انتخاب به‌عنوان بنر پروفایل'}
-                    </span>
+                    <span>فعال‌سازی در حساب</span>
                   </button>
                 )
               ) : (
@@ -192,7 +292,7 @@ export const ShopProductDetails: React.FC<ShopProductDetailsProps> = ({
                 className="w-full min-h-[44px] px-4 rounded-xl bg-gradient-to-b from-[#F5D98E] via-[#DDA942] to-[#B77E1E] hover:brightness-105 text-[#0B1628] text-xs sm:text-sm font-black flex items-center justify-center gap-2 cursor-pointer transition-all"
               >
                 <UserPlus className="w-4 h-4 shrink-0" />
-                <span>ورود برای خرید</span>
+                <span>ورود برای دریافت آیتم</span>
               </button>
             ) : canAfford && onPurchaseItem ? (
               <button
@@ -206,24 +306,87 @@ export const ShopProductDetails: React.FC<ShopProductDetailsProps> = ({
               >
                 <Sparkles className="w-4 h-4 shrink-0" />
                 <span>
-                  {isTableTheme || bannerCodeForItem
-                    ? 'خرید و فعال‌سازی'
-                    : 'خرید آیتم'}
+                  {isChest
+                    ? shopTestMode
+                      ? 'باز کردن صندوق (رایگان در حالت تست)'
+                      : 'دریافت صندوق گنج'
+                    : shopTestMode && priceBreakdown.isTestModeFree
+                      ? 'دریافت رایگان (حالت تست)'
+                      : isEquippable
+                        ? 'دریافت و فعال‌سازی'
+                        : 'خرید آیتم'}
                 </span>
               </button>
             ) : (
+              <div className="space-y-2">
+                <div
+                  data-testid="shop-detail-action-disabled"
+                  className="w-full min-h-[40px] px-3.5 rounded-xl bg-[var(--eyvan-surface-muted)] border border-[var(--eyvan-line)] theme-muted text-xs font-extrabold flex items-center justify-center gap-2"
+                >
+                  <Lock className="w-3.5 h-3.5 shrink-0" />
+                  <span>
+                    موجودی کافی نیست ({toPersianDigits(currentBalance.toLocaleString())}{' '}
+                    {currencyLabel})
+                  </span>
+                </div>
+                {onOpenTopUpShop && (
+                  <button
+                    type="button"
+                    data-testid="shop-insufficient-topup-btn"
+                    onClick={() => {
+                      onBack();
+                      onOpenTopUpShop();
+                    }}
+                    className="w-full min-h-[44px] px-4 rounded-xl bg-gradient-to-b from-[#22C55E] to-[#15803D] hover:brightness-105 text-white text-xs sm:text-sm font-black flex items-center justify-center gap-2 cursor-pointer transition-all shadow-xs"
+                  >
+                    <Wallet className="w-4 h-4 shrink-0" />
+                    <span>شارژ سکه و الماس (تومانی)</span>
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Gift to Friend Button & Lookup Panel */}
+            {isGiftable && !giftOpen && (
               <button
                 type="button"
-                disabled
-                data-testid="shop-detail-action-disabled"
-                className="w-full min-h-[44px] px-4 rounded-xl bg-[var(--eyvan-surface-muted)] border border-[var(--eyvan-line)] theme-muted text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 opacity-80 cursor-not-allowed"
+                data-testid="shop-gift-toggle-btn"
+                onClick={() => {
+                  if (!isAuthenticated && onRequireAuth) {
+                    onBack();
+                    onRequireAuth();
+                    return;
+                  }
+                  setGiftOpen(true);
+                }}
+                className="w-full min-h-[40px] px-4 rounded-xl theme-btn-secondary border text-xs font-extrabold flex items-center justify-center gap-1.5 cursor-pointer hover:border-[var(--eyvan-gold-border)] transition-colors"
               >
-                <Lock className="w-4 h-4 shrink-0" />
-                <span>
-                  موجودی کافی نیست ({toPersianDigits(currentBalance.toLocaleString())}{' '}
-                  {currencyLabel})
-                </span>
+                <Gift className="w-3.5 h-3.5 theme-accent-gold shrink-0" />
+                <span>هدیه به دوست</span>
               </button>
+            )}
+
+            {isGiftable && giftOpen && (
+              <ShopGiftPanel
+                itemId={item.id}
+                itemName={item.name}
+                price={item.price}
+                currency={item.currency}
+                userCoins={userCoins}
+                userGems={userGems}
+                shopTestMode={shopTestMode}
+                isAuthenticated={isAuthenticated}
+                onRequireAuth={() => {
+                  onBack();
+                  onRequireAuth?.();
+                }}
+                onOpenTopUpShop={() => {
+                  onBack();
+                  onOpenTopUpShop?.();
+                }}
+                onInventorySync={onInventorySync}
+                onClosePanel={() => setGiftOpen(false)}
+              />
             )}
           </div>
         </div>

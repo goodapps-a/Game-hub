@@ -30,7 +30,9 @@ import {
   RoomSeatView,
   RoomSnapshot,
   RoomStatus,
+  SeatPublicAppearance,
   sanitizeAvatarCode,
+  sanitizeSeatAppearance,
   sanitizeUsername,
 } from './protocol';
 import {
@@ -44,6 +46,7 @@ export interface SeatMember {
   userId?: string | null;
   username: string;
   avatarCode: string;
+  appearance?: SeatPublicAppearance;
   canonicalSeat: Seat;
   sessionToken: string;
   isReady: boolean;
@@ -415,6 +418,7 @@ export class HokmRoomController {
     username: string;
     userId?: string | null;
     avatarCode?: string;
+    appearance?: SeatPublicAppearance;
     preferredSeat?: Seat;
     playerId?: string;
   }):
@@ -483,11 +487,13 @@ export class HokmRoomController {
 
     const ts = this.now();
     const playerId = input.playerId ?? `p_${this.generateId()}`;
+    const cleanAppearance = sanitizeSeatAppearance(input.appearance);
     const member: SeatMember = {
       playerId,
       ...(input.userId ? { userId: input.userId } : {}),
       username: cleanName,
       avatarCode: sanitizeAvatarCode(input.avatarCode),
+      ...(cleanAppearance ? { appearance: cleanAppearance } : {}),
       canonicalSeat: targetSeat,
       sessionToken: defaultGenerateToken(),
       isReady: false,
@@ -1251,12 +1257,17 @@ export class HokmRoomController {
       const visualSeat = rotateSeatForViewer(canonicalSeat, viewerSeat);
       const team = rotateTeamForViewer(getTeamForSeat(canonicalSeat), viewerSeat);
 
+      const sanitizedAppearance = m?.appearance
+        ? sanitizeSeatAppearance(m.appearance)
+        : undefined;
+
       return {
         visualSeat,
         canonicalSeat,
         playerId: m?.playerId ?? null,
         username: m?.username ?? null,
         avatarCode: m?.avatarCode ?? 'portrait',
+        ...(sanitizedAppearance ? { appearance: sanitizedAppearance } : {}),
         isHost: Boolean(m && m.playerId === this.hostPlayerId),
         isReady: m?.isReady ?? false,
         connected: m?.connected ?? false,

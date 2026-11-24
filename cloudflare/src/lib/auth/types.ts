@@ -20,6 +20,7 @@ export interface PublicAuthUser {
   readonly userId: string;
   readonly username: string;
   readonly displayName: string;
+  readonly accountCode?: string | null;
   readonly email: string | null;
   readonly emailVerified: boolean;
   readonly avatarCode: string;

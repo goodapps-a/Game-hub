@@ -242,11 +242,21 @@ export function validateDeckManifest(raw: unknown): DeckManifest {
     }
   }
 
-  if (renderMode === 'full_card' && Object.keys(cardsOut).length === 0) {
-    throw new DeckSystemError(
-      'INVALID_MANIFEST',
-      'مجموعه فاقد هرگونه تصویر کارت است.'
-    );
+  if (renderMode === 'full_card') {
+    const missingCards = ALL_CARD_ASSET_KEYS.filter((k) => !cardsOut[k]);
+    if (missingCards.length > 0) {
+      throw new DeckSystemError(
+        'INVALID_MANIFEST',
+        `مجموعه کامل باید هر ۵۲ برگ استاندارد را شامل شود (${missingCards.length} برگ ناقص است).`
+      );
+    }
+  } else if (renderMode === 'partial_override') {
+    if (Object.keys(cardsOut).length === 0 && !back) {
+      throw new DeckSystemError(
+        'INVALID_MANIFEST',
+        'مجموعه جایگزین جزئی باید حداقل یک برگ کارت یا طرح پشت کارت داشته باشد.'
+      );
+    }
   }
 
   let jokersOut: DeckManifest['jokers'] | undefined;
@@ -263,17 +273,51 @@ export function validateDeckManifest(raw: unknown): DeckManifest {
     }
   }
 
-  const computedBytes =
-    (preview?.bytes ?? 0) +
-    (back?.bytes ?? 0) +
-    Object.values(cardsOut).reduce((s, e) => s + (e?.bytes ?? 0), 0) +
-    (jokersOut?.red?.bytes ?? 0) +
-    (jokersOut?.black?.bytes ?? 0);
+  // Reject duplicate asset paths within the same manifest to prevent silent asset collisions
+  const seenPaths = new Set<string>();
+  const allEntries: DeckAssetEntry[] = [
+    ...(preview ? [preview] : []),
+    ...(back ? [back] : []),
+    ...Object.values(cardsOut).filter((e): e is DeckAssetEntry => Boolean(e)),
+    ...(jokersOut?.red ? [jokersOut.red] : []),
+    ...(jokersOut?.black ? [jokersOut.black] : []),
+  ];
+  for (const assetEntry of allEntries) {
+    if (seenPaths.has(assetEntry.path)) {
+      throw new DeckSystemError(
+        'INVALID_MANIFEST',
+        `مسیر تکراری فایل در Manifest مجاز نیست: ${assetEntry.path}`
+      );
+    }
+    seenPaths.add(assetEntry.path);
+  }
+
+  const MAX_DECK_TOTAL_BYTES = 50 * 1024 * 1024;
+  const computedBytes = allEntries.reduce((s, e) => s + e.bytes, 0);
+  if (computedBytes > MAX_DECK_TOTAL_BYTES) {
+    throw new DeckSystemError(
+      'INVALID_MANIFEST',
+      'حجم کل فایل‌های مجموعه از حد مجاز (۵۰ مگابایت) بیشتر است.'
+    );
+  }
+
+  if (
+    obj.totalBytes !== undefined &&
+    (typeof obj.totalBytes !== 'number' ||
+      !Number.isFinite(obj.totalBytes) ||
+      obj.totalBytes < 0 ||
+      obj.totalBytes > MAX_DECK_TOTAL_BYTES)
+  ) {
+    throw new DeckSystemError(
+      'INVALID_MANIFEST',
+      'مقدار totalBytes در Manifest نامعتبر است.'
+    );
+  }
 
   const declaredTotal =
     typeof obj.totalBytes === 'number' &&
     Number.isFinite(obj.totalBytes) &&
-    obj.totalBytes >= 0
+    obj.totalBytes > 0
       ? Math.floor(obj.totalBytes)
       : computedBytes;
 

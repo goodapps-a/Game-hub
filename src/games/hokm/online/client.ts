@@ -11,6 +11,7 @@ import {
   PublicRoomSummary,
   RoomEventNotice,
   RoomSnapshot,
+  SeatPublicAppearance,
   ServerMessage,
 } from './protocol';
 
@@ -130,6 +131,7 @@ export function createActionId(): string {
 export async function createOnlineRoom(params: {
   username: string;
   avatarCode: string;
+  appearance?: SeatPublicAppearance;
   targetMatchScore?: number;
   isPublic?: boolean;
 }): Promise<CreateRoomResponse> {
@@ -154,6 +156,7 @@ export async function createOnlineRoom(params: {
 export async function quickMatchOnlineRoom(params: {
   username: string;
   avatarCode: string;
+  appearance?: SeatPublicAppearance;
   targetMatchScore?: number;
 }): Promise<CreateRoomResponse & { matchedExisting?: boolean }> {
   const res = await fetch(buildOnlineHttpUrl('/api/rooms/quick-match'), {
@@ -184,6 +187,7 @@ export async function joinOnlineRoom(params: {
   roomCode: string;
   username: string;
   avatarCode: string;
+  appearance?: SeatPublicAppearance;
   preferredSeat?: Seat;
 }): Promise<JoinRoomResponse> {
   const code = encodeURIComponent(params.roomCode.trim().toUpperCase());
@@ -197,6 +201,7 @@ export async function joinOnlineRoom(params: {
     body: JSON.stringify({
       username: params.username,
       avatarCode: params.avatarCode,
+      appearance: params.appearance,
       preferredSeat: params.preferredSeat,
     }),
   });

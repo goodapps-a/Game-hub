@@ -121,7 +121,7 @@ export function dealCardsBatch(
 /**
  * Sorts a player's hand strictly Left-to-Right by suit:
  * Hearts (دل) -> Spades (پیک) -> Diamonds (خشت) -> Clubs (گشنیز)
- * and descending power (Ace -> 2) within each suit.
+ * and ascending power (2 on left -> Ace on right) within each suit.
  */
 export function sortHand(
   hand: readonly Card[],
@@ -137,6 +137,6 @@ export function sortHand(
   return [...hand].sort((a, b) => {
     const suitDiff = suitOrder.indexOf(a.suit) - suitOrder.indexOf(b.suit);
     if (suitDiff !== 0) return suitDiff;
-    return b.power - a.power;
+    return a.power - b.power;
   });
 }

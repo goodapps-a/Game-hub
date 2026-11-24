@@ -3,8 +3,10 @@
  *
  * Security Invariant:
  * - Public social summaries NEVER contain `email`, `email_key`, password hashes,
- *   session IDs, IP hashes, tokens, or internal account flags.
+ *   session IDs, IP hashes, tokens, internal account flags, or owner-only items.
  */
+
+import type { PublicAppearanceSnapshot } from '../../../../src/platform/items/itemTypes';
 
 export type FriendshipStatus = 'pending' | 'accepted' | 'rejected' | 'canceled';
 
@@ -23,11 +25,13 @@ export interface SocialUserSummary {
   readonly userId: string;
   readonly username: string;
   readonly displayName: string;
+  readonly accountCode?: string | null;
   readonly avatarCode: string;
   readonly avatarUrl: string | null;
   readonly onlineStatus: PresenceStatus;
   readonly relationshipStatus: RelationshipStatus;
   readonly friendshipId: string | null;
+  readonly appearance?: PublicAppearanceSnapshot;
 }
 
 export interface FriendListItem {
@@ -35,10 +39,12 @@ export interface FriendListItem {
   readonly userId: string;
   readonly username: string;
   readonly displayName: string;
+  readonly accountCode?: string | null;
   readonly avatarCode: string;
   readonly avatarUrl: string | null;
   readonly onlineStatus: PresenceStatus;
   readonly friendsSince: number;
+  readonly appearance?: PublicAppearanceSnapshot;
 }
 
 export interface FriendRequestItem {
@@ -87,6 +93,7 @@ export interface PublicUserProfile {
   readonly userId: string;
   readonly username: string;
   readonly displayName: string;
+  readonly accountCode?: string | null;
   readonly avatarCode: string;
   readonly avatarUrl: string | null;
   readonly onlineStatus: PresenceStatus;
@@ -97,6 +104,7 @@ export interface PublicUserProfile {
     readonly wins: number;
     readonly losses: number;
   };
+  readonly appearance?: PublicAppearanceSnapshot;
 }
 
 export interface ChatPartnerSummary {
@@ -192,4 +200,41 @@ export interface SocialErrorResult {
   readonly code: SocialErrorCode;
   readonly message: string;
   readonly retryAfterSec?: number;
+}
+
+export interface FriendGroupMemberSummary {
+  readonly userId: string;
+  readonly username: string;
+  readonly displayName: string;
+  readonly accountCode?: string | null;
+  readonly avatarCode: string;
+  readonly avatarUrl: string | null;
+  readonly role: 'owner' | 'member';
+  readonly onlineStatus: PresenceStatus;
+  readonly appearance?: PublicAppearanceSnapshot;
+}
+
+export interface FriendGroupSummary {
+  readonly groupId: string;
+  readonly name: string;
+  readonly ownerUserId: string;
+  readonly memberCount: number;
+  readonly members: FriendGroupMemberSummary[];
+  readonly lastMessagePreview: string | null;
+  readonly lastMessageAt: number | null;
+  readonly createdAt: number;
+}
+
+export interface GroupMessageItem {
+  readonly messageId: string;
+  readonly groupId: string;
+  readonly senderId: string;
+  readonly senderUsername: string;
+  readonly senderDisplayName: string;
+  readonly kind: 'text' | 'game_invite';
+  readonly body: string;
+  readonly roomCode: string | null;
+  readonly gameId: string | null;
+  readonly clientMsgId: string | null;
+  readonly createdAt: number;
 }

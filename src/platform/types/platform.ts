@@ -17,6 +17,8 @@ export type ProfileBannerCode = 'royal' | 'garden' | 'ruby' | 'none';
 export interface UserProfile {
   /** Unique English username acts as the player's sole ID across the platform */
   id: string;
+  /** Public 6-digit random account identifier for logged-in accounts */
+  accountCode?: string | null;
   username: string;
   avatarCode: 'portrait' | 'shamsa' | 'turquoise' | 'lapis' | 'jade';
   customAvatarUrl?: string | null;
@@ -24,6 +26,24 @@ export interface UserProfile {
   customBannerUrl?: string | null;
   equippedTableSkinId?: string;
   equippedDeckId?: string;
+  equippedCardBackId?: string;
+  equippedAvatarFrameId?: string;
+  equippedBadgeId?: string;
+  equippedNameplateId?: string;
+  equippedGameEffectId?: string;
+  equippedSlots?: Partial<Record<
+    | 'banner'
+    | 'avatar'
+    | 'avatar_frame'
+    | 'profile_badge'
+    | 'nameplate'
+    | 'card_deck'
+    | 'card_back'
+    | 'game_effect'
+    | 'table_skin'
+    | 'table_background',
+    string
+  >>;
   ownedShopItemIds?: string[];
   level: number;
   xp: number;
@@ -52,6 +72,7 @@ export interface UserProfile {
 export type ShopRarity = 'common' | 'rare' | 'epic' | 'legendary';
 
 export type ShopSectionId =
+  | 'toman_topup'
   | 'daily_deals'
   | 'card_decks'
   | 'card_backs'

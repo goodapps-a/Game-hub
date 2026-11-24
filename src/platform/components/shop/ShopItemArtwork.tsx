@@ -1,5 +1,8 @@
 import React from 'react';
+import { DeckRegistry } from '../../decks';
+import { extractDeckIdFromItemId } from '../../items/catalogData';
 import { ShopItem } from '../../types/platform';
+import { DeckPreviewArtwork } from './DeckDetailsModal';
 
 interface ShopItemArtworkProps {
   item: ShopItem;
@@ -7,8 +10,8 @@ interface ShopItemArtworkProps {
 }
 
 /**
- * Clean high-contrast artwork container for shop items: uses real product artwork
- * images when provided, or crisp scalable Persian geometric motif vectors.
+ * Clean high-contrast artwork container for shop items: uses crisp 3-card fan for decks,
+ * real product artwork images when provided, or crisp scalable Persian geometric motif vectors.
  */
 export const ShopItemArtwork: React.FC<ShopItemArtworkProps> = ({
   item,
@@ -17,8 +20,21 @@ export const ShopItemArtwork: React.FC<ShopItemArtworkProps> = ({
   const [c1, c2, c3] = item.palette;
   const aspectClass =
     variant === 'detail'
-      ? 'w-full aspect-[4/3] sm:aspect-[16/11] rounded-2xl'
-      : 'w-full h-32 sm:h-36 rounded-xl';
+      ? 'w-full h-full rounded-none'
+      : 'w-full aspect-[16/10] rounded-xl';
+
+  if (item.section === 'card_decks') {
+    const deckEntry = DeckRegistry.getCatalogEntry(extractDeckIdFromItemId(item.id));
+    if (deckEntry) {
+      return (
+        <div
+          className={`${aspectClass} overflow-hidden relative border border-[var(--eyvan-line)]`}
+        >
+          <DeckPreviewArtwork entry={deckEntry} />
+        </div>
+      );
+    }
+  }
 
   if (item.imageSrc) {
     return (
@@ -28,8 +44,8 @@ export const ShopItemArtwork: React.FC<ShopItemArtworkProps> = ({
         <img
           src={item.imageSrc}
           alt={item.name}
-          decoding="sync"
-          loading="eager"
+          decoding={variant === 'detail' ? 'sync' : 'async'}
+          loading={variant === 'detail' ? 'eager' : 'lazy'}
           referrerPolicy="no-referrer"
           className={`w-full h-full object-cover object-center ${
             item.imageCropScale ? 'scale-[1.12]' : ''

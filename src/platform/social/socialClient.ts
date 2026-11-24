@@ -12,6 +12,7 @@ import {
   buildOnlineHttpUrl,
   buildOnlineWsUrl,
 } from '../../games/hokm/online/client';
+import type { PublicAppearanceSnapshot } from '../items/itemTypes';
 
 export type PresenceStatus = 'online' | 'offline';
 export type PresenceDeviceState = 'online' | 'away' | 'busy';
@@ -26,6 +27,7 @@ export type RelationshipStatus =
 
 export interface SocialUserSummary {
   readonly userId: string;
+  readonly accountCode?: string | null;
   readonly username: string;
   readonly displayName: string;
   readonly avatarCode: string;
@@ -33,17 +35,20 @@ export interface SocialUserSummary {
   readonly onlineStatus: PresenceStatus;
   readonly relationshipStatus: RelationshipStatus;
   readonly friendshipId: string | null;
+  readonly appearance?: PublicAppearanceSnapshot;
 }
 
 export interface FriendListItem {
   readonly friendshipId: string;
   readonly userId: string;
+  readonly accountCode?: string | null;
   readonly username: string;
   readonly displayName: string;
   readonly avatarCode: string;
   readonly avatarUrl: string | null;
   readonly onlineStatus: PresenceStatus;
   readonly friendsSince: number;
+  readonly appearance?: PublicAppearanceSnapshot;
 }
 
 export interface FriendRequestItem {
@@ -51,6 +56,7 @@ export interface FriendRequestItem {
   readonly direction: 'incoming' | 'outgoing';
   readonly user: {
     readonly userId: string;
+    readonly accountCode?: string | null;
     readonly username: string;
     readonly displayName: string;
     readonly avatarCode: string;
@@ -149,6 +155,7 @@ export interface SocialBlockedListResponse {
 
 export interface ChatPartnerSummary {
   readonly userId: string;
+  readonly accountCode?: string | null;
   readonly username: string;
   readonly displayName: string;
   readonly avatarCode: string;
@@ -671,7 +678,9 @@ export async function fetchChatMessagesRequest(
 export async function sendChatMessageApi(
   conversationId: string,
   body: string,
-  clientMsgId?: string
+  clientMsgId?: string,
+  kind?: 'text' | 'game_invite',
+  gameId?: 'hokm' | 'chess' | 'backgammon' | 'pasoor' | 'ludo'
 ): Promise<ChatSendMessageResponse> {
   const res = await fetch(
     buildOnlineHttpUrl(
@@ -687,6 +696,8 @@ export async function sendChatMessageApi(
       body: JSON.stringify({
         body,
         ...(clientMsgId ? { clientMsgId } : {}),
+        ...(kind ? { kind } : {}),
+        ...(gameId ? { gameId } : {}),
       }),
     }
   );
@@ -823,6 +834,183 @@ export async function cancelGameInviteApi(
   return parseSocialJson<GameInviteMutationResponse>(
     res,
     'خطا در لغو دعوت‌نامه بازی.'
+  );
+}
+
+// =========================================================================
+// STAGE F — FRIEND GROUPS & 4-PLAYER HOKM GROUP INVITES
+// =========================================================================
+
+export interface FriendGroupMemberSummary {
+  readonly userId: string;
+  readonly username: string;
+  readonly displayName: string;
+  readonly accountCode?: string | null;
+  readonly avatarCode: string;
+  readonly avatarUrl: string | null;
+  readonly role: 'owner' | 'member';
+  readonly onlineStatus: PresenceStatus;
+  readonly appearance?: PublicAppearanceSnapshot;
+}
+
+export interface FriendGroupSummary {
+  readonly groupId: string;
+  readonly name: string;
+  readonly ownerUserId: string;
+  readonly memberCount: number;
+  readonly members: FriendGroupMemberSummary[];
+  readonly lastMessagePreview: string | null;
+  readonly lastMessageAt: number | null;
+  readonly createdAt: number;
+}
+
+export interface GroupMessageItem {
+  readonly messageId: string;
+  readonly groupId: string;
+  readonly senderId: string;
+  readonly senderUsername: string;
+  readonly senderDisplayName: string;
+  readonly kind: 'text' | 'game_invite';
+  readonly body: string;
+  readonly roomCode: string | null;
+  readonly gameId: string | null;
+  readonly clientMsgId: string | null;
+  readonly createdAt: number;
+}
+
+export interface FriendGroupsListResponse {
+  readonly ok: boolean;
+  readonly groups?: FriendGroupSummary[];
+  readonly serverTime?: number;
+  readonly code?: string;
+  readonly message?: string;
+}
+
+export interface FriendGroupMutationResponse {
+  readonly ok: boolean;
+  readonly group?: FriendGroupSummary;
+  readonly code?: string;
+  readonly message?: string;
+}
+
+export interface GroupMessagesListResponse {
+  readonly ok: boolean;
+  readonly groupId?: string;
+  readonly messages?: GroupMessageItem[];
+  readonly code?: string;
+  readonly message?: string;
+}
+
+export interface GroupSendMessageResponse {
+  readonly ok: boolean;
+  readonly message?: GroupMessageItem | string;
+  readonly deduplicated?: boolean;
+  readonly code?: string;
+}
+
+export async function fetchFriendGroupsRequest(
+  signal?: AbortSignal
+): Promise<FriendGroupsListResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/social/groups'), {
+    method: 'GET',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+  return parseSocialJson<FriendGroupsListResponse>(
+    res,
+    'خطا در دریافت لیست گروه‌های دوستان.'
+  );
+}
+
+export async function createFriendGroupApi(
+  name: string,
+  memberIds: readonly string[] = []
+): Promise<FriendGroupMutationResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/social/groups'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'eyvan-client',
+    },
+    body: JSON.stringify({ name, memberIds }),
+  });
+  return parseSocialJson<FriendGroupMutationResponse>(
+    res,
+    'خطا در ایجاد گروه دوستان.'
+  );
+}
+
+export async function addFriendToGroupApi(
+  groupId: string,
+  targetUserId: string
+): Promise<FriendGroupMutationResponse> {
+  const res = await fetch(
+    buildOnlineHttpUrl(`/api/social/groups/${encodeURIComponent(groupId)}/members`),
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'eyvan-client',
+      },
+      body: JSON.stringify({ targetUserId }),
+    }
+  );
+  return parseSocialJson<FriendGroupMutationResponse>(
+    res,
+    'خطا در افزودن دوست به گروه.'
+  );
+}
+
+export async function fetchGroupMessagesRequest(
+  groupId: string,
+  limit = 40,
+  signal?: AbortSignal
+): Promise<GroupMessagesListResponse> {
+  const res = await fetch(
+    buildOnlineHttpUrl(
+      `/api/social/groups/${encodeURIComponent(groupId)}/messages?limit=${limit}`
+    ),
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { Accept: 'application/json' },
+      signal,
+    }
+  );
+  return parseSocialJson<GroupMessagesListResponse>(
+    res,
+    'خطا در دریافت پیام‌های گروه.'
+  );
+}
+
+export async function sendGroupMessageApi(
+  groupId: string,
+  payload: {
+    readonly body?: string;
+    readonly kind?: 'text' | 'game_invite';
+    readonly gameId?: 'hokm' | 'chess' | 'backgammon' | 'pasoor' | 'ludo';
+    readonly roomCode?: string;
+    readonly clientMsgId?: string;
+  }
+): Promise<GroupSendMessageResponse> {
+  const res = await fetch(
+    buildOnlineHttpUrl(`/api/social/groups/${encodeURIComponent(groupId)}/messages`),
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'eyvan-client',
+      },
+      body: JSON.stringify(payload),
+    }
+  );
+  return parseSocialJson<GroupSendMessageResponse>(
+    res,
+    'خطا در ارسال پیام به گروه.'
   );
 }
 

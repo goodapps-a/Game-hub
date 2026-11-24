@@ -5,10 +5,12 @@ import {
   Check,
   CheckCheck,
   Clock,
+  Gamepad2,
   Loader2,
   MessageSquare,
   RotateCcw,
   Send,
+  Users,
   WifiOff,
 } from 'lucide-react';
 import { ProfileAvatar } from './TopBar';
@@ -43,9 +45,20 @@ interface PrivateChatPanelProps {
   conversation: ChatConversationItem;
   onClose: () => void;
   onConversationActivity?: () => void;
+  onOpenFriendGroups?: () => void;
 }
 
 const MAX_CHAT_CHARS = 2000;
+
+const TWO_PLAYER_GAMES: ReadonlyArray<{
+  id: 'chess' | 'backgammon' | 'pasoor' | 'ludo';
+  label: string;
+}> = [
+  { id: 'chess', label: 'شطرنج' },
+  { id: 'backgammon', label: 'تخته نرد' },
+  { id: 'pasoor', label: 'پاسور' },
+  { id: 'ludo', label: 'منچ' },
+];
 
 function toValidAvatarCode(code: string): UserProfile['avatarCode'] {
   if (
@@ -94,6 +107,7 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
   conversation,
   onClose,
   onConversationActivity,
+  onOpenFriendGroups,
 }) => {
   const [messages, setMessages] = useState<ChatUiMessage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -591,14 +605,20 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
    * ONLY after the server commits to D1 and returns success.
    */
   const dispatchMessageSend = useCallback(
-    async (bodyText: string, clientMsgId: string, existingOptimisticId?: string) => {
+    async (
+      bodyText: string,
+      clientMsgId: string,
+      existingOptimisticId?: string,
+      kind: 'text' | 'game_invite' = 'text',
+      gameId?: 'chess' | 'backgammon' | 'pasoor' | 'ludo'
+    ) => {
       const targetConvId = conversation.conversationId;
       const optimisticId = existingOptimisticId ?? `opt_${clientMsgId}`;
       const optimisticItem: ChatUiMessage = {
         messageId: optimisticId,
         conversationId: targetConvId,
         senderId: currentUserId,
-        kind: 'text',
+        kind,
         body: bodyText,
         clientMsgId,
         createdAt: Date.now(),
@@ -609,7 +629,13 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
       setMessages((prev) => mergeChatMessages(prev, [optimisticItem]));
 
       try {
-        const res = await sendChatMessageApi(targetConvId, bodyText, clientMsgId);
+        const res = await sendChatMessageApi(
+          targetConvId,
+          bodyText,
+          clientMsgId,
+          kind,
+          gameId
+        );
         if (!mountedRef.current || activeConvIdRef.current !== targetConvId) return;
 
         if (!res.ok || !res.message || typeof res.message === 'string') {
@@ -675,6 +701,21 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
     if (revoked || msg.localStatus !== 'failed') return;
     const retryClientMsgId = msg.clientMsgId ?? generateClientMsgId();
     void dispatchMessageSend(msg.body, retryClientMsgId, msg.messageId);
+  };
+
+  const handleSendTwoPlayerInvite = (
+    gameId: 'chess' | 'backgammon' | 'pasoor' | 'ludo',
+    label: string
+  ) => {
+    if (revoked || offline) return;
+    const clientMsgId = generateClientMsgId();
+    void dispatchMessageSend(
+      `دعوت به بازی دونفره ${label} از طریق گفتگوی خصوصی`,
+      clientMsgId,
+      undefined,
+      'game_invite',
+      gameId
+    );
   };
 
   return (
@@ -809,10 +850,20 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
                     isMine
                       ? msg.localStatus === 'failed'
                         ? 'bg-red-500/12 border-red-500/40 theme-heading rounded-tr-sm'
-                        : 'bg-[#0D8A8A]/22 border-[#0D8A8A]/45 theme-heading rounded-tr-sm'
-                      : 'theme-subcard border-[var(--eyvan-line)] theme-heading rounded-tl-sm'
+                        : msg.kind === 'game_invite'
+                          ? 'bg-[#D4AE58]/16 border-[#D4AE58]/45 theme-heading rounded-tr-sm'
+                          : 'bg-[#0D8A8A]/22 border-[#0D8A8A]/45 theme-heading rounded-tr-sm'
+                      : msg.kind === 'game_invite'
+                        ? 'bg-[#0D8A8A]/12 border-[#0D8A8A]/35 theme-heading rounded-tl-sm'
+                        : 'theme-subcard border-[var(--eyvan-line)] theme-heading rounded-tl-sm'
                   }`}
                 >
+                  {msg.kind === 'game_invite' && (
+                    <div className="mb-1 inline-flex items-center gap-1 text-[10px] font-black theme-accent-gold">
+                      <Gamepad2 className="w-3 h-3 shrink-0" />
+                      <span>دعوت به بازی دونفره</span>
+                    </div>
+                  )}
                   <div>{msg.body}</div>
 
                   {msg.localStatus === 'failed' && (
@@ -861,6 +912,48 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
         )}
         <div ref={bottomRef} />
       </div>
+
+      {/* 2-Player Direct Invites + 4-Player Hokm Group Notice */}
+      {!revoked && (
+        <div className="px-3 py-2 border-t border-[var(--eyvan-line)] bg-black/5 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-bold theme-muted inline-flex items-center gap-1 ml-1">
+              <Gamepad2 className="w-3.5 h-3.5 theme-accent-teal shrink-0" />
+              <span>دعوت دونفره:</span>
+            </span>
+            {TWO_PLAYER_GAMES.map((g) => (
+              <button
+                key={g.id}
+                type="button"
+                disabled={offline}
+                data-testid={`pv-invite-${g.id}`}
+                onClick={() => handleSendTwoPlayerInvite(g.id, g.label)}
+                className="min-h-[28px] px-2.5 rounded-lg theme-btn-secondary border text-[11px] font-extrabold hover:border-[var(--eyvan-teal)] cursor-pointer disabled:opacity-50"
+              >
+                {g.label}
+              </button>
+            ))}
+          </div>
+
+          <div
+            data-testid="pv-hokm-group-notice"
+            className="flex flex-wrap items-center justify-between gap-2 text-[11px] theme-muted"
+          >
+            <span>حکم بازی ۴ نفره است — برای دعوت دوستان، گروه بسازید.</span>
+            {onOpenFriendGroups && (
+              <button
+                type="button"
+                data-testid="pv-go-to-groups-btn"
+                onClick={onOpenFriendGroups}
+                className="inline-flex items-center gap-1 font-extrabold theme-accent-gold hover:underline cursor-pointer shrink-0"
+              >
+                <Users className="w-3 h-3 shrink-0" />
+                <span>رفتن به گروه‌های دوستان</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Composer */}
       <form

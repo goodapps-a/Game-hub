@@ -40,6 +40,10 @@ import {
   fetchFriendsRequest,
   sendGameInviteApi,
 } from '../../../platform/social/socialClient';
+import {
+  getAvatarFrameVisual,
+  getProfileBadgeVisual,
+} from '../../../platform/items';
 
 export const ONLINE_AVATAR_OPTIONS: readonly {
   code: string;
@@ -95,6 +99,10 @@ const LobbySeatCard: React.FC<{
 }> = ({ seatView, isViewer, onSelectSeat }) => {
   const isEmpty = !seatView.playerId;
   const isMyTeam = seatView.team === 'myTeam';
+  const frameVisual = seatView.appearance?.avatarFrameId
+    ? getAvatarFrameVisual(seatView.appearance.avatarFrameId)
+    : null;
+  const badgeVisual = getProfileBadgeVisual(seatView.appearance?.badgeId);
 
   return (
     <button
@@ -106,6 +114,7 @@ const LobbySeatCard: React.FC<{
       data-testid={`lobby-seat-${seatView.visualSeat}`}
       data-canonical-seat={seatView.canonicalSeat}
       data-occupied={isEmpty ? 'false' : 'true'}
+      data-seat-deck={seatView.appearance?.deckId ?? undefined}
       className={`relative flex flex-col items-center justify-center gap-1.5 rounded-2xl p-3 sm:p-4 border transition-all min-h-[124px] sm:min-h-[138px] w-full text-center ${
         isEmpty
           ? 'bg-[#091F1A]/60 border-dashed border-[#D4AE58]/40 hover:border-[#F3D179] hover:bg-[#0D2B24]/80 cursor-pointer'
@@ -116,9 +125,9 @@ const LobbySeatCard: React.FC<{
               : 'bg-gradient-to-b from-[#2B151B]/90 to-[#180C10]/90 border-[#FB7185]/45 cursor-default'
       }`}
     >
-      {/* Team pill */}
+      {/* Team tag */}
       <span
-        className={`absolute top-2 right-2 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+        className={`absolute top-2 right-2 text-[10px] font-bold px-2 py-0.5 rounded-md border ${
           isMyTeam
             ? 'bg-[#0C352C] border-[#34D399]/50 text-[#6EE7B7]'
             : 'bg-[#3B161C] border-[#FB7185]/45 text-[#FCA5A5]'
@@ -127,7 +136,7 @@ const LobbySeatCard: React.FC<{
         {isMyTeam ? 'تیم اول' : 'تیم دوم'}
       </span>
 
-      {/* Ready / Online badges */}
+      {/* Ready / Online indicator */}
       {!isEmpty && (
         <span className="absolute top-2 left-2 flex items-center gap-1">
           <span
@@ -162,6 +171,14 @@ const LobbySeatCard: React.FC<{
                   ? 'border-[#34D399] shadow-[0_0_14px_rgba(52,211,153,0.45)]'
                   : 'border-[#D4AE58]/65'
               }`}
+              style={
+                !seatView.isReady && frameVisual
+                  ? {
+                      borderColor: frameVisual.ringColor,
+                      boxShadow: `0 0 14px ${frameVisual.glowColor}`,
+                    }
+                  : undefined
+              }
             >
               <img
                 src={getAvatarSrcByCode(seatView.avatarCode)}
@@ -179,21 +196,35 @@ const LobbySeatCard: React.FC<{
             )}
           </div>
 
-          <span
-            dir="ltr"
-            className="text-xs sm:text-sm font-extrabold text-[#FAF6EE] truncate max-w-[130px]"
-          >
-            {seatView.username}
-          </span>
+          <div className="flex items-center justify-center gap-1 max-w-[140px]">
+            <span
+              dir="ltr"
+              className="text-xs sm:text-sm font-extrabold text-[#FAF6EE] truncate"
+            >
+              {seatView.username}
+            </span>
+            {badgeVisual && (
+              <span
+                title={badgeVisual.label}
+                style={{
+                  borderColor: badgeVisual.color,
+                  color: badgeVisual.color,
+                }}
+                className="px-1.5 py-[1px] rounded border bg-[#061814]/80 text-[9px] font-black shrink-0"
+              >
+                {badgeVisual.symbol}
+              </span>
+            )}
+          </div>
 
           <div className="flex items-center gap-1.5">
             {seatView.isReady ? (
-              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#34D399]/18 border border-[#34D399]/50 text-[#6EE7B7]">
+              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-[#34D399]/18 border border-[#34D399]/50 text-[#6EE7B7]">
                 <CheckCircle2 className="w-3 h-3" />
                 آماده
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-white/8 border border-white/15 text-[#B8CEC6]">
+              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-white/8 border border-white/15 text-[#B8CEC6]">
                 <Clock className="w-3 h-3" />
                 در انتظار
               </span>

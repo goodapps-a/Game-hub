@@ -76,6 +76,12 @@ export interface LocalCosmeticPreferences {
   customBannerUrl?: string | null;
   equippedTableSkinId?: string;
   equippedDeckId?: string;
+  equippedCardBackId?: string;
+  equippedAvatarFrameId?: string;
+  equippedBadgeId?: string;
+  equippedNameplateId?: string;
+  equippedGameEffectId?: string;
+  equippedTableBackgroundId?: string;
   ownedShopItemIds?: string[];
   coins?: number;
   gems?: number;
@@ -85,6 +91,7 @@ export const DEFAULT_OWNED_SHOP_IDS: readonly string[] = [
   'cb-shamsa',
   'tt-traditional',
   'af-banner-royal',
+  'deck-eyvan-classic',
 ];
 
 function isSafeDataImageUrl(val: unknown): val is string {
@@ -93,6 +100,10 @@ function isSafeDataImageUrl(val: unknown): val is string {
     val.length <= 450_000 &&
     /^data:image\/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(val)
   );
+}
+
+function isValidItemId(val: unknown): val is string {
+  return typeof val === 'string' && /^[a-z0-9][a-z0-9._-]{1,60}$/i.test(val);
 }
 
 export function loadLocalCosmetics(): LocalCosmeticPreferences {
@@ -116,18 +127,33 @@ export function loadLocalCosmetics(): LocalCosmeticPreferences {
     if (parsed.customBannerUrl === null || isSafeDataImageUrl(parsed.customBannerUrl)) {
       out.customBannerUrl = parsed.customBannerUrl;
     }
-    if (typeof parsed.equippedTableSkinId === 'string' && parsed.equippedTableSkinId.length <= 40) {
+    if (isValidItemId(parsed.equippedTableSkinId)) {
       out.equippedTableSkinId = parsed.equippedTableSkinId;
     }
-    if (
-      typeof parsed.equippedDeckId === 'string' &&
-      /^[a-z0-9][a-z0-9._-]{1,60}$/i.test(parsed.equippedDeckId)
-    ) {
+    if (isValidItemId(parsed.equippedDeckId)) {
       out.equippedDeckId = parsed.equippedDeckId;
+    }
+    if (isValidItemId(parsed.equippedCardBackId)) {
+      out.equippedCardBackId = parsed.equippedCardBackId;
+    }
+    if (isValidItemId(parsed.equippedAvatarFrameId)) {
+      out.equippedAvatarFrameId = parsed.equippedAvatarFrameId;
+    }
+    if (isValidItemId(parsed.equippedBadgeId)) {
+      out.equippedBadgeId = parsed.equippedBadgeId;
+    }
+    if (isValidItemId(parsed.equippedNameplateId)) {
+      out.equippedNameplateId = parsed.equippedNameplateId;
+    }
+    if (isValidItemId(parsed.equippedGameEffectId)) {
+      out.equippedGameEffectId = parsed.equippedGameEffectId;
+    }
+    if (isValidItemId(parsed.equippedTableBackgroundId)) {
+      out.equippedTableBackgroundId = parsed.equippedTableBackgroundId;
     }
     if (Array.isArray(parsed.ownedShopItemIds)) {
       const validIds = parsed.ownedShopItemIds.filter(
-        (id): id is string => typeof id === 'string' && id.length <= 40
+        (id): id is string => typeof id === 'string' && id.length <= 64
       );
       out.ownedShopItemIds = Array.from(new Set([...DEFAULT_OWNED_SHOP_IDS, ...validIds]));
     }
@@ -156,12 +182,24 @@ export function saveLocalCosmetics(prefs: LocalCosmeticPreferences): void {
 
 /**
  * Neutral default profile for an unauthenticated guest session with a random guest ID.
- * Guests can immediately play Hokm; purchasing from the Shop or opening Friends requires
- * registering or logging into a central Eyvan account.
+ * Guests start with 0 coins & 0 gems and can immediately play Hokm; server-persisted
+ * purchases/inventory require an Eyvan account (with free Test Mode preview/claim).
  */
 export function createInitialGuestProfile(themeMode: ThemeMode): UserProfile {
   const guestId = getOrCreateRandomGuestId();
   const cosmetics = loadLocalCosmetics();
+  const equippedDeckId = cosmetics.equippedDeckId ?? 'eyvan-classic';
+  const equippedTableSkinId = cosmetics.equippedTableSkinId ?? 'tt-traditional';
+  const equippedCardBackId = cosmetics.equippedCardBackId ?? 'cb-shamsa';
+  const bannerItemId =
+    cosmetics.bannerCode === 'garden'
+      ? 'af-banner-garden'
+      : cosmetics.bannerCode === 'ruby'
+        ? 'af-banner-ruby'
+        : cosmetics.bannerCode === 'none'
+          ? undefined
+          : 'af-banner-royal';
+
   return {
     id: guestId,
     username: guestId,
@@ -169,14 +207,29 @@ export function createInitialGuestProfile(themeMode: ThemeMode): UserProfile {
     customAvatarUrl: cosmetics.customAvatarUrl ?? null,
     bannerCode: cosmetics.bannerCode ?? 'royal',
     customBannerUrl: cosmetics.customBannerUrl ?? null,
-    equippedTableSkinId: cosmetics.equippedTableSkinId ?? 'tt-traditional',
-    equippedDeckId: cosmetics.equippedDeckId ?? 'eyvan-classic',
+    equippedTableSkinId,
+    equippedDeckId,
+    equippedCardBackId,
+    equippedAvatarFrameId: cosmetics.equippedAvatarFrameId,
+    equippedBadgeId: cosmetics.equippedBadgeId,
+    equippedNameplateId: cosmetics.equippedNameplateId,
+    equippedGameEffectId: cosmetics.equippedGameEffectId,
+    equippedSlots: {
+      card_deck: equippedDeckId === 'eyvan-classic' ? 'deck-eyvan-classic' : `deck-${equippedDeckId}`,
+      card_back: equippedCardBackId,
+      table_skin: equippedTableSkinId,
+      ...(bannerItemId ? { banner: bannerItemId } : {}),
+      ...(cosmetics.equippedAvatarFrameId ? { avatar_frame: cosmetics.equippedAvatarFrameId } : {}),
+      ...(cosmetics.equippedBadgeId ? { profile_badge: cosmetics.equippedBadgeId } : {}),
+      ...(cosmetics.equippedNameplateId ? { nameplate: cosmetics.equippedNameplateId } : {}),
+      ...(cosmetics.equippedGameEffectId ? { game_effect: cosmetics.equippedGameEffectId } : {}),
+    },
     ownedShopItemIds: cosmetics.ownedShopItemIds ?? [...DEFAULT_OWNED_SHOP_IDS],
     level: 1,
     xp: 0,
     xpToNextLevel: 100,
-    coins: cosmetics.coins ?? 2500,
-    gems: cosmetics.gems ?? 120,
+    coins: cosmetics.coins ?? 0,
+    gems: cosmetics.gems ?? 0,
     stats: {
       gamesPlayed: 0,
       wins: 0,

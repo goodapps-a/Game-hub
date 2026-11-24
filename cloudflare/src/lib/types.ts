@@ -98,4 +98,6 @@ export interface CfWorkerEnv {
   GOOGLE_OAUTH_CLIENT_SECRET?: string;
   GOOGLE_OAUTH_REDIRECT_URI?: string;
   GOOGLE_OAUTH_FETCH?: typeof fetch;
+  SHOP_TEST_MODE?: string;
+  ZARINPAL_MERCHANT_ID?: string;
 }

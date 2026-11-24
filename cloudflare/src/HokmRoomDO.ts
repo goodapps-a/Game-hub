@@ -39,7 +39,9 @@ import {
   parseClientMessage,
   sanitizeAvatarCode,
   sanitizeRoomCode,
+  sanitizeSeatAppearance,
   sanitizeUsername,
+  SeatPublicAppearance,
 } from '../../src/games/hokm/online/protocol';
 import {
   CfWorkerEnv,
@@ -65,6 +67,7 @@ import { parseSessionCookieFromHeader } from './lib/sessionCookie';
 
 export type { CfWorkerEnv };
 export const INTERNAL_SESSION_TOKEN_HEADER = 'X-Eyvan-Internal-Session-Token';
+export const INTERNAL_VERIFIED_APPEARANCE_HEADER = 'X-Eyvan-Verified-Appearance';
 
 const ROOM_STATE_STORAGE_KEY = 'room:state';
 const MAX_HTTP_BODY_BYTES = 16 * 1024;
@@ -436,6 +439,21 @@ export class HokmRoomDO {
       const avatarCode = rawVerifiedAvatar
         ? sanitizeAvatarCode(rawVerifiedAvatar)
         : sanitizeAvatarCode(bodyRes.data.avatarCode);
+      let verifiedAppearance: SeatPublicAppearance | undefined;
+      const rawVerifiedAppearance = verifiedUserId
+        ? request.headers.get(INTERNAL_VERIFIED_APPEARANCE_HEADER)
+        : null;
+      if (rawVerifiedAppearance) {
+        try {
+          verifiedAppearance = sanitizeSeatAppearance(
+            JSON.parse(rawVerifiedAppearance)
+          );
+        } catch {
+          verifiedAppearance = undefined;
+        }
+      }
+      const appearance =
+        verifiedAppearance ?? sanitizeSeatAppearance(bodyRes.data.appearance);
       const rawTarget = bodyRes.data.targetMatchScore;
       const targetMatchScore =
         typeof rawTarget === 'number' &&
@@ -462,6 +480,7 @@ export class HokmRoomDO {
         username,
         userId: verifiedUserId,
         avatarCode,
+        appearance,
         preferredSeat: 'south',
       });
       if (joined.ok === false) {
@@ -532,6 +551,21 @@ export class HokmRoomDO {
       const avatarCode = rawVerifiedAvatar
         ? sanitizeAvatarCode(rawVerifiedAvatar)
         : sanitizeAvatarCode(bodyRes.data.avatarCode);
+      let verifiedAppearance: SeatPublicAppearance | undefined;
+      const rawVerifiedAppearance = verifiedUserId
+        ? request.headers.get(INTERNAL_VERIFIED_APPEARANCE_HEADER)
+        : null;
+      if (rawVerifiedAppearance) {
+        try {
+          verifiedAppearance = sanitizeSeatAppearance(
+            JSON.parse(rawVerifiedAppearance)
+          );
+        } catch {
+          verifiedAppearance = undefined;
+        }
+      }
+      const appearance =
+        verifiedAppearance ?? sanitizeSeatAppearance(bodyRes.data.appearance);
       const preferredSeat = isValidSeat(bodyRes.data.preferredSeat)
         ? bodyRes.data.preferredSeat
         : undefined;
@@ -540,6 +574,7 @@ export class HokmRoomDO {
         username,
         userId: verifiedUserId,
         avatarCode,
+        appearance,
         preferredSeat,
       });
       if (joined.ok === false) {

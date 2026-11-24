@@ -70,6 +70,13 @@ import {
   listGameInvites,
   respondToGameInvite,
 } from './inviteService';
+import {
+  addMemberToFriendGroup,
+  createFriendGroup,
+  listGroupMessages,
+  listUserGroups,
+  sendGroupMessage,
+} from './groupService';
 import { ChatRealtimePublisher } from '../../../../src/platform/social/chatRealtimeProtocol';
 import { GameRoomLookupFn, SocialRequestContext } from './types';
 
@@ -1019,6 +1026,132 @@ export async function handleSocialHttpRequest(
         200,
         env.corsHeaders
       );
+    }
+
+    // 26) GET /api/social/groups & POST /api/social/groups
+    if (pathname === '/api/social/groups' && method === 'GET') {
+      const groups = await listUserGroups(env.db, ctx);
+      return buildSocialResponse(
+        { ok: true, groups, serverTime: now },
+        200,
+        env.corsHeaders
+      );
+    }
+
+    if (pathname === '/api/social/groups' && method === 'POST') {
+      const body = await parseJsonObjectBody(request, env.corsHeaders);
+      if (body.ok === false) return body.response;
+      const result = await createFriendGroup(env.db, body.data, ctx);
+      if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
+        return buildSocialResponse(
+          { ok: false, code: result.code, message: result.message },
+          result.status,
+          env.corsHeaders,
+          extra
+        );
+      }
+      return buildSocialResponse(
+        { ok: true, group: result.group },
+        result.status,
+        env.corsHeaders
+      );
+    }
+
+    // 27) POST /api/social/groups/:groupId/members
+    const groupMembersMatch = pathname.match(
+      /^\/api\/social\/groups\/(grp_[a-zA-Z0-9_-]{6,64})\/members$/
+    );
+    if (groupMembersMatch && method === 'POST') {
+      const body = await parseJsonObjectBody(request, env.corsHeaders);
+      if (body.ok === false) return body.response;
+      const result = await addMemberToFriendGroup(
+        env.db,
+        groupMembersMatch[1],
+        body.data,
+        ctx
+      );
+      if (result.ok === false) {
+        return buildSocialResponse(
+          { ok: false, code: result.code, message: result.message },
+          result.status,
+          env.corsHeaders
+        );
+      }
+      return buildSocialResponse(
+        { ok: true, group: result.group },
+        result.status,
+        env.corsHeaders
+      );
+    }
+
+    // 28) GET/POST /api/social/groups/:groupId/messages
+    const groupMessagesMatch = pathname.match(
+      /^\/api\/social\/groups\/(grp_[a-zA-Z0-9_-]{6,64})\/messages$/
+    );
+    if (groupMessagesMatch) {
+      const groupId = groupMessagesMatch[1];
+      if (method === 'GET') {
+        const reqUrl = new URL(request.url);
+        const result = await listGroupMessages(
+          env.db,
+          groupId,
+          reqUrl.searchParams.get('limit'),
+          ctx
+        );
+        if (result.ok === false) {
+          return buildSocialResponse(
+            { ok: false, code: result.code, message: result.message },
+            result.status,
+            env.corsHeaders
+          );
+        }
+        return buildSocialResponse(
+          {
+            ok: true,
+            groupId: result.groupId,
+            messages: result.messages,
+          },
+          200,
+          env.corsHeaders
+        );
+      }
+      if (method === 'POST') {
+        const body = await parseJsonObjectBody(request, env.corsHeaders);
+        if (body.ok === false) return body.response;
+        const lookup: GameRoomLookupFn = env.roomLookup ?? (async () => null);
+        const result = await sendGroupMessage(
+          env.db,
+          groupId,
+          body.data,
+          lookup,
+          ctx
+        );
+        if (result.ok === false) {
+          const extra =
+            result.retryAfterSec !== undefined
+              ? { 'Retry-After': String(result.retryAfterSec) }
+              : undefined;
+          return buildSocialResponse(
+            { ok: false, code: result.code, message: result.message },
+            result.status,
+            env.corsHeaders,
+            extra
+          );
+        }
+        return buildSocialResponse(
+          {
+            ok: true,
+            message: result.message,
+            deduplicated: result.deduplicated,
+          },
+          result.status,
+          env.corsHeaders
+        );
+      }
     }
 
     return buildSocialResponse(

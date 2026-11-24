@@ -12,6 +12,7 @@ import { buildOnlineHttpUrl } from '../../games/hokm/online/client';
 
 export interface AuthUserSummary {
   readonly userId: string;
+  readonly accountCode?: string | null;
   readonly username: string;
   readonly displayName: string;
   readonly email: string | null;

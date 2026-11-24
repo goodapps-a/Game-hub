@@ -1,27 +1,24 @@
 import React, { useRef, useState } from 'react';
-import {
-  Camera,
-  Check,
-  Copy,
-  Image as ImageIcon,
-  LogIn,
-  Pencil,
-  ShieldCheck,
-  Trash2,
-  Trophy,
-  Upload,
-  X,
-} from 'lucide-react';
+import { Check, Copy, Camera, LogIn, Pencil, ShieldCheck, Trash2, Trophy, Upload, X } from 'lucide-react';
 import { AuthUserSummary } from '../../auth/authClient';
 import { PLATFORM_ASSETS } from '../../data/assets';
 import { saveLocalCosmetics } from '../../data/guestDefaults';
+import {
+  buildUnifiedUniversalCatalog,
+  getBannerVisual,
+} from '../../items/itemCatalog';
 import { toPersianDigits } from '../../theme/tokens';
 import { ProfileBannerCode, UserProfile } from '../../types/platform';
 import {
   computeWinRateSummary,
   computeXpProgress,
 } from '../../utils/profileMetrics';
-import { GoldCoinSvg, ProfileAvatar, PurpleGemSvg } from '../TopBar';
+import { GoldCoinSvg, PurpleGemSvg } from '../TopBar';
+import {
+  FramedPlayerAvatar,
+  PlayerBadgeInline,
+  PlayerBannerStage,
+} from './PlayerAppearanceParts';
 
 export type ProfileSubView = 'overview' | 'edit' | 'account' | 'settings';
 
@@ -33,32 +30,6 @@ interface ProfileOverviewProps {
   onOpenAuth?: (mode: 'login' | 'register') => void;
   onOpenBannerShop?: () => void;
 }
-
-const BANNER_OPTIONS: ReadonlyArray<{
-  code: Exclude<ProfileBannerCode, 'none'>;
-  shopItemId: string;
-  src: string;
-  label: string;
-}> = [
-  {
-    code: 'royal',
-    shopItemId: 'af-banner-royal',
-    src: PLATFORM_ASSETS.profileBannerRoyal,
-    label: 'بنر ایوان لاجورد و طلا',
-  },
-  {
-    code: 'garden',
-    shopItemId: 'af-banner-garden',
-    src: PLATFORM_ASSETS.profileBannerGarden,
-    label: 'بنر باغ فیروزه و انار',
-  },
-  {
-    code: 'ruby',
-    shopItemId: 'af-banner-ruby',
-    src: PLATFORM_ASSETS.profileBannerRuby,
-    label: 'بنر تالار یاقوت صفوی',
-  },
-];
 
 /**
  * Safely resizes a user-selected image file on an offscreen canvas into a compact JPEG data URL.
@@ -123,16 +94,41 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
 
   const xp = computeXpProgress(profile.xp, profile.xpToNextLevel);
   const stats = computeWinRateSummary(profile.stats);
-  const persistentId = authUser ? authUser.userId : profile.id;
+  const persistentId = authUser
+    ? authUser.accountCode ?? profile.accountCode ?? authUser.userId
+    : profile.id;
   const ownedIds = new Set(profile.ownedShopItemIds ?? ['af-banner-royal']);
 
+  const bannerOptions = buildUnifiedUniversalCatalog()
+    .filter((item) => item.kind === 'banner')
+    .map((item) => {
+      const vis = getBannerVisual(item.id);
+      return {
+        code: (vis.code === 'none' ? 'royal' : vis.code) as Exclude<
+          ProfileBannerCode,
+          'none'
+        >,
+        shopItemId: item.id,
+        src: vis.imageSrc ?? PLATFORM_ASSETS.profileBannerRoyal,
+        label: item.name,
+      };
+    });
+
   const bannerCode = profile.bannerCode ?? 'royal';
-  const presetBanner = BANNER_OPTIONS.find((b) => b.code === bannerCode) ?? null;
+  const activeBannerIdOrCode =
+    bannerCode === 'none'
+      ? 'none'
+      : profile.equippedSlots?.banner ?? bannerCode;
+  const resolvedBanner = getBannerVisual(activeBannerIdOrCode);
   const activeBannerSrc = profile.customBannerUrl
     ? profile.customBannerUrl
     : bannerCode === 'none'
       ? null
-      : presetBanner?.src ?? PLATFORM_ASSETS.profileBannerRoyal;
+      : resolvedBanner.imageSrc;
+  const activeFrameId =
+    profile.equippedAvatarFrameId ?? profile.equippedSlots?.avatar_frame ?? null;
+  const activeBadgeId =
+    profile.equippedBadgeId ?? profile.equippedSlots?.profile_badge ?? null;
 
   const handleCopyId = async () => {
     try {
@@ -182,13 +178,20 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
     onUpdateProfile((prev) => ({ ...prev, customBannerUrl: dataUrl }));
   };
 
-  const handleSelectBannerPreset = (code: Exclude<ProfileBannerCode, 'none'>) => {
+  const handleSelectBannerPreset = (
+    code: Exclude<ProfileBannerCode, 'none'>,
+    shopItemId: string
+  ) => {
     setUploadError(null);
     saveLocalCosmetics({ bannerCode: code, customBannerUrl: null });
     onUpdateProfile((prev) => ({
       ...prev,
       bannerCode: code,
       customBannerUrl: null,
+      equippedSlots: {
+        ...(prev.equippedSlots ?? {}),
+        banner: shopItemId,
+      },
     }));
   };
 
@@ -236,23 +239,12 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
           aria-label="مشاهده و تغییر بنر پروفایل"
           className="group relative block w-[calc(100%+2rem)] sm:w-[calc(100%+2.5rem)] -mx-4 sm:-mx-5 -mt-4 sm:-mt-5 h-[132px] sm:h-[146px] overflow-hidden bg-gradient-to-br from-[#0F203D] via-[#132C50] to-[#0B3C42] cursor-pointer text-right focus-visible:outline-none"
         >
-          {activeBannerSrc ? (
-            <img
-              src={activeBannerSrc}
-              alt="بنر پروفایل بازیکن"
-              decoding="sync"
-              loading="eager"
-              referrerPolicy="no-referrer"
-              className="w-full h-full object-cover object-center brightness-[1.02] contrast-[1.04] transition-transform duration-300 group-hover:scale-[1.03]"
-            />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center">
-              <span className="text-[11px] font-bold text-white/60 inline-flex items-center gap-1.5">
-                <ImageIcon className="w-4 h-4" />
-                <span>برای افزودن بنر لمس کنید</span>
-              </span>
-            </div>
-          )}
+          <PlayerBannerStage
+            bannerItemIdOrCode={activeBannerIdOrCode}
+            customBannerUrl={profile.customBannerUrl}
+            emptyText="برای افزودن بنر لمس کنید"
+            interactive
+          />
           <div
             className="absolute inset-0 bg-gradient-to-t from-black/45 via-transparent to-black/15"
             aria-hidden="true"
@@ -274,10 +266,11 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
             aria-label="مشاهده و تغییر عکس پروفایل"
             className="group relative rounded-full ring-[4px] ring-[var(--eyvan-modal-bg)] shadow-[0_10px_28px_rgba(0,0,0,0.34)] cursor-pointer transition-transform active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--eyvan-teal)]"
           >
-            <ProfileAvatar
+            <FramedPlayerAvatar
               avatarCode={profile.avatarCode}
               customAvatarUrl={profile.customAvatarUrl}
               username={profile.username}
+              avatarFrameId={activeFrameId}
               size="xl"
             />
             <span className="absolute inset-0 rounded-full bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
@@ -285,8 +278,9 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
             </span>
           </button>
 
-          {/* Centered Username + Subtle Rename Pencil */}
+          {/* Centered Username + Badge + Subtle Rename Pencil */}
           <div className="mt-2.5 flex items-center justify-center gap-1.5 max-w-full px-2">
+            <PlayerBadgeInline badgeId={activeBadgeId} />
             <h3
               dir="ltr"
               className="text-lg font-black theme-heading truncate"
@@ -334,18 +328,18 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
             </div>
           )}
 
-          {/* Discreet Tap-to-Copy Persistent ID */}
+          {/* Discreet Tap-to-Copy Persistent 6-Digit Account ID */}
           <button
             type="button"
             onClick={() => void handleCopyId()}
             className="inline-flex items-center gap-1.5 text-[11px] theme-muted hover:text-[var(--eyvan-text)] transition-colors cursor-pointer mt-1"
             title="کپی شناسه یکتا"
           >
-            <span>شناسه:</span>
+            <span>{authUser ? 'شناسه کاربری:' : 'شناسه:'}</span>
             <code
               dir="ltr"
               data-testid="profile-persistent-id"
-              className="font-mono text-[11px] truncate max-w-[180px]"
+              className="font-mono text-[11px] font-bold tracking-wider truncate max-w-[180px]"
             >
               {persistentId}
             </code>
@@ -615,16 +609,16 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
             </div>
 
             {/* Owned Banners (only if player owns > 1) */}
-            {BANNER_OPTIONS.filter((b) => ownedIds.has(b.shopItemId)).length > 1 && (
+            {bannerOptions.filter((b) => ownedIds.has(b.shopItemId)).length > 1 && (
               <div className="grid grid-cols-3 gap-2">
-                {BANNER_OPTIONS.filter((b) => ownedIds.has(b.shopItemId)).map((b) => {
+                {bannerOptions.filter((b) => ownedIds.has(b.shopItemId)).map((b) => {
                   const isActive =
                     !profile.customBannerUrl && bannerCode === b.code;
                   return (
                     <button
                       key={b.code}
                       type="button"
-                      onClick={() => handleSelectBannerPreset(b.code)}
+                      onClick={() => handleSelectBannerPreset(b.code, b.shopItemId)}
                       className={`relative h-[54px] rounded-xl overflow-hidden border-2 cursor-pointer transition-all ${
                         isActive
                           ? 'border-[#0D8A8A] ring-2 ring-[#0D8A8A]/35'

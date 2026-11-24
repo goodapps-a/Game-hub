@@ -71,6 +71,8 @@ async function startServer() {
       googleOAuthClientId: process.env.GOOGLE_OAUTH_CLIENT_ID,
       googleOAuthClientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET,
       googleOAuthRedirectUri: process.env.GOOGLE_OAUTH_REDIRECT_URI,
+      shopTestMode: process.env.SHOP_TEST_MODE,
+      zarinpalMerchantId: process.env.ZARINPAL_MERCHANT_ID,
     },
   });
 
