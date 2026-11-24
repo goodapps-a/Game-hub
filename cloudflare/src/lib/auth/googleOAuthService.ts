@@ -598,6 +598,7 @@ interface UserRow {
   username_key: string;
   display_name: string;
   account_code: string | null;
+  bio?: string;
   email: string | null;
   email_key: string | null;
   email_verified: number;
@@ -995,6 +996,7 @@ function mapUserRowToPublic(row: UserRow): PublicAuthUser {
     username: row.username,
     displayName: row.display_name,
     accountCode: row.account_code ?? null,
+    bio: typeof row.bio === 'string' ? row.bio : '',
     email: row.email,
     emailVerified: row.email_verified === 1,
     avatarCode: row.avatar_code,
@@ -1572,6 +1574,7 @@ export async function completeGoogleOAuthCallback(
       .prepare(
         `SELECT
            user_id, username, username_key, display_name, account_code,
+           COALESCE(bio, '') AS bio,
            email, email_key, email_verified,
            avatar_code, avatar_url, auth_provider, account_status,
            created_at, last_seen_at
@@ -1749,6 +1752,7 @@ export async function completeGoogleOAuthCallback(
       .prepare(
         `SELECT
            user_id, username, username_key, display_name, account_code,
+           COALESCE(bio, '') AS bio,
            email, email_key, email_verified,
            avatar_code, avatar_url, auth_provider, account_status,
            created_at, last_seen_at
@@ -1887,6 +1891,7 @@ export async function completeGoogleOAuthCallback(
         .prepare(
           `SELECT
              user_id, username, username_key, display_name, account_code,
+             COALESCE(bio, '') AS bio,
              email, email_key, email_verified,
              avatar_code, avatar_url, auth_provider, account_status,
              created_at, last_seen_at

@@ -129,13 +129,15 @@ export function normalizeAvatarCode(
 export function applyLocalProfileEdit(
   prev: UserProfile,
   nextUsername: string,
-  nextAvatarCode: UserProfile['avatarCode']
+  nextAvatarCode: UserProfile['avatarCode'],
+  nextBio?: string
 ): UserProfile {
   return {
     ...prev,
     id: prev.id,
     username: nextUsername.trim(),
     avatarCode: normalizeAvatarCode(nextAvatarCode),
+    ...(nextBio !== undefined ? { bio: nextBio.trim() } : {}),
   };
 }
 
@@ -150,7 +152,9 @@ export function applyServerProfileUpdate(
   return {
     ...prev,
     id: serverUser.userId,
+    accountCode: serverUser.accountCode ?? prev.accountCode ?? null,
     username: serverUser.username,
+    bio: typeof serverUser.bio === 'string' ? serverUser.bio : prev.bio ?? '',
     avatarCode: normalizeAvatarCode(serverUser.avatarCode),
   };
 }

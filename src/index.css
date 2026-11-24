@@ -570,24 +570,6 @@
   }
 }
 
-@keyframes hokmShamsaSpinCW {
-  from {
-    transform: translate3d(-50%, -50%, 0) rotate(0deg);
-  }
-  to {
-    transform: translate3d(-50%, -50%, 0) rotate(360deg);
-  }
-}
-
-@keyframes hokmShamsaSpinCCW {
-  from {
-    transform: translate3d(-50%, -50%, 0) rotate(0deg);
-  }
-  to {
-    transform: translate3d(-50%, -50%, 0) rotate(-360deg);
-  }
-}
-
 .hokm-aurora-orb-a {
   animation: hokmAuroraDriftA 22s ease-in-out infinite;
 }
@@ -598,14 +580,6 @@
 
 .hokm-light-sweep {
   animation: hokmLightSweep 18s ease-in-out infinite;
-}
-
-.hokm-shamsa-spin-cw {
-  animation: hokmShamsaSpinCW 150s linear infinite;
-}
-
-.hokm-shamsa-spin-ccw {
-  animation: hokmShamsaSpinCCW 110s linear infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,23 +1,22 @@
 import React, { useEffect, useRef, useState } from 'react';
-import {
-  AlertCircle,
-  Check,
-  Loader2,
-  RotateCcw,
-} from 'lucide-react';
+import { AlertCircle, Check, Loader2, RotateCcw } from 'lucide-react';
 import {
   AuthUserSummary,
   checkUsernameAvailabilityRequest,
   updateAccountProfileRequest,
 } from '../../auth/authClient';
-import { validateUsernameFormat } from '../../data/guestDefaults';
+import {
+  saveLocalCosmetics,
+  validateUsernameFormat,
+} from '../../data/guestDefaults';
+import { toPersianDigits } from '../../theme/tokens';
 import { UserProfile } from '../../types/platform';
 import {
   applyLocalProfileEdit,
   applyServerProfileUpdate,
   normalizeAvatarCode,
 } from '../../utils/profileMetrics';
-import { ProfileAvatar } from '../TopBar';
+import { FramedPlayerAvatar } from './PlayerAppearanceParts';
 
 interface ProfileEditViewProps {
   profile: UserProfile;
@@ -35,6 +34,8 @@ type ServerCheckState =
   | { status: 'taken'; message: string }
   | { status: 'error'; message: string };
 
+const MAX_BIO_LENGTH = 160;
+
 export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
   profile,
   authUser,
@@ -42,10 +43,12 @@ export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
   onAuthChange,
   onCancel,
 }) => {
+  const initialBio = profile.bio ?? authUser?.bio ?? '';
   const [draftName, setDraftName] = useState(profile.username);
   const [draftAvatar, setDraftAvatar] = useState<UserProfile['avatarCode']>(
     profile.avatarCode
   );
+  const [draftBio, setDraftBio] = useState(initialBio);
   const [formatError, setFormatError] = useState<string | null>(null);
   const [serverCheck, setServerCheck] = useState<ServerCheckState>({
     status: 'idle',
@@ -59,24 +62,28 @@ export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
   const lastSavedRef = useRef<{
     username: string;
     avatarCode: UserProfile['avatarCode'];
+    bio: string;
   } | null>(null);
 
   useEffect(() => {
+    const incomingBio = profile.bio ?? authUser?.bio ?? '';
     if (
       lastSavedRef.current &&
       lastSavedRef.current.username === profile.username &&
-      lastSavedRef.current.avatarCode === profile.avatarCode
+      lastSavedRef.current.avatarCode === profile.avatarCode &&
+      lastSavedRef.current.bio === incomingBio
     ) {
       lastSavedRef.current = null;
       return;
     }
     setDraftName(profile.username);
     setDraftAvatar(profile.avatarCode);
+    setDraftBio(incomingBio);
     setFormatError(null);
     setServerCheck({ status: 'idle' });
     setSubmitError(null);
     setSavedNotice(null);
-  }, [profile.username, profile.avatarCode]);
+  }, [profile.username, profile.avatarCode, profile.bio, authUser?.bio]);
 
   useEffect(() => {
     return () => {
@@ -86,11 +93,22 @@ export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
   }, []);
 
   const cleanedDraft = draftName.trim();
+  const cleanedBio = draftBio.replace(/\s+/g, ' ').trim();
+  const currentBio = (profile.bio ?? authUser?.bio ?? '').trim();
+
   const nameChanged =
     cleanedDraft.toLowerCase() !== profile.username.toLowerCase() ||
     cleanedDraft !== profile.username;
   const avatarChanged = draftAvatar !== profile.avatarCode;
-  const hasChanges = nameChanged || avatarChanged;
+  const bioChanged = cleanedBio !== currentBio;
+  const hasChanges = nameChanged || avatarChanged || bioChanged;
+
+  const activeFrameId =
+    profile.equippedAvatarFrameId ?? profile.equippedSlots?.avatar_frame ?? null;
+
+  // Strictly display 6-digit numeric account code — never raw UUID
+  const displayAccountCode =
+    authUser?.accountCode ?? profile.accountCode ?? '------';
 
   const triggerServerAvailabilityCheck = (rawValue: string) => {
     if (checkTimerRef.current) window.clearTimeout(checkTimerRef.current);
@@ -152,7 +170,7 @@ export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
         if (res.available) {
           setServerCheck({
             status: 'available',
-            message: res.message || 'تایید سرور: این نام کاربری آزاد است.',
+            message: res.message || 'تأیید سرور: این نام کاربری آزاد است.',
           });
         } else {
           setServerCheck({
@@ -164,8 +182,7 @@ export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
         if ((err as { name?: string })?.name === 'AbortError') return;
         setServerCheck({
           status: 'error',
-          message:
-            'امکان استعلام نام کاربری از سرور برقرار نشد. بدون تایید سرور، یکتایی سراسری تضمین نمی‌شود.',
+          message: 'امکان استعلام نام کاربری از سرور برقرار نشد.',
         });
       }
     }, 320);
@@ -176,6 +193,14 @@ export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
     setSubmitError(null);
     setSavedNotice(null);
     triggerServerAvailabilityCheck(value);
+  };
+
+  const handleBioChange = (value: string) => {
+    if (value.length <= MAX_BIO_LENGTH) {
+      setDraftBio(value);
+      setSubmitError(null);
+      setSavedNotice(null);
+    }
   };
 
   const handleResetDraft = () => {
@@ -198,6 +223,11 @@ export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
       return;
     }
 
+    if (cleanedBio.length > MAX_BIO_LENGTH) {
+      setSubmitError('بیوگرافی نباید بیشتر از ۱۶۰ کاراکتر باشد.');
+      return;
+    }
+
     if (serverCheck.status === 'checking') {
       return;
     }
@@ -210,10 +240,10 @@ export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
     setSaving(true);
     try {
       if (authUser) {
-        // Real server persistence for central accounts — never fakes success on failure
         const res = await updateAccountProfileRequest({
           username: cleanedDraft,
           avatarCode: draftAvatar,
+          bio: cleanedBio,
         });
 
         if (!res.ok || !res.user) {
@@ -223,28 +253,29 @@ export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
           return;
         }
 
+        const persistedBio = typeof res.user.bio === 'string' ? res.user.bio : cleanedBio;
         lastSavedRef.current = {
           username: res.user.username,
           avatarCode: normalizeAvatarCode(res.user.avatarCode),
+          bio: persistedBio,
         };
         onAuthChange(res.user);
         onUpdateProfile((prev) => applyServerProfileUpdate(prev, res.user!));
         setSavedNotice(res.message ?? 'تغییرات پروفایل روی سرور ذخیره شد.');
         setServerCheck({ status: 'idle' });
       } else {
-        // Guest local session update: strictly preserves immutable `profile.id`
         const nextDraft = cleanedDraft;
         const nextAvatar = draftAvatar;
         lastSavedRef.current = {
           username: nextDraft,
           avatarCode: nextAvatar,
+          bio: cleanedBio,
         };
+        saveLocalCosmetics({ bio: cleanedBio });
         onUpdateProfile((prev) =>
-          applyLocalProfileEdit(prev, nextDraft, nextAvatar)
+          applyLocalProfileEdit(prev, nextDraft, nextAvatar, cleanedBio)
         );
-        setSavedNotice(
-          'نام و نشان پروفایل برای نشست مهمان فعلی به‌روزرسانی شد.'
-        );
+        setSavedNotice('تغییرات پروفایل شما با موفقیت ذخیره شد.');
         setServerCheck({ status: 'idle' });
       }
     } catch (err) {
@@ -258,7 +289,6 @@ export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
     }
   };
 
-  const persistentId = authUser ? authUser.userId : profile.id;
   const saveDisabled =
     saving ||
     !hasChanges ||
@@ -269,37 +299,48 @@ export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
   return (
     <form
       onSubmit={handleSubmit}
-      className="space-y-4"
+      className="max-w-lg mx-auto space-y-5"
       data-testid="profile-edit-form"
     >
-      {/* Live Preview */}
-      <section className="rounded-2xl theme-subcard border p-4 space-y-2.5">
+      {/* Live Preview — displays player's actual custom avatar + equipped frame & 6-digit account code */}
+      <section className="rounded-2xl theme-subcard border p-4 space-y-3">
         <div className="flex items-center justify-between text-[11px] theme-muted">
           <span className="font-bold">پیش‌نمایش پروفایل</span>
           {hasChanges && (
             <span className="font-bold theme-accent-teal">تغییرات ذخیره نشده</span>
           )}
         </div>
-        <div className="flex items-center gap-3">
-          <ProfileAvatar
+        <div className="flex items-center gap-3.5">
+          <FramedPlayerAvatar
             avatarCode={draftAvatar}
+            customAvatarUrl={profile.customAvatarUrl}
             username={cleanedDraft || profile.username}
+            avatarFrameId={activeFrameId}
             size="lg"
           />
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-1 space-y-0.5">
             <div
               dir="ltr"
               data-testid="profile-edit-preview-name"
-              className="text-base font-extrabold theme-heading truncate text-right"
+              className="text-base font-black theme-heading truncate text-right"
             >
               {cleanedDraft || profile.username}
             </div>
-            <div className="text-[11px] theme-muted mt-0.5 flex items-center gap-1.5">
-              <span>شناسه ثابت:</span>
-              <code dir="ltr" className="font-mono">
-                {persistentId}
+            <div className="text-[11px] theme-muted flex items-center gap-1.5">
+              <span>آیدی عددی:</span>
+              <code
+                dir="ltr"
+                data-testid="profile-edit-account-code"
+                className="font-mono font-bold tracking-wider tabular-nums"
+              >
+                #{displayAccountCode}
               </code>
             </div>
+            {cleanedBio && (
+              <p className="text-xs theme-muted line-clamp-2 pt-0.5 leading-relaxed">
+                {cleanedBio}
+              </p>
+            )}
           </div>
         </div>
       </section>
@@ -382,6 +423,32 @@ export const ProfileEditView: React.FC<ProfileEditViewProps> = ({
             <span>{serverCheck.message}</span>
           </div>
         )}
+      </section>
+
+      {/* Bio Field (Max 160 chars) */}
+      <section className="space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <label
+            htmlFor="profile-bio-input"
+            className="block text-xs font-extrabold theme-heading"
+          >
+            بیوگرافی
+          </label>
+          <span className="text-[11px] font-bold theme-muted tabular-nums">
+            {toPersianDigits(draftBio.length)} / {toPersianDigits(MAX_BIO_LENGTH)}
+          </span>
+        </div>
+        <textarea
+          id="profile-bio-input"
+          data-testid="bio-input"
+          value={draftBio}
+          onChange={(e) => handleBioChange(e.target.value)}
+          maxLength={MAX_BIO_LENGTH}
+          rows={3}
+          disabled={saving}
+          placeholder="درباره خودت بنویس..."
+          className="w-full px-3.5 py-2.5 rounded-xl theme-input border text-sm font-medium leading-relaxed resize-none focus:outline-none focus:ring-2 focus:border-[#0D8A8A] focus:ring-[#0D8A8A]/25"
+        />
       </section>
 
       {/* Save / Error Feedback */}

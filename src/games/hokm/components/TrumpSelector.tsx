@@ -18,30 +18,30 @@ export const TrumpSelector: React.FC<TrumpSelectorProps> = ({
 }) => {
   return (
     <motion.div
-      initial={reducedMotion ? { opacity: 1 } : { opacity: 0, scale: 0.82 }}
-      animate={{ opacity: 1, scale: 1 }}
-      exit={reducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.88 }}
+      initial={reducedMotion ? false : { scale: 0.86, y: 12 }}
+      animate={{ scale: 1, y: 0 }}
+      exit={reducedMotion ? undefined : { scale: 0.88, y: 8 }}
       transition={
         reducedMotion
           ? { duration: 0.05 }
-          : { type: 'spring', stiffness: 320, damping: 22 }
+          : { type: 'spring', stiffness: 340, damping: 24 }
       }
       className="relative"
       role="dialog"
       aria-label="انتخاب خال حکم"
       data-testid="trump-selector-dialog"
     >
-      {/* Pulsing radiant gold spotlight behind the picker */}
+      {/* Subtle radiant gold glow behind the picker */}
       {!reducedMotion && (
         <motion.div
-          animate={{ scale: [1, 1.07, 1], opacity: [0.45, 0.8, 0.45] }}
-          transition={{ duration: 2.2, repeat: Infinity, ease: 'easeInOut' }}
-          className="pointer-events-none absolute -inset-4 rounded-[34px] bg-[radial-gradient(circle,rgba(243,209,121,0.42)_0%,rgba(212,174,88,0.12)_55%,transparent_75%)] blur-md"
+          animate={{ scale: [1, 1.05, 1] }}
+          transition={{ duration: 2.4, repeat: Infinity, ease: 'easeInOut' }}
+          className="pointer-events-none absolute -inset-4 rounded-[34px] bg-[radial-gradient(circle,rgba(243,209,121,0.34)_0%,rgba(212,174,88,0.1)_55%,transparent_75%)] blur-md"
           aria-hidden="true"
         />
       )}
 
-      <div className="relative w-max shrink-0 bg-gradient-to-b from-[#0E2E26]/95 to-[#061814]/96 backdrop-blur-xl rounded-[28px] border-[2.5px] border-[#F3D179] shadow-[0_28px_72px_rgba(0,0,0,0.72),0_0_38px_rgba(243,209,121,0.34)] p-4 sm:p-6">
+      <div className="relative w-max shrink-0 bg-gradient-to-b from-[#0E2E26]/96 to-[#061814]/97 backdrop-blur-xl rounded-[28px] border-[2.5px] border-[#F3D179] shadow-[0_28px_72px_rgba(0,0,0,0.72),0_0_38px_rgba(243,209,121,0.34)] p-4 sm:p-6">
         <div className="grid grid-cols-2 gap-3.5 sm:gap-5">
           {SUITS.map((suit, idx) => {
             const meta = SUIT_META[suit];
@@ -49,17 +49,15 @@ export const TrumpSelector: React.FC<TrumpSelectorProps> = ({
               <motion.button
                 key={suit}
                 type="button"
-                initial={
-                  reducedMotion ? false : { opacity: 0, scale: 0.78, y: 8 }
-                }
-                animate={{ opacity: 1, scale: 1, y: 0 }}
+                initial={reducedMotion ? false : { scale: 0.84, y: 8 }}
+                animate={{ scale: 1, y: 0 }}
                 transition={
                   reducedMotion
                     ? { duration: 0.05 }
                     : {
-                        delay: idx * 0.045,
+                        delay: idx * 0.04,
                         type: 'spring',
-                        stiffness: 360,
+                        stiffness: 380,
                         damping: 22,
                       }
                 }

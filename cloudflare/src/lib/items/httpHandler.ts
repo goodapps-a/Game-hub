@@ -175,7 +175,23 @@ export async function handleItemsHttpRequest(
     /^\/api\/users\/([A-Za-z0-9_.-]{3,64})\/public-profile$/
   );
   if (publicProfileMatch && method === 'GET') {
-    const result = await getPublicUserProfileById(env.db, publicProfileMatch[1]);
+    let viewerUserId: string | null = null;
+    const rawToken = parseAuthCookieFromHeader(request.headers.get('Cookie'));
+    if (rawToken) {
+      try {
+        const verified = await verifyAuthSession(env.db, rawToken, env.now);
+        if (verified.authenticated && verified.user) {
+          viewerUserId = verified.user.userId;
+        }
+      } catch {
+        viewerUserId = null;
+      }
+    }
+    const result = await getPublicUserProfileById(
+      env.db,
+      publicProfileMatch[1],
+      viewerUserId
+    );
     if (result.ok === false) {
       return buildJson(
         { ok: false, code: result.code, message: result.message },

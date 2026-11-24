@@ -728,6 +728,7 @@ describe('Eyvan Hardening — Parts 1–4 Security & Concurrency Verification', 
         '0012_cron_pruning_indexes.sql',
         '0013_items_inventory_equip.sql',
         '0014_account_code_gifts_toman_groups.sql',
+        '0015_user_bio.sql',
       ]);
 
       const rows = rawDb

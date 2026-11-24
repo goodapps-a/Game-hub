@@ -43,23 +43,59 @@ export interface InventoryEquipResponse {
 
 import type { TomanPackageDefinition } from './tomanPackages';
 
+export interface PublicProfileCollectionItem {
+  readonly itemId: string;
+  readonly kind: UniversalItemDefinition['kind'];
+  readonly name: string;
+  readonly rarity: UniversalItemDefinition['rarity'];
+}
+
+export interface PublicProfileGameStat {
+  readonly gameId: 'hokm';
+  readonly name: string;
+  readonly matchesPlayed: number;
+  readonly wins: number;
+  readonly losses: number;
+  readonly kotWins: number;
+  readonly hakemKotWins: number;
+}
+
+export type PublicViewerRelationship =
+  | 'self'
+  | 'none'
+  | 'friend'
+  | 'pending_outgoing'
+  | 'pending_incoming'
+  | 'blocked_by_me'
+  | 'blocked_by_other';
+
+export interface PublicUserProfileData {
+  readonly userId: string;
+  readonly accountCode?: string | null;
+  readonly username: string;
+  readonly displayName: string;
+  readonly bio?: string;
+  readonly createdAt?: number;
+  readonly avatarCode: string;
+  readonly avatarUrl: string | null;
+  readonly level: number;
+  readonly stats: {
+    readonly matchesPlayed: number;
+    readonly wins: number;
+    readonly losses: number;
+    readonly kotWins?: number;
+    readonly hakemKotWins?: number;
+  };
+  readonly gameStats?: readonly PublicProfileGameStat[];
+  readonly collection?: readonly PublicProfileCollectionItem[];
+  readonly appearance: PublicAppearanceSnapshot;
+  readonly viewerRelationship?: PublicViewerRelationship;
+  readonly friendshipId?: string | null;
+}
+
 export interface PublicUserProfileResponse {
   readonly ok: boolean;
-  readonly profile?: {
-    readonly userId: string;
-    readonly accountCode?: string | null;
-    readonly username: string;
-    readonly displayName: string;
-    readonly avatarCode: string;
-    readonly avatarUrl: string | null;
-    readonly level: number;
-    readonly stats: {
-      readonly matchesPlayed: number;
-      readonly wins: number;
-      readonly losses: number;
-    };
-    readonly appearance: PublicAppearanceSnapshot;
-  };
+  readonly profile?: PublicUserProfileData;
   readonly code?: string;
   readonly message?: string;
 }

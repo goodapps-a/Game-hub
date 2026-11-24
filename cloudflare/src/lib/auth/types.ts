@@ -21,6 +21,7 @@ export interface PublicAuthUser {
   readonly username: string;
   readonly displayName: string;
   readonly accountCode?: string | null;
+  readonly bio?: string;
   readonly email: string | null;
   readonly emailVerified: boolean;
   readonly avatarCode: string;
@@ -67,6 +68,7 @@ export type AuthErrorCode =
   | 'UNAUTHORIZED'
   | 'CSRF_REJECTED'
   | 'FORBIDDEN_ORIGIN'
+  | 'FORBIDDEN_IN_LIVE_MODE'
   | 'RATE_LIMITED'
   | 'DATABASE_ERROR';
 

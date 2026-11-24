@@ -44,11 +44,39 @@ export type ItemsServiceResult<T> =
       readonly message: string;
     };
 
+export interface PublicCollectionItemSummary {
+  readonly itemId: string;
+  readonly kind: UniversalItemDefinition['kind'];
+  readonly name: string;
+  readonly rarity: UniversalItemDefinition['rarity'];
+}
+
+export interface PublicGameStatSummary {
+  readonly gameId: 'hokm';
+  readonly name: string;
+  readonly matchesPlayed: number;
+  readonly wins: number;
+  readonly losses: number;
+  readonly kotWins: number;
+  readonly hakemKotWins: number;
+}
+
+export type ViewerRelationshipStatus =
+  | 'self'
+  | 'none'
+  | 'friend'
+  | 'pending_outgoing'
+  | 'pending_incoming'
+  | 'blocked_by_me'
+  | 'blocked_by_other';
+
 export interface PublicUserProfilePayload {
   readonly userId: string;
   readonly username: string;
   readonly displayName: string;
   readonly accountCode: string | null;
+  readonly bio: string;
+  readonly createdAt: number;
   readonly avatarCode: string;
   readonly avatarUrl: string | null;
   readonly level: number;
@@ -56,8 +84,14 @@ export interface PublicUserProfilePayload {
     readonly matchesPlayed: number;
     readonly wins: number;
     readonly losses: number;
+    readonly kotWins?: number;
+    readonly hakemKotWins?: number;
   };
+  readonly gameStats: readonly PublicGameStatSummary[];
+  readonly collection: readonly PublicCollectionItemSummary[];
   readonly appearance: PublicAppearanceSnapshot;
+  readonly viewerRelationship?: ViewerRelationshipStatus;
+  readonly friendshipId?: string | null;
 }
 
 export interface GiftRecipientPreview {
@@ -694,9 +728,20 @@ export async function getPublicAppearancesForUsers(
   return out;
 }
 
+const PUBLIC_COLLECTION_KINDS = new Set<UniversalItemDefinition['kind']>([
+  'card_deck',
+  'card_back',
+  'avatar_frame',
+  'profile_badge',
+  'nameplate',
+  'game_effect',
+  'banner',
+]);
+
 export async function getPublicUserProfileById(
   db: D1DatabaseLike,
-  rawTargetUserId: unknown
+  rawTargetUserId: unknown,
+  viewerUserId?: string | null
 ): Promise<ItemsServiceResult<{ readonly profile: PublicUserProfilePayload }>> {
   if (
     typeof rawTargetUserId !== 'string' ||
@@ -718,11 +763,15 @@ export async function getPublicUserProfileById(
          u.username,
          u.display_name,
          u.account_code,
+         COALESCE(u.bio, '') AS bio,
+         u.created_at,
          u.avatar_code,
          u.avatar_url,
          COALESCE(ugs.matches_played, 0) AS matches_played,
          COALESCE(ugs.wins, 0) AS wins,
-         COALESCE(ugs.losses, 0) AS losses
+         COALESCE(ugs.losses, 0) AS losses,
+         COALESCE(ugs.kot_wins, 0) AS kot_wins,
+         COALESCE(ugs.hakem_kot_wins, 0) AS hakem_kot_wins
        FROM users u
        LEFT JOIN user_game_stats ugs ON ugs.user_id = u.user_id
        WHERE u.user_id = ?
@@ -736,11 +785,15 @@ export async function getPublicUserProfileById(
       username: string;
       display_name: string;
       account_code: string | null;
+      bio: string;
+      created_at: number;
       avatar_code: string;
       avatar_url: string | null;
       matches_played: number;
       wins: number;
       losses: number;
+      kot_wins: number;
+      hakem_kot_wins: number;
     }>();
 
   if (!row) {
@@ -752,15 +805,95 @@ export async function getPublicUserProfileById(
     };
   }
 
-  const [appearance, ensuredCode] = await Promise.all([
+  const [appearance, ensuredCode, invRows] = await Promise.all([
     getPublicAppearanceForUser(db, row.user_id),
     row.account_code
       ? Promise.resolve(row.account_code)
       : ensureUserAccountCode(db, row.user_id),
+    db
+      .prepare(
+        `SELECT item_id
+         FROM user_inventory
+         WHERE user_id = ?
+         ORDER BY acquired_at DESC, item_id ASC
+         LIMIT 60`
+      )
+      .bind(row.user_id)
+      .all<{ item_id: string }>(),
   ]);
+
+  const collection: PublicCollectionItemSummary[] = [];
+  for (const invRow of invRows.results ?? []) {
+    const def = resolveCatalogItemDefinition(invRow.item_id);
+    if (!def || !PUBLIC_COLLECTION_KINDS.has(def.kind)) continue;
+    collection.push({
+      itemId: def.id,
+      kind: def.kind,
+      name: def.name,
+      rarity: def.rarity,
+    });
+  }
+
+  let viewerRelationship: ViewerRelationshipStatus | undefined;
+  let friendshipId: string | null | undefined;
+  if (viewerUserId) {
+    if (viewerUserId === row.user_id) {
+      viewerRelationship = 'self';
+      friendshipId = null;
+    } else {
+      const pairKey =
+        viewerUserId < row.user_id
+          ? `${viewerUserId}:${row.user_id}`
+          : `${row.user_id}:${viewerUserId}`;
+      const [blockRows, friendRow] = await Promise.all([
+        db
+          .prepare(
+            `SELECT blocker_id, blocked_id
+             FROM user_blocks
+             WHERE (blocker_id = ? AND blocked_id = ?)
+                OR (blocker_id = ? AND blocked_id = ?)`
+          )
+          .bind(viewerUserId, row.user_id, row.user_id, viewerUserId)
+          .all<{ blocker_id: string; blocked_id: string }>(),
+        db
+          .prepare(
+            `SELECT friendship_id, requester_id, status
+             FROM friendships
+             WHERE pair_key = ?
+             LIMIT 1`
+          )
+          .bind(pairKey)
+          .first<{ friendship_id: string; requester_id: string; status: string }>(),
+      ]);
+
+      const blocks = blockRows.results ?? [];
+      if (blocks.some((b) => b.blocker_id === viewerUserId)) {
+        viewerRelationship = 'blocked_by_me';
+        friendshipId = null;
+      } else if (blocks.some((b) => b.blocker_id === row.user_id)) {
+        viewerRelationship = 'blocked_by_other';
+        friendshipId = null;
+      } else if (friendRow?.status === 'accepted') {
+        viewerRelationship = 'friend';
+        friendshipId = friendRow.friendship_id;
+      } else if (friendRow?.status === 'pending') {
+        viewerRelationship =
+          friendRow.requester_id === viewerUserId
+            ? 'pending_outgoing'
+            : 'pending_incoming';
+        friendshipId = friendRow.friendship_id;
+      } else {
+        viewerRelationship = 'none';
+        friendshipId = null;
+      }
+    }
+  }
+
   const wins = Math.max(0, Number(row.wins ?? 0));
   const matchesPlayed = Math.max(0, Number(row.matches_played ?? 0));
   const losses = Math.max(0, Number(row.losses ?? 0));
+  const kotWins = Math.max(0, Number(row.kot_wins ?? 0));
+  const hakemKotWins = Math.max(0, Number(row.hakem_kot_wins ?? 0));
 
   return {
     ok: true,
@@ -770,6 +903,8 @@ export async function getPublicUserProfileById(
       username: row.username,
       displayName: row.display_name,
       accountCode: ensuredCode,
+      bio: typeof row.bio === 'string' ? row.bio : '',
+      createdAt: Number(row.created_at ?? 0),
       avatarCode: row.avatar_code,
       avatarUrl: row.avatar_url,
       level: Math.max(1, Math.floor(wins / 3) + 1),
@@ -777,8 +912,24 @@ export async function getPublicUserProfileById(
         matchesPlayed,
         wins,
         losses,
+        kotWins,
+        hakemKotWins,
       },
+      gameStats: [
+        {
+          gameId: 'hokm',
+          name: 'حکم',
+          matchesPlayed,
+          wins,
+          losses,
+          kotWins,
+          hakemKotWins,
+        },
+      ],
+      collection,
       appearance,
+      ...(viewerRelationship !== undefined ? { viewerRelationship } : {}),
+      ...(friendshipId !== undefined ? { friendshipId } : {}),
     },
   };
 }

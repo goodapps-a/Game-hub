@@ -68,12 +68,43 @@ export function getOrCreateRandomGuestId(): string {
   return generated;
 }
 
+const GUEST_NUMERIC_CODE_KEY = 'eyvan_guest_numeric_code_v1';
+
+export function getOrCreateGuestNumericCode(): string {
+  if (typeof window === 'undefined') {
+    return '100000';
+  }
+  try {
+    const existing = window.localStorage.getItem(GUEST_NUMERIC_CODE_KEY);
+    if (existing && /^\d{6}$/.test(existing)) {
+      return existing;
+    }
+  } catch {
+    // Ignore storage restriction
+  }
+
+  let num = Math.floor(100000 + Math.random() * 900000);
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const buf = new Uint32Array(1);
+    crypto.getRandomValues(buf);
+    num = 100000 + (buf[0] % 900000);
+  }
+  const code = String(num);
+  try {
+    window.localStorage.setItem(GUEST_NUMERIC_CODE_KEY, code);
+  } catch {
+    // Ignore storage restriction
+  }
+  return code;
+}
+
 const COSMETICS_STORAGE_KEY = 'eyvan_local_cosmetics_v1';
 
 export interface LocalCosmeticPreferences {
   bannerCode?: UserProfile['bannerCode'];
   customAvatarUrl?: string | null;
   customBannerUrl?: string | null;
+  bio?: string;
   equippedTableSkinId?: string;
   equippedDeckId?: string;
   equippedCardBackId?: string;
@@ -126,6 +157,9 @@ export function loadLocalCosmetics(): LocalCosmeticPreferences {
     }
     if (parsed.customBannerUrl === null || isSafeDataImageUrl(parsed.customBannerUrl)) {
       out.customBannerUrl = parsed.customBannerUrl;
+    }
+    if (typeof parsed.bio === 'string' && parsed.bio.length <= 160) {
+      out.bio = parsed.bio;
     }
     if (isValidItemId(parsed.equippedTableSkinId)) {
       out.equippedTableSkinId = parsed.equippedTableSkinId;
@@ -202,11 +236,13 @@ export function createInitialGuestProfile(themeMode: ThemeMode): UserProfile {
 
   return {
     id: guestId,
+    accountCode: getOrCreateGuestNumericCode(),
     username: guestId,
+    bio: cosmetics.bio ?? '',
     avatarCode: 'portrait',
     customAvatarUrl: cosmetics.customAvatarUrl ?? null,
     bannerCode: cosmetics.bannerCode ?? 'royal',
-    customBannerUrl: cosmetics.customBannerUrl ?? null,
+    customBannerUrl: null,
     equippedTableSkinId,
     equippedDeckId,
     equippedCardBackId,

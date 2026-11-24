@@ -432,6 +432,7 @@ export default {
         sessionTtlSec: env.AUTH_SESSION_TTL_SEC,
         publicAppBaseUrl: publicAppBaseUrl ?? undefined,
         isProduction: isProd,
+        shopTestMode: env.SHOP_TEST_MODE,
         emailSender,
         googleOAuth: {
           clientId: env.GOOGLE_OAUTH_CLIENT_ID,

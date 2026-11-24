@@ -18,6 +18,7 @@ import {
   PendingAuthUrlAction,
   consumeAuthActionFromUrlHash,
   fetchCurrentAuthSession,
+  requestTestModeSessionApi,
 } from './platform/auth/authClient';
 import { TopBar } from './platform/components/TopBar';
 import { AuthModal, AuthModalMode } from './platform/components/AuthModal';
@@ -26,6 +27,7 @@ import {
   ProfileInitialAuthMode,
 } from './platform/components/ProfileDrawer';
 import { ProfileSubView } from './platform/components/profile/ProfileOverview';
+import { PublicPlayerProfileModal } from './platform/components/profile/PublicPlayerProfileModal';
 import { ShopPage } from './platform/pages/ShopPage';
 import { ShopCategoryFilter } from './platform/utils/shopHelpers';
 import { GamesPage } from './platform/pages/GamesPage';
@@ -183,6 +185,15 @@ export default function App() {
   const [authModalMode, setAuthModalMode] = useState<AuthModalMode>('login');
   const [authModalReason, setAuthModalReason] = useState<string | null>(null);
 
+  // Global Public Player Profile Modal (Screenshot 3)
+  const [inspectedPlayerUserId, setInspectedPlayerUserId] = useState<string | null>(
+    null
+  );
+  const [pendingChatTargetUserId, setPendingChatTargetUserId] = useState<string | null>(
+    null
+  );
+  const [friendsRefreshSignal, setFriendsRefreshSignal] = useState(0);
+
   const [isTyping, setIsTyping] = useState(false);
 
   // Double-back-to-exit toast on Games Main Menu root
@@ -204,8 +215,9 @@ export default function App() {
             : updater;
         saveLocalCosmetics({
           bannerCode: next.bannerCode,
+          bio: next.bio ?? '',
           customAvatarUrl: next.customAvatarUrl ?? null,
-          customBannerUrl: next.customBannerUrl ?? null,
+          customBannerUrl: null,
           equippedTableSkinId: next.equippedTableSkinId ?? 'tt-traditional',
           equippedDeckId: next.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID,
           equippedCardBackId: next.equippedCardBackId ?? 'cb-shamsa',
@@ -266,6 +278,7 @@ export default function App() {
         id: user.userId,
         accountCode: user.accountCode ?? prev.accountCode ?? null,
         username: user.username,
+        bio: typeof user.bio === 'string' ? user.bio : prev.bio ?? '',
         avatarCode: validAvatar,
       }));
     } else {
@@ -277,40 +290,56 @@ export default function App() {
   };
 
   // Hydrate central account session strictly from server HttpOnly cookie (`/api/auth/me`)
+  // and auto-create a zero-registration Test Mode session when shopTestMode is enabled
   useEffect(() => {
     let active = true;
-    fetchCurrentAuthSession()
-      .then((res) => {
-        if (!active) return;
-        if (res.ok && res.authenticated && res.user) {
-          applyAuthenticatedUser(res.user);
-        } else {
-          setAuthUser(null);
-        }
-      })
-      .catch(() => {
-        if (active) setAuthUser(null);
-      })
-      .finally(() => {
-        if (active) setAuthLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
 
-  // Sync central shop test mode flag from server catalog
-  useEffect(() => {
-    let active = true;
-    fetchShopCatalogRequest()
-      .then((res) => {
-        if (active && res.ok && typeof res.shopTestMode === 'boolean') {
-          setShopTestMode(res.shopTestMode);
+    async function hydrateSessionAndMode() {
+      let resolvedTestMode = SHOP_TEST_MODE_DEFAULT;
+      try {
+        const [sessionRes, catalogRes] = await Promise.all([
+          fetchCurrentAuthSession().catch(() => null),
+          fetchShopCatalogRequest().catch(() => null),
+        ]);
+        if (!active) return;
+
+        if (catalogRes?.ok && typeof catalogRes.shopTestMode === 'boolean') {
+          resolvedTestMode = catalogRes.shopTestMode;
+          setShopTestMode(catalogRes.shopTestMode);
         }
-      })
-      .catch(() => {
-        // Offline / local fallback keeps SHOP_TEST_MODE_DEFAULT
-      });
+
+        if (sessionRes?.ok && sessionRes.authenticated && sessionRes.user) {
+          applyAuthenticatedUser(sessionRes.user);
+          return;
+        }
+
+        let explicitlyLoggedOut = false;
+        try {
+          explicitlyLoggedOut =
+            typeof window !== 'undefined' &&
+            window.sessionStorage.getItem('eyvan_test_logged_out') === '1';
+        } catch {
+          explicitlyLoggedOut = false;
+        }
+
+        if (resolvedTestMode && !explicitlyLoggedOut) {
+          const testRes = await requestTestModeSessionApi().catch(() => null);
+          if (!active) return;
+          if (testRes?.ok && testRes.user) {
+            applyAuthenticatedUser(testRes.user);
+            return;
+          }
+        }
+
+        setAuthUser(null);
+      } catch {
+        if (active) setAuthUser(null);
+      } finally {
+        if (active) setAuthLoading(false);
+      }
+    }
+
+    void hydrateSessionAndMode();
     return () => {
       active = false;
     };
@@ -525,6 +554,7 @@ export default function App() {
   // =========================================================================
   const navStateRef = useRef({
     activeGame,
+    inspectedPlayerUserId,
     isAuthModalOpen,
     isProfileOpen,
     selectedGameHub,
@@ -533,6 +563,7 @@ export default function App() {
   });
   navStateRef.current = {
     activeGame,
+    inspectedPlayerUserId,
     isAuthModalOpen,
     isProfileOpen,
     selectedGameHub,
@@ -559,6 +590,13 @@ export default function App() {
 
     const handlePopState = () => {
       const cur = navStateRef.current;
+
+      // Close topmost player profile card first regardless of view
+      if (cur.inspectedPlayerUserId) {
+        pushHistoryGuard();
+        setInspectedPlayerUserId(null);
+        return;
+      }
 
       // Active offline Hokm game has its own forfeit-confirm popstate guard
       if (cur.activeGame === 'hokm-offline') {
@@ -921,6 +959,44 @@ export default function App() {
     setActiveGame('hokm-online');
   };
 
+  const handleInspectPlayer = (userId: string) => {
+    if (!userId) return;
+    setInspectedPlayerUserId(userId);
+  };
+
+  const publicProfileModalNode = (
+    <PublicPlayerProfileModal
+      targetUserId={inspectedPlayerUserId}
+      currentUserId={authUser?.userId ?? null}
+      isAuthenticated={Boolean(authUser)}
+      onClose={() => setInspectedPlayerUserId(null)}
+      onOpenGiftShop={() => {
+        setInspectedPlayerUserId(null);
+        setActiveGame(null);
+        setSelectedGameHub(null);
+        setHokmHubSubView('hub');
+        setShopInitialCategory('all');
+        setActiveTab('shop');
+      }}
+      onOpenDirectChat={(targetUid) => {
+        setInspectedPlayerUserId(null);
+        setActiveGame(null);
+        setSelectedGameHub(null);
+        setHokmHubSubView('hub');
+        setFriendsInitialTab('friends');
+        setPendingChatTargetUserId(targetUid);
+        setActiveTab('friends');
+      }}
+      onRequireAuth={() => {
+        setInspectedPlayerUserId(null);
+        openAuthModal('login', null);
+      }}
+      onRelationshipChanged={() => {
+        setFriendsRefreshSignal((prev) => prev + 1);
+      }}
+    />
+  );
+
   // =========================================================================
   // ACTIVE GAME VIEWS (Full-Screen)
   // =========================================================================
@@ -930,55 +1006,59 @@ export default function App() {
       Boolean(!profile.customBannerUrl && profile.bannerCode === 'none')
     );
     return (
-      <OnlineHokmGame
-        username={profile.username}
-        avatarCode={profile.avatarCode}
-        tableSkinId={profile.equippedTableSkinId}
-        deckId={profile.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID}
-        cardBackId={profile.equippedCardBackId}
-        gameEffectId={profile.equippedGameEffectId}
-        appearance={publicAppearance}
-        isAuthenticated={Boolean(authUser)}
-        initialRoomCode={initialRoomCode}
-        autoJoinRoom={autoJoinInviteRoom}
-        targetMatchScore={hokmTargetScore}
-        initialLaunchAction={onlineLaunchAction}
-        soundEnabled={profile.appSettings.soundEnabled}
-        reducedMotionPreference={profile.appSettings.reducedMotion}
-        onChangeUsername={(nextUsername) =>
-          updateProfile((prev) => ({
-            ...prev,
-            username: nextUsername,
-          }))
-        }
-        onChangeAvatar={(nextAvatar) => {
-          const validAvatar: UserProfile['avatarCode'] =
-            nextAvatar === 'portrait' ||
-            nextAvatar === 'shamsa' ||
-            nextAvatar === 'turquoise' ||
-            nextAvatar === 'jade' ||
-            nextAvatar === 'lapis'
-              ? nextAvatar
-              : 'portrait';
-          updateProfile((prev) => ({
-            ...prev,
-            avatarCode: validAvatar,
-          }));
-        }}
-        onLaunchOffline={() => {
-          setOnlineLaunchAction(null);
-          setActiveGame('hokm-offline');
-        }}
-        onBackToGames={() => {
-          setInitialRoomCode('');
-          setAutoJoinInviteRoom(false);
-          setOnlineLaunchAction(null);
-          setActiveGame(null);
-          setActiveTab('games');
-          setSelectedGameHub('hokm');
-          setHokmHubSubView('hub');
-        }}
-      />
+      <>
+        <OnlineHokmGame
+          username={profile.username}
+          avatarCode={profile.avatarCode}
+          tableSkinId={profile.equippedTableSkinId}
+          deckId={profile.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID}
+          cardBackId={profile.equippedCardBackId}
+          gameEffectId={profile.equippedGameEffectId}
+          appearance={publicAppearance}
+          isAuthenticated={Boolean(authUser)}
+          initialRoomCode={initialRoomCode}
+          autoJoinRoom={autoJoinInviteRoom}
+          targetMatchScore={hokmTargetScore}
+          initialLaunchAction={onlineLaunchAction}
+          soundEnabled={profile.appSettings.soundEnabled}
+          reducedMotionPreference={profile.appSettings.reducedMotion}
+          onInspectPlayer={handleInspectPlayer}
+          onChangeUsername={(nextUsername) =>
+            updateProfile((prev) => ({
+              ...prev,
+              username: nextUsername,
+            }))
+          }
+          onChangeAvatar={(nextAvatar) => {
+            const validAvatar: UserProfile['avatarCode'] =
+              nextAvatar === 'portrait' ||
+              nextAvatar === 'shamsa' ||
+              nextAvatar === 'turquoise' ||
+              nextAvatar === 'jade' ||
+              nextAvatar === 'lapis'
+                ? nextAvatar
+                : 'portrait';
+            updateProfile((prev) => ({
+              ...prev,
+              avatarCode: validAvatar,
+            }));
+          }}
+          onLaunchOffline={() => {
+            setOnlineLaunchAction(null);
+            setActiveGame('hokm-offline');
+          }}
+          onBackToGames={() => {
+            setInitialRoomCode('');
+            setAutoJoinInviteRoom(false);
+            setOnlineLaunchAction(null);
+            setActiveGame(null);
+            setActiveTab('games');
+            setSelectedGameHub('hokm');
+            setHokmHubSubView('hub');
+          }}
+        />
+        {publicProfileModalNode}
+      </>
     );
   }
 
@@ -1051,6 +1131,7 @@ export default function App() {
           onSelectDeck={handleSelectDeck}
           onRequireAuth={() => openAuthModal('login', null)}
           onInventorySync={applyServerInventoryToProfile}
+          onInspectPlayer={handleInspectPlayer}
           onOpenFriendGroups={() => {
             setSelectedGameHub(null);
             setHokmHubSubView('hub');
@@ -1086,6 +1167,8 @@ export default function App() {
           onClearPendingAuthAction={() => setPendingAuthAction(null)}
           reducedMotion={profile.appSettings.reducedMotion}
         />
+
+        {publicProfileModalNode}
       </>
     );
   }
@@ -1178,7 +1261,11 @@ export default function App() {
               authUser={authUser}
               authLoading={authLoading}
               initialTab={friendsInitialTab}
+              initialChatTargetUserId={pendingChatTargetUserId}
+              onClearInitialChatTarget={() => setPendingChatTargetUserId(null)}
+              refreshSignal={friendsRefreshSignal}
               onOpenAccount={() => openAuthModal('login', null)}
+              onInspectPlayer={handleInspectPlayer}
               onBack={() => handleSelectTab('games')}
               onJoinInvitedRoom={(roomCode) => {
                 setIsProfileOpen(false);
@@ -1214,7 +1301,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Floating Centered Profile Modal */}
+        {/* Full-Screen Own Profile & Grouped Settings */}
         <ProfileDrawer
           isOpen={isProfileOpen}
           onClose={() => setIsProfileOpen(false)}
@@ -1232,6 +1319,13 @@ export default function App() {
             setIsProfileOpen(false);
             setSelectedGameHub(null);
             setShopInitialCategory('avatars_frames');
+            setActiveTab('shop');
+          }}
+          onOpenTopUpShop={() => {
+            setIsProfileOpen(false);
+            setSelectedGameHub(null);
+            setHokmHubSubView('hub');
+            setShopInitialCategory('toman_topup');
             setActiveTab('shop');
           }}
         />
@@ -1252,6 +1346,9 @@ export default function App() {
           onClearPendingAuthAction={() => setPendingAuthAction(null)}
           reducedMotion={profile.appSettings.reducedMotion}
         />
+
+        {/* Shared Public Player Profile Card (Screenshot 3) */}
+        {publicProfileModalNode}
       </div>
     </div>
   );

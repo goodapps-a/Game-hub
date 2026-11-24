@@ -90,14 +90,17 @@ interface OnlineLobbyProps {
   onLaunchOffline: () => void;
   onBackToGames: () => void;
   onRefreshMatches: () => void;
+  onInspectPlayer?: (userId: string) => void;
 }
 
 const LobbySeatCard: React.FC<{
   seatView: RoomSeatView;
   isViewer: boolean;
   onSelectSeat: (canonicalSeat: Seat) => void;
-}> = ({ seatView, isViewer, onSelectSeat }) => {
+  onInspectPlayer?: (userId: string) => void;
+}> = ({ seatView, isViewer, onSelectSeat, onInspectPlayer }) => {
   const isEmpty = !seatView.playerId;
+  const canInspect = Boolean(!isEmpty && !isViewer && seatView.userId && onInspectPlayer);
   const isMyTeam = seatView.team === 'myTeam';
   const frameVisual = seatView.appearance?.avatarFrameId
     ? getAvatarFrameVisual(seatView.appearance.avatarFrameId)
@@ -107,9 +110,10 @@ const LobbySeatCard: React.FC<{
   return (
     <button
       type="button"
-      disabled={!isEmpty}
+      disabled={!isEmpty && !canInspect}
       onClick={() => {
         if (isEmpty) onSelectSeat(seatView.canonicalSeat);
+        else if (canInspect && seatView.userId) onInspectPlayer?.(seatView.userId);
       }}
       data-testid={`lobby-seat-${seatView.visualSeat}`}
       data-canonical-seat={seatView.canonicalSeat}
@@ -121,8 +125,12 @@ const LobbySeatCard: React.FC<{
           : isViewer
             ? 'bg-gradient-to-b from-[#113A30]/95 to-[#0A241E]/95 border-[#F3D179] shadow-[0_8px_24px_rgba(243,209,121,0.18)] cursor-default'
             : isMyTeam
-              ? 'bg-gradient-to-b from-[#0E3129]/90 to-[#081F1A]/90 border-[#34D399]/55 cursor-default'
-              : 'bg-gradient-to-b from-[#2B151B]/90 to-[#180C10]/90 border-[#FB7185]/45 cursor-default'
+              ? `bg-gradient-to-b from-[#0E3129]/90 to-[#081F1A]/90 border-[#34D399]/55 ${
+                  canInspect ? 'cursor-pointer hover:border-[#6EE7B7]' : 'cursor-default'
+                }`
+              : `bg-gradient-to-b from-[#2B151B]/90 to-[#180C10]/90 border-[#FB7185]/45 ${
+                  canInspect ? 'cursor-pointer hover:border-[#FDA4AF]' : 'cursor-default'
+                }`
       }`}
     >
       {/* Team tag */}
@@ -262,6 +270,7 @@ export const OnlineLobby: React.FC<OnlineLobbyProps> = ({
   onLaunchOffline,
   onBackToGames,
   onRefreshMatches,
+  onInspectPlayer,
 }) => {
   const [joinCodeInput, setJoinCodeInput] = useState(
     initialRoomCode.toUpperCase()
@@ -616,6 +625,7 @@ export const OnlineLobby: React.FC<OnlineLobbyProps> = ({
                   seatView={seatsByVisual.north}
                   isViewer={false}
                   onSelectSeat={onSelectSeat}
+                  onInspectPlayer={onInspectPlayer}
                 />
               </div>
 
@@ -625,6 +635,7 @@ export const OnlineLobby: React.FC<OnlineLobbyProps> = ({
                   seatView={seatsByVisual.west}
                   isViewer={false}
                   onSelectSeat={onSelectSeat}
+                  onInspectPlayer={onInspectPlayer}
                 />
               </div>
 
@@ -649,6 +660,7 @@ export const OnlineLobby: React.FC<OnlineLobbyProps> = ({
                   seatView={seatsByVisual.east}
                   isViewer={false}
                   onSelectSeat={onSelectSeat}
+                  onInspectPlayer={onInspectPlayer}
                 />
               </div>
 

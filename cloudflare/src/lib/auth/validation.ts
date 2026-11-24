@@ -295,11 +295,36 @@ export function validateAvatarCode(
   return { ok: true, avatarCode: cleaned as ValidAvatarCode };
 }
 
+export const MAX_BIO_LENGTH = 160;
+
+export function validateUserBio(
+  raw: unknown
+): { ok: true; bio: string } | ValidationFailure {
+  if (raw === undefined || raw === null) {
+    return { ok: true, bio: '' };
+  }
+  if (typeof raw !== 'string') {
+    return { ok: false, message: 'متن بیوگرافی نامعتبر است.' };
+  }
+  const normalized = raw
+    .replace(/\r\n/g, '\n')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .trim();
+  if (normalized.length > MAX_BIO_LENGTH) {
+    return {
+      ok: false,
+      message: `بیوگرافی نمی‌تواند بیشتر از ${MAX_BIO_LENGTH} کاراکتر باشد.`,
+    };
+  }
+  return { ok: true, bio: normalized };
+}
+
 export interface ValidatedProfileUpdatePayload {
   readonly ok: true;
   readonly username: string;
   readonly usernameKey: string;
   readonly avatarCode: ValidAvatarCode;
+  readonly bio?: string;
 }
 
 export function validateProfileUpdatePayload(
@@ -311,10 +336,18 @@ export function validateProfileUpdatePayload(
   const avatarRes = validateAvatarCode(body.avatarCode ?? 'portrait');
   if (avatarRes.ok === false) return avatarRes;
 
+  let bio: string | undefined;
+  if ('bio' in body && body.bio !== undefined) {
+    const bioRes = validateUserBio(body.bio);
+    if (bioRes.ok === false) return bioRes;
+    bio = bioRes.bio;
+  }
+
   return {
     ok: true,
     username: userRes.username,
     usernameKey: userRes.usernameKey,
     avatarCode: avatarRes.avatarCode,
+    ...(bio !== undefined ? { bio } : {}),
   };
 }

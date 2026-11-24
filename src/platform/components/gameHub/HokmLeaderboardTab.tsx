@@ -11,6 +11,7 @@ import { rankLeaderboardEntries } from '../../utils/gameHubHelpers';
 interface HokmLeaderboardTabProps {
   currentUserId?: string | null;
   onJumpToPlay: () => void;
+  onInspectPlayer?: (userId: string) => void;
 }
 
 const PODIUM_STYLES: Record<
@@ -37,6 +38,7 @@ const PODIUM_STYLES: Record<
 export const HokmLeaderboardTab: React.FC<HokmLeaderboardTabProps> = ({
   currentUserId = null,
   onJumpToPlay,
+  onInspectPlayer,
 }) => {
   const [rows, setRows] = useState<HokmLeaderboardRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -136,7 +138,26 @@ export const HokmLeaderboardTab: React.FC<HokmLeaderboardTabProps> = ({
                 return (
                   <div
                     key={entry.userId}
-                    className={`eyvan-card rounded-2xl p-4 border flex sm:flex-col items-center sm:text-center gap-3 ${style.ring}`}
+                    role={onInspectPlayer ? 'button' : undefined}
+                    tabIndex={onInspectPlayer ? 0 : undefined}
+                    onClick={
+                      onInspectPlayer
+                        ? () => onInspectPlayer(entry.userId)
+                        : undefined
+                    }
+                    onKeyDown={
+                      onInspectPlayer
+                        ? (e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              onInspectPlayer(entry.userId);
+                            }
+                          }
+                        : undefined
+                    }
+                    className={`eyvan-card rounded-2xl p-4 border flex sm:flex-col items-center sm:text-center gap-3 ${style.ring} ${
+                      onInspectPlayer ? 'cursor-pointer hover:brightness-105 transition-all' : ''
+                    }`}
                   >
                     <div className="relative shrink-0">
                       <img
@@ -198,9 +219,26 @@ export const HokmLeaderboardTab: React.FC<HokmLeaderboardTabProps> = ({
                 return (
                   <div
                     key={entry.userId}
+                    role={onInspectPlayer ? 'button' : undefined}
+                    tabIndex={onInspectPlayer ? 0 : undefined}
+                    onClick={
+                      onInspectPlayer
+                        ? () => onInspectPlayer(entry.userId)
+                        : undefined
+                    }
+                    onKeyDown={
+                      onInspectPlayer
+                        ? (e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              onInspectPlayer(entry.userId);
+                            }
+                          }
+                        : undefined
+                    }
                     className={`grid grid-cols-12 items-center px-4 py-3 text-xs sm:text-sm ${
                       isMe ? 'bg-[#0D8A8A]/10' : ''
-                    }`}
+                    } ${onInspectPlayer ? 'cursor-pointer hover:bg-black/5 dark:hover:bg-white/[0.03] transition-colors' : ''}`}
                   >
                     <span className="col-span-2 sm:col-span-1 font-black tabular-nums theme-muted">
                       #{toPersianDigits(entry.rank)}

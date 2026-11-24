@@ -58,6 +58,7 @@ interface OnlineHokmGameProps {
   reducedMotionPreference: boolean;
   onChangeUsername: (username: string) => void;
   onChangeAvatar: (avatarCode: string) => void;
+  onInspectPlayer?: (userId: string) => void;
   onLaunchOffline: () => void;
   onBackToGames: () => void;
 }
@@ -79,6 +80,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
   reducedMotionPreference,
   onChangeUsername,
   onChangeAvatar,
+  onInspectPlayer,
   onLaunchOffline,
   onBackToGames,
 }) => {
@@ -99,7 +101,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
 
   // Table visual states synced to authoritative server events
   const [exitConfirmOpen, setExitConfirmOpen] = useState(false);
-  const [flyingDealCards] = useState<FlyingDealCard[]>([]);
+  const [flyingDealCards, setFlyingDealCards] = useState<FlyingDealCard[]>([]);
   const [showGameStartBanner, setShowGameStartBanner] = useState(false);
   const [trickCollectPhase, setTrickCollectPhase] =
     useState<TrickCollectPhase>('idle');
@@ -110,6 +112,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
   const clientRef = useRef<HokmOnlineClient | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
   const trickTimersRef = useRef<number[]>([]);
+  const dealBurstTimersRef = useRef<number[]>([]);
   const startBannerTimerRef = useRef<number | null>(null);
 
   const [osReducedMotion, setOsReducedMotion] = useState(false);
@@ -261,6 +264,41 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
     trickTimersRef.current = [];
   }, []);
 
+  const clearDealBurstTimers = useCallback(() => {
+    dealBurstTimersRef.current.forEach((id) => window.clearTimeout(id));
+    dealBurstTimersRef.current = [];
+  }, []);
+
+  const triggerOnlineDealBurst = useCallback(
+    (waveTag: string, rounds: number) => {
+      if (reducedMotion) return;
+      clearDealBurstTimers();
+      const seats: Seat[] = ['south', 'east', 'north', 'west'];
+      const nowStamp = Date.now();
+      let step = 0;
+      for (let r = 0; r < rounds; r++) {
+        for (const seat of seats) {
+          const curStep = step++;
+          const tid = window.setTimeout(() => {
+            const flyId = `online-deal-${waveTag}-${nowStamp}-${curStep}-${seat}`;
+            const baseDir = seat === 'south' || seat === 'east' ? 1 : -1;
+            setFlyingDealCards((prev) => [
+              ...prev.slice(-6),
+              { id: flyId, targetSeat: seat, spinDeg: baseDir * 182 },
+            ]);
+            hokmSound.playDealTick();
+            const rmId = window.setTimeout(() => {
+              setFlyingDealCards((prev) => prev.filter((c) => c.id !== flyId));
+            }, 280);
+            dealBurstTimersRef.current.push(rmId);
+          }, curStep * 62);
+          dealBurstTimersRef.current.push(tid);
+        }
+      }
+    },
+    [clearDealBurstTimers, reducedMotion]
+  );
+
   const handleServerEvent = useCallback(
     (nextSnap: RoomSnapshot, event?: RoomEventNotice) => {
       if (!event) return;
@@ -271,10 +309,12 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
           setTrickCollectPhase('idle');
           setCollectingWinnerTeam(null);
           hokmSound.playShuffle();
+          triggerOnlineDealBurst('init5', 2);
           break;
 
         case 'DEALT_REMAINING_8':
           hokmSound.playTrumpChosen();
+          triggerOnlineDealBurst('rem8', 2);
           setShowGameStartBanner(true);
           hokmSound.playGameStart();
           if (startBannerTimerRef.current !== null) {
@@ -368,7 +408,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
           break;
       }
     },
-    [clearTrickTimers, refreshMatches, showTransientNotice]
+    [clearTrickTimers, refreshMatches, showTransientNotice, triggerOnlineDealBurst]
   );
 
   // Connect WebSocket whenever sessionCreds are obtained
@@ -399,6 +439,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
       client.disconnect();
       clientRef.current = null;
       clearTrickTimers();
+      clearDealBurstTimers();
       if (noticeTimerRef.current !== null) {
         window.clearTimeout(noticeTimerRef.current);
       }
@@ -406,7 +447,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
         window.clearTimeout(startBannerTimerRef.current);
       }
     };
-  }, [clearTrickTimers, handleServerEvent, sessionCreds, showTransientNotice]);
+  }, [clearDealBurstTimers, clearTrickTimers, handleServerEvent, sessionCreds, showTransientNotice]);
 
   // Browser Back / Escape guard during active match
   useEffect(() => {
@@ -593,6 +634,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
       map[s.visualSeat] = {
         name: s.username ?? '---',
         avatarSrc: getAvatarSrcByCode(s.avatarCode),
+        userId: s.userId ?? null,
         connected: s.connected,
         disconnectRemainingSec: remainingSec,
       };
@@ -656,6 +698,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
           seatPlayers={seatPlayers}
           deckCount={snapshot.game.deckCount}
           canStartRematch={isHost}
+          onInspectPlayer={onInspectPlayer}
           onlineHud={{
             roomCode: snapshot.roomCode,
             connectionState,
@@ -749,6 +792,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
       onLaunchOffline={onLaunchOffline}
       onBackToGames={onBackToGames}
       onRefreshMatches={refreshMatches}
+      onInspectPlayer={onInspectPlayer}
     />
   );
 };

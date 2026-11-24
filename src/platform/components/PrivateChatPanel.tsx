@@ -46,6 +46,7 @@ interface PrivateChatPanelProps {
   onClose: () => void;
   onConversationActivity?: () => void;
   onOpenFriendGroups?: () => void;
+  onInspectPlayer?: (userId: string) => void;
 }
 
 const MAX_CHAT_CHARS = 2000;
@@ -108,6 +109,7 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
   onClose,
   onConversationActivity,
   onOpenFriendGroups,
+  onInspectPlayer,
 }) => {
   const [messages, setMessages] = useState<ChatUiMessage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -725,7 +727,14 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
     >
       {/* Chat Header */}
       <header className="px-4 py-3 border-b border-[var(--eyvan-line)] flex items-center justify-between gap-3 bg-black/15">
-        <div className="flex items-center gap-3 min-w-0">
+        <button
+          type="button"
+          onClick={() => onInspectPlayer?.(conversation.partner.userId)}
+          disabled={!onInspectPlayer}
+          className={`flex items-center gap-3 min-w-0 text-right ${
+            onInspectPlayer ? 'cursor-pointer hover:opacity-90 transition-opacity' : ''
+          }`}
+        >
           <div className="relative shrink-0">
             <ProfileAvatar
               avatarCode={toValidAvatarCode(conversation.partner.avatarCode)}
@@ -755,7 +764,7 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
                 : 'آفلاین'}
             </div>
           </div>
-        </div>
+        </button>
 
         <div className="flex items-center gap-2 shrink-0">
           <span className="hidden sm:inline-flex items-center gap-1.5 text-[11px] font-bold theme-accent-teal shrink-0">

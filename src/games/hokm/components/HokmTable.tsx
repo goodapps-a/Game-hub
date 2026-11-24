@@ -35,6 +35,7 @@ import type { SeatPublicAppearance } from '../online/protocol';
 export interface FlyingDealCard {
   id: string;
   targetSeat: Seat;
+  spinDeg?: number;
 }
 
 export type TrickCollectPhase = 'idle' | 'stacking' | 'sliding';
@@ -42,6 +43,7 @@ export type TrickCollectPhase = 'idle' | 'stacking' | 'sliding';
 export interface OnlineSeatPlayerMeta {
   name: string;
   avatarSrc: string;
+  userId?: string | null;
   connected?: boolean;
   disconnectRemainingSec?: number | null;
 }
@@ -78,6 +80,7 @@ interface HokmTableProps {
   deckCount?: number;
   onlineHud?: OnlineTableHudInfo;
   canStartRematch?: boolean;
+  onInspectPlayer?: (userId: string) => void;
   onPlayCard: (cardId: string) => void;
   onChooseTrump: (suit: Suit) => void;
   onRequestExit: () => void;
@@ -93,11 +96,14 @@ const SEAT_AVATARS: Record<Seat, string> = {
   west: PLATFORM_ASSETS.avatarFarhad,
 };
 
-const SEAT_FLY_OFFSETS: Record<Seat, { x: number; y: number; rotate: number }> = {
-  south: { x: 0, y: 185, rotate: 0 },
-  north: { x: 0, y: -175, rotate: 180 },
-  east: { x: 205, y: 0, rotate: -90 },
-  west: { x: -205, y: 0, rotate: 90 },
+const SEAT_FLY_OFFSETS: Record<
+  Seat,
+  { x: number; y: number; rotate: number; dealSpin: number; playSpin: number }
+> = {
+  south: { x: 0, y: 205, rotate: 0, dealSpin: 185, playSpin: -16 },
+  north: { x: 0, y: -195, rotate: 180, dealSpin: -185, playSpin: 22 },
+  east: { x: 225, y: 0, rotate: -90, dealSpin: 175, playSpin: -28 },
+  west: { x: -225, y: 0, rotate: 90, dealSpin: -175, playSpin: 28 },
 };
 
 const TRICK_SLOT_OFFSETS: Record<Seat, { x: number; y: number; rotate: number }> = {
@@ -123,6 +129,8 @@ const SeatProfile: React.FC<{
   seat: Seat;
   displayName: string;
   avatarSrc: string;
+  userId?: string | null;
+  onInspectPlayer?: (userId: string) => void;
   isTurn: boolean;
   isHakem: boolean;
   connected?: boolean;
@@ -132,6 +140,8 @@ const SeatProfile: React.FC<{
   seat,
   displayName,
   avatarSrc,
+  userId,
+  onInspectPlayer,
   isTurn,
   isHakem,
   connected = true,
@@ -142,10 +152,28 @@ const SeatProfile: React.FC<{
     ? getAvatarFrameVisual(appearance.avatarFrameId)
     : null;
   const badgeVisual = getProfileBadgeVisual(appearance?.badgeId);
+  const canInspect = Boolean(userId && onInspectPlayer && seat !== 'south');
 
   return (
     <div
-      className="relative inline-flex flex-col items-center select-none shrink-0"
+      className={`relative inline-flex flex-col items-center select-none shrink-0 ${
+        canInspect
+          ? 'cursor-pointer transition-transform hover:scale-[1.04] active:scale-[0.97]'
+          : ''
+      }`}
+      role={canInspect ? 'button' : undefined}
+      tabIndex={canInspect ? 0 : undefined}
+      onClick={canInspect ? () => onInspectPlayer?.(userId!) : undefined}
+      onKeyDown={
+        canInspect
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onInspectPlayer?.(userId!);
+              }
+            }
+          : undefined
+      }
       data-seat={seat}
       data-active-turn={isTurn ? 'true' : 'false'}
       data-connected={connected ? 'true' : 'false'}
@@ -239,71 +267,6 @@ const SeatProfile: React.FC<{
   );
 };
 
-/**
- * Stacked 4-card trick packets collected strictly by TEAM:
- * - myTeam: stacked beside South (bottom player)
- * - opponentTeam: stacked beside East (right player)
- */
-const TeamTrickPile: React.FC<{
-  count: number;
-  team: TeamId;
-  deckId?: string;
-  cardBackId?: string;
-  backBg?: string;
-  backBorder?: string;
-}> = ({
-  count,
-  team,
-  deckId,
-  cardBackId,
-  backBg = '#EFECE3',
-  backBorder = '#C9C3B4',
-}) => {
-  if (count <= 0) return null;
-  const visiblePackets = Math.min(count, 7);
-
-  return (
-    <motion.div
-      initial={{ scale: 0.72, opacity: 0 }}
-      animate={{ scale: 1, opacity: 1 }}
-      transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-      data-testid={`won-pile-${team}`}
-      data-won-count={count}
-      className="relative flex items-center justify-center shrink-0"
-      aria-label={`${toPersianDigits(count)}`}
-    >
-      <div className="relative w-[36px] h-[50px] sm:w-[44px] sm:h-[62px]">
-        {Array.from({ length: visiblePackets }).map((_, idx) => (
-          <div
-            key={idx}
-            className="absolute inset-0 rounded-[5px] p-[1.5px] border shadow-[0_2px_6px_rgba(0,0,0,0.5)]"
-            style={{
-              backgroundColor: backBg,
-              borderColor: backBorder,
-              transform: `translate(${idx * 2}px, ${-idx * 2.2}px) rotate(${
-                idx % 2 === 0 ? -4 + idx : 5 - idx
-              }deg)`,
-              zIndex: idx,
-            }}
-          >
-            <div className="w-full h-full rounded-[3px] overflow-hidden">
-              <CardBackSvg deckId={deckId} cardBackId={cardBackId} />
-            </div>
-          </div>
-        ))}
-        <span
-          className={`absolute -bottom-1.5 -right-1.5 z-20 min-w-[20px] h-[20px] px-1 rounded-full border text-[10px] font-extrabold flex items-center justify-center tabular-nums shadow-md ${
-            team === 'myTeam'
-              ? 'bg-[#0C352C] border-[#F3D179] text-[#F3D179]'
-              : 'bg-[#3D1418] border-[#F3D179] text-[#FDE68A]'
-          }`}
-        >
-          {toPersianDigits(count)}
-        </span>
-      </div>
-    </motion.div>
-  );
-};
 
 /**
  * Strictly face-down card backs for opponent & partner hands.
@@ -496,8 +459,8 @@ const RoyalScoreboard: React.FC<{
             <motion.div
               key={state.trumpSuit}
               data-testid="trump-indicator"
-              initial={reducedMotion ? false : { scale: 0.6, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
+              initial={reducedMotion ? false : { scale: 0.65 }}
+              animate={{ scale: 1 }}
               transition={{ type: 'spring', stiffness: 360, damping: 24 }}
               className="w-11 h-11 sm:w-14 sm:h-14 rounded-full bg-[#FFFFFF] border-[2.5px] border-[#F3D179] shadow-[0_0_22px_rgba(243,209,121,0.52)] hover:shadow-[0_0_28px_rgba(243,209,121,0.75)] flex items-center justify-center shrink-0"
             >
@@ -943,6 +906,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
   deckCount,
   onlineHud,
   canStartRematch = true,
+  onInspectPlayer,
   onPlayCard,
   onChooseTrump,
   onRequestExit,
@@ -1044,10 +1008,16 @@ export const HokmTable: React.FC<HokmTableProps> = ({
 
   const effectiveDeckCount = deckCount ?? state.deck.length;
   const showDeckOnTable =
+    isShufflingAnim ||
     state.phase === 'SHUFFLING' ||
     state.phase === 'DEALING_INITIAL_5' ||
     state.phase === 'DEALING_REMAINING_8' ||
-    (state.phase === 'CHOOSING_TRUMP' && effectiveDeckCount > 0);
+    effectiveDeckCount > 0;
+  const deckStackLayers = isShufflingAnim
+    ? 5
+    : effectiveDeckCount > 0
+      ? Math.min(5, Math.max(1, Math.ceil(effectiveDeckCount / 10)))
+      : 0;
 
   const resolvedSeats: Record<Seat, OnlineSeatPlayerMeta> = {
     south: seatPlayers?.south ?? {
@@ -1257,6 +1227,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               seat="north"
               displayName={resolvedSeats.north.name}
               avatarSrc={resolvedSeats.north.avatarSrc}
+              userId={resolvedSeats.north.userId}
+              onInspectPlayer={onInspectPlayer}
               connected={resolvedSeats.north.connected}
               disconnectRemainingSec={resolvedSeats.north.disconnectRemainingSec}
               appearance={seatAppearances?.north}
@@ -1333,6 +1305,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               seat="west"
               displayName={resolvedSeats.west.name}
               avatarSrc={resolvedSeats.west.avatarSrc}
+              userId={resolvedSeats.west.userId}
+              onInspectPlayer={onInspectPlayer}
               connected={resolvedSeats.west.connected}
               disconnectRemainingSec={resolvedSeats.west.disconnectRemainingSec}
               appearance={seatAppearances?.west}
@@ -1366,45 +1340,54 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               aria-hidden="true"
             />
 
-            {/* Deck Pile & Calm Riffle Shuffle Animation */}
+            {/* Solid Multi-Layer Center Deck Pile & Riffle Shuffle (Zero Opacity Fade) */}
             <AnimatePresence>
-              {showDeckOnTable && (
+              {showDeckOnTable && deckStackLayers > 0 && (
                 <motion.div
-                  initial={{ opacity: 0, scale: 0.92 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.85 }}
-                  transition={{ duration: 0.24 }}
+                  initial={reducedMotion ? false : { scale: 0.88 }}
+                  animate={{ scale: 1 }}
+                  exit={reducedMotion ? undefined : { scale: 0.72 }}
+                  transition={{ duration: reducedMotion ? 0.05 : 0.2 }}
+                  data-testid="center-deal-deck"
+                  data-deck-remaining={effectiveDeckCount}
                   className="absolute inset-0 flex items-center justify-center pointer-events-none"
                 >
-                  <div className="relative w-[64px] h-[90px] sm:w-[78px] sm:h-[110px]">
-                    {[0, 1, 2, 3].map((layer) => (
+                  <div className="relative w-[68px] h-[96px] sm:w-[84px] sm:h-[118px]">
+                    {/* Table contact shadow beneath the deck stack */}
+                    <div
+                      className="absolute inset-0 translate-y-2.5 scale-[0.96] rounded-[9px] bg-black/45 blur-[6px]"
+                      aria-hidden="true"
+                    />
+                    {Array.from({ length: deckStackLayers }).map((_, layer) => (
                       <motion.div
                         key={layer}
                         animate={
                           isShufflingAnim && !reducedMotion
                             ? {
-                                x: layer % 2 === 0 ? [-30, 22, 0] : [30, -22, 0],
-                                rotate: layer % 2 === 0 ? [-8, 5, 0] : [8, -5, 0],
+                                x: layer % 2 === 0 ? [-32, 20, 0] : [32, -20, 0],
+                                y: -layer * 1.6,
+                                rotate: layer % 2 === 0 ? [-10, 6, 0] : [10, -6, 0],
                               }
-                            : { x: layer * 1.4, y: -layer * 1.4, rotate: 0 }
+                            : { x: layer * 1.3, y: -layer * 1.7, rotate: 0 }
                         }
                         transition={
                           isShufflingAnim
                             ? {
-                                duration: 0.4,
+                                duration: 0.36,
                                 repeat: 2,
                                 ease: 'easeInOut',
-                                delay: layer * 0.04,
+                                delay: layer * 0.035,
                               }
-                            : { duration: 0.22 }
+                            : { duration: 0.18 }
                         }
                         style={{
                           backgroundColor: activeBackBg,
                           borderColor: activeBackBorder,
+                          zIndex: layer + 1,
                         }}
-                        className="absolute inset-0 rounded-[8px] p-[2px] border shadow-lg overflow-hidden"
+                        className="absolute inset-0 rounded-[7px] p-[2px] border shadow-[0_6px_14px_rgba(0,0,0,0.48)] overflow-hidden"
                       >
-                        <div className="w-full h-full rounded-[6px] overflow-hidden">
+                        <div className="w-full h-full rounded-[5px] overflow-hidden">
                           <CardBackSvg
                             deckId={southDeckId}
                             cardBackId={southCardBackId}
@@ -1417,60 +1400,57 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               )}
             </AnimatePresence>
 
-            {/* Flying Cards during Dealing */}
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none overflow-visible">
-              <AnimatePresence>
-                {flyingDealCards.map((fc) => {
-                  const dest = SEAT_FLY_OFFSETS[fc.targetSeat];
-                  return (
-                    <motion.div
-                      key={fc.id}
-                      initial={{ x: 0, y: 0, scale: 0.9, opacity: 1, rotate: 0 }}
-                      animate={{
-                        x: dest.x,
-                        y: dest.y,
-                        scale: 0.74,
-                        opacity: 0.18,
-                        rotate: dest.rotate * 0.14,
-                      }}
-                      exit={{ opacity: 0 }}
-                      transition={{
-                        duration: reducedMotion ? 0.05 : 0.29,
-                        ease: [0.22, 1, 0.36, 1],
-                      }}
-                      style={{
-                        backgroundColor: activeBackBg,
-                        borderColor: activeBackBorder,
-                      }}
-                      className="absolute w-[54px] h-[76px] rounded-[7px] p-[1.5px] border shadow-lg overflow-hidden"
-                    >
-                      <div className="w-full h-full rounded-[5px] overflow-hidden">
-                        <CardBackSvg
-                          deckId={seatDeckMap[fc.targetSeat]}
-                          cardBackId={seatCardBackMap[fc.targetSeat]}
-                        />
-                      </div>
-                    </motion.div>
-                  );
-                })}
-              </AnimatePresence>
+            {/* Solid Dealer Wrist-Spin Flying Cards Launched Directly From Center Deck */}
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none overflow-visible z-20">
+              {flyingDealCards.map((fc) => {
+                const dest = SEAT_FLY_OFFSETS[fc.targetSeat];
+                const spinTarget = fc.spinDeg ?? dest.dealSpin;
+                return (
+                  <motion.div
+                    key={fc.id}
+                    initial={{ x: 0, y: -6, scale: 0.96, rotate: 0 }}
+                    animate={{
+                      x: dest.x,
+                      y: dest.y,
+                      scale: 0.84,
+                      rotate: spinTarget,
+                    }}
+                    transition={{
+                      duration: reducedMotion ? 0.05 : 0.28,
+                      ease: [0.22, 1, 0.36, 1],
+                    }}
+                    style={{
+                      backgroundColor: activeBackBg,
+                      borderColor: activeBackBorder,
+                    }}
+                    className="absolute w-[64px] h-[90px] sm:w-[76px] sm:h-[106px] rounded-[7px] p-[2px] border shadow-[0_10px_22px_rgba(0,0,0,0.52)] overflow-hidden"
+                  >
+                    <div className="w-full h-full rounded-[5px] overflow-hidden">
+                      <CardBackSvg
+                        deckId={seatDeckMap[fc.targetSeat]}
+                        cardBackId={seatCardBackMap[fc.targetSeat]}
+                      />
+                    </div>
+                  </motion.div>
+                );
+              })}
             </div>
 
-            {/* Active 4-Card Trick -> Stacks cleanly -> Slides to Team Pile */}
+            {/* Active 4-Card Trick -> Stacks cleanly -> Slides Solidly Off Table */}
             <motion.div
               dir="ltr"
               animate={
                 trickCollectPhase === 'sliding'
                   ? {
-                      x: slideDestination.x,
-                      y: slideDestination.y,
-                      scale: 0.56,
-                      opacity: 0.14,
+                      x: slideDestination.x * 1.45,
+                      y: slideDestination.y * 1.45,
+                      scale: 0.74,
+                      rotate: collectingWinnerTeam === 'myTeam' ? -18 : 18,
                     }
-                  : { x: 0, y: 0, scale: 1, opacity: 1 }
+                  : { x: 0, y: 0, scale: 1, rotate: 0 }
               }
               transition={{
-                duration: reducedMotion ? 0.08 : 0.38,
+                duration: reducedMotion ? 0.08 : 0.36,
                 ease: [0.22, 1, 0.36, 1],
               }}
               className="absolute inset-0 flex items-center justify-center pointer-events-none"
@@ -1492,14 +1472,20 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                       key={play.card.id}
                       initial={
                         reducedMotion
-                          ? { x: slot.x, y: slot.y, opacity: 1, rotate: slot.rotate }
-                          : {
-                              x: origin.x * 0.72,
-                              y: origin.y * 0.72,
-                              scale: 0.86,
-                              opacity: 0.55,
-                              rotate: origin.rotate * 0.1,
-                            }
+                          ? { x: slot.x, y: slot.y, rotate: slot.rotate }
+                          : play.seat === 'south'
+                            ? {
+                                x: 0,
+                                y: 124,
+                                scale: 0.96,
+                                rotate: origin.playSpin,
+                              }
+                            : {
+                                x: origin.x * 0.82,
+                                y: origin.y * 0.82,
+                                scale: 0.88,
+                                rotate: origin.playSpin,
+                              }
                       }
                       animate={
                         isStacking
@@ -1508,22 +1494,20 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                               y: stackPose.y,
                               rotate: stackPose.rotate,
                               scale: 0.92,
-                              opacity: 1,
                             }
                           : {
                               x: slot.x,
                               y: slot.y,
                               rotate: slot.rotate,
                               scale: 1,
-                              opacity: 1,
                             }
                       }
-                      exit={{ opacity: 0, scale: 0.7 }}
+                      exit={reducedMotion ? undefined : { scale: 0.72 }}
                       transition={{
-                        duration: reducedMotion ? 0.05 : 0.34,
-                        ease: [0.16, 1, 0.3, 1],
+                        duration: reducedMotion ? 0.05 : 0.32,
+                        ease: [0.18, 1, 0.3, 1],
                       }}
-                      style={{ zIndex: idx + 5, perspective: 900 }}
+                      style={{ zIndex: idx + 5, perspective: 960 }}
                       className="absolute"
                     >
                       {shouldFlip3D ? (
@@ -1531,8 +1515,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                           initial={{ rotateY: 180 }}
                           animate={{ rotateY: 0 }}
                           transition={{
-                            duration: 0.42,
-                            ease: [0.16, 1, 0.3, 1],
+                            duration: 0.36,
+                            ease: [0.18, 1, 0.3, 1],
                           }}
                           style={{ transformStyle: 'preserve-3d' }}
                           className="relative"
@@ -1581,34 +1565,21 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               </AnimatePresence>
             </motion.div>
 
-            {/* Exciting Non-Blocking "Game Started!" Burst right after dealing finishes */}
+            {/* Non-Blocking "Game Started!" Spring Banner right after dealing finishes */}
             <AnimatePresence>
               {showGameStartBanner && (
                 <motion.div
-                  initial={
-                    reducedMotion ? { opacity: 1 } : { opacity: 0, scale: 0.7 }
-                  }
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={
-                    reducedMotion ? { opacity: 0 } : { opacity: 0, scale: 1.12 }
-                  }
+                  initial={reducedMotion ? false : { scale: 0.72, y: -12 }}
+                  animate={{ scale: 1, y: 0 }}
+                  exit={reducedMotion ? undefined : { scale: 0.78, y: -14 }}
                   transition={{
                     type: 'spring',
-                    stiffness: 320,
+                    stiffness: 340,
                     damping: 22,
                   }}
                   className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center"
                   data-testid="game-start-burst"
                 >
-                  {/* Expanding golden pulse ring */}
-                  {!reducedMotion && (
-                    <motion.div
-                      initial={{ scale: 0.5, opacity: 0.9 }}
-                      animate={{ scale: 2.1, opacity: 0 }}
-                      transition={{ duration: 0.95, ease: [0.16, 1, 0.3, 1] }}
-                      className="absolute w-32 h-32 rounded-full border-2 border-[#F3D179] shadow-[0_0_24px_rgba(243,209,121,0.75)]"
-                    />
-                  )}
                   <div className="relative flex items-center gap-2.5 px-6 py-3 rounded-full bg-gradient-to-b from-[#0E352B]/96 to-[#061914]/96 border-2 border-[#F3D179] shadow-[0_14px_40px_rgba(0,0,0,0.68),0_0_32px_rgba(243,209,121,0.45)] backdrop-blur-md">
                     {state.trumpSuit && (
                       <span className="w-8 h-8 rounded-full bg-white border border-[#F3D179] flex items-center justify-center shrink-0">
@@ -1626,42 +1597,28 @@ export const HokmTable: React.FC<HokmTableProps> = ({
             {/* TrumpSelector is rendered above the dimmed backdrop at z-50 below */}
           </div>
 
-          {/* Physical RIGHT: East Profile + Opponent Team Pile */}
+          {/* Physical RIGHT: East Profile */}
           <div
             dir="rtl"
             className="relative z-20 flex flex-col items-center justify-center pr-7 sm:pr-12"
             aria-label={resolvedSeats.east.name}
           >
-            <div className="relative flex items-center justify-center">
-              <SeatProfile
-                seat="east"
-                displayName={resolvedSeats.east.name}
-                avatarSrc={resolvedSeats.east.avatarSrc}
-                connected={resolvedSeats.east.connected}
-                disconnectRemainingSec={resolvedSeats.east.disconnectRemainingSec}
-                appearance={seatAppearances?.east}
-                isTurn={
-                  (state.phase === 'PLAYING_TRICK' ||
-                    state.phase === 'CHOOSING_TRUMP') &&
-                  state.currentTurn === 'east'
-                }
-                isHakem={state.hakem === 'east'}
-              />
-              {state.trickCounts.opponentTeam > 0 && (
-                <div className="absolute top-1/2 -translate-y-1/2 right-full mr-2 sm:mr-3 pointer-events-none">
-                  <TeamTrickPile
-                    count={state.trickCounts.opponentTeam}
-                    team="opponentTeam"
-                    deckId={eastDeckId}
-                    cardBackId={eastCardBackId}
-                    backBg={eastBackVisual.styleTokens.backBackground ?? '#FFFFFF'}
-                    backBorder={
-                      eastBackVisual.styleTokens.backBorderColor ?? '#D4CFC5'
-                    }
-                  />
-                </div>
-              )}
-            </div>
+            <SeatProfile
+              seat="east"
+              displayName={resolvedSeats.east.name}
+              avatarSrc={resolvedSeats.east.avatarSrc}
+              userId={resolvedSeats.east.userId}
+              onInspectPlayer={onInspectPlayer}
+              connected={resolvedSeats.east.connected}
+              disconnectRemainingSec={resolvedSeats.east.disconnectRemainingSec}
+              appearance={seatAppearances?.east}
+              isTurn={
+                (state.phase === 'PLAYING_TRICK' ||
+                  state.phase === 'CHOOSING_TRUMP') &&
+                state.currentTurn === 'east'
+              }
+              isHakem={state.hakem === 'east'}
+            />
           </div>
         </section>
 
@@ -1765,20 +1722,6 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                 isHakem={state.hakem === 'south'}
               />
             </div>
-
-            {/* My Team Trick Pile anchored cleanly at bottom-left edge */}
-            {state.trickCounts.myTeam > 0 && (
-              <div className="pointer-events-none absolute left-2 sm:left-5 bottom-2 sm:bottom-4 z-30">
-                <TeamTrickPile
-                  count={state.trickCounts.myTeam}
-                  team="myTeam"
-                  deckId={southDeckId}
-                  cardBackId={southCardBackId}
-                  backBg={activeBackBg}
-                  backBorder={activeBackBorder}
-                />
-              </div>
-            )}
           </div>
         </section>
       </main>

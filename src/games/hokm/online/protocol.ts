@@ -54,6 +54,7 @@ export interface RoomSeatView {
   /** Canonical server seat ('south' | 'east' | 'north' | 'west') */
   readonly canonicalSeat: Seat;
   readonly playerId: string | null;
+  readonly userId?: string | null;
   readonly username: string | null;
   readonly avatarCode: string;
   readonly appearance?: SeatPublicAppearance;

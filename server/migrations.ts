@@ -222,6 +222,11 @@ function detectLegacyBaselineMigrations(
     detected.push('0014_account_code_gifts_toman_groups.sql');
   }
 
+  const has0015 = has0014 && columnExists(db, 'users', 'bio');
+  if (has0015 && availableFiles.includes('0015_user_bio.sql')) {
+    detected.push('0015_user_bio.sql');
+  }
+
   return detected;
 }
 

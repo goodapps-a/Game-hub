@@ -37,12 +37,7 @@ import { ProfileAvatar } from '../components/TopBar';
 import {
   FramedPlayerAvatar,
   PlayerBadgeInline,
-  PlayerBannerStage,
 } from '../components/profile/PlayerAppearanceParts';
-import {
-  PublicUserProfileResponse,
-  fetchPublicUserProfileRequest,
-} from '../items/inventoryClient';
 import { toPersianDigits } from '../theme/tokens';
 import { UserProfile } from '../types/platform';
 import {
@@ -87,8 +82,12 @@ interface FriendsPageProps {
   authUser: AuthUserSummary | null;
   authLoading: boolean;
   initialTab?: SocialSubTab;
+  initialChatTargetUserId?: string | null;
+  onClearInitialChatTarget?: () => void;
+  refreshSignal?: number;
   onOpenAccount: () => void;
   onJoinInvitedRoom?: (roomCode: string) => void;
+  onInspectPlayer?: (userId: string) => void;
   onBack?: () => void;
 }
 
@@ -112,8 +111,12 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
   authUser,
   authLoading,
   initialTab = 'friends',
+  initialChatTargetUserId = null,
+  onClearInitialChatTarget,
+  refreshSignal = 0,
   onOpenAccount,
   onJoinInvitedRoom,
+  onInspectPlayer,
   onBack,
 }) => {
   const [activeTab, setActiveTab] = useState<SocialSubTab>(initialTab);
@@ -174,36 +177,16 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
     text: string;
   } | null>(null);
 
-  const [publicProfileModal, setPublicProfileModal] = useState<{
-    loading: boolean;
-    profile: NonNullable<PublicUserProfileResponse['profile']> | null;
-    error: string | null;
-  } | null>(null);
-
   const feedbackTimerRef = useRef<number | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
 
-  const handleOpenPublicProfile = useCallback(async (userId: string) => {
-    setPublicProfileModal({ loading: true, profile: null, error: null });
-    try {
-      const res = await fetchPublicUserProfileRequest(userId);
-      if (res.ok && res.profile) {
-        setPublicProfileModal({ loading: false, profile: res.profile, error: null });
-      } else {
-        setPublicProfileModal({
-          loading: false,
-          profile: null,
-          error: res.message ?? 'پروفایل بازیکن در دسترس نیست.',
-        });
-      }
-    } catch {
-      setPublicProfileModal({
-        loading: false,
-        profile: null,
-        error: 'خطا در دریافت پروفایل بازیکن.',
-      });
-    }
-  }, []);
+  const handleOpenPublicProfile = useCallback(
+    (userId: string) => {
+      if (!userId) return;
+      onInspectPlayer?.(userId);
+    },
+    [onInspectPlayer]
+  );
 
   const showToast = useCallback((type: 'success' | 'error', text: string) => {
     setFeedback({ type, text });
@@ -618,22 +601,36 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
     }
   };
 
-  const handleOpenChat = async (friendUserId: string) => {
-    setBusyKey(`chat:${friendUserId}`);
-    try {
-      const res = await openDirectConversationApi(friendUserId);
-      if (!res.ok || !res.conversation) {
-        showToast('error', res.message ?? 'باز کردن گفتگوی خصوصی انجام نشد.');
-        return;
+  const handleOpenChat = useCallback(
+    async (friendUserId: string) => {
+      setBusyKey(`chat:${friendUserId}`);
+      try {
+        const res = await openDirectConversationApi(friendUserId);
+        if (!res.ok || !res.conversation) {
+          showToast('error', res.message ?? 'باز کردن گفتگوی خصوصی انجام نشد.');
+          return;
+        }
+        setEyvanBotChatOpen(false);
+        setActiveConversation(res.conversation);
+      } catch {
+        showToast('error', 'خطا در برقراری ارتباط برای شروع گفتگو.');
+      } finally {
+        setBusyKey(null);
       }
-      setEyvanBotChatOpen(false);
-      setActiveConversation(res.conversation);
-    } catch {
-      showToast('error', 'خطا در برقراری ارتباط برای شروع گفتگو.');
-    } finally {
-      setBusyKey(null);
-    }
-  };
+    },
+    [showToast]
+  );
+
+  useEffect(() => {
+    if (!authUser || !initialChatTargetUserId) return;
+    void handleOpenChat(initialChatTargetUserId);
+    onClearInitialChatTarget?.();
+  }, [authUser?.userId, initialChatTargetUserId, handleOpenChat, onClearInitialChatTarget]);
+
+  useEffect(() => {
+    if (!authUser || refreshSignal <= 0) return;
+    void loadSocialSnapshot(true);
+  }, [authUser?.userId, refreshSignal, loadSocialSnapshot]);
 
   const handleAcceptGameInvite = async (invite: GameInviteItem) => {
     setBusyKey(`invacc:${invite.inviteId}`);
@@ -1228,6 +1225,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
             void refreshConversationsOnly();
           }}
           onConversationActivity={refreshConversationsOnly}
+          onInspectPlayer={handleOpenPublicProfile}
           onOpenFriendGroups={() => {
             setActiveConversation(null);
             setActiveTab('groups');
@@ -1369,7 +1367,12 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                       data-testid={`search-result-${user.username}`}
                       className="theme-subcard border rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-3"
                     >
-                      <div className="flex items-center gap-3 min-w-0">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenPublicProfile(user.userId)}
+                        className="flex items-center gap-3 min-w-0 text-right cursor-pointer group focus-visible:outline-none"
+                        title="مشاهده پروفایل بازیکن"
+                      >
                         <div className="relative shrink-0">
                           <FramedPlayerAvatar
                             avatarCode={toValidAvatarCode(user.avatarCode)}
@@ -1392,7 +1395,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                           <div className="flex items-center gap-1.5 min-w-0">
                             <span
                               dir="ltr"
-                              className="text-sm font-extrabold theme-heading truncate text-right"
+                              className="text-sm font-extrabold theme-heading truncate text-right group-hover:underline"
                             >
                               {user.username}
                             </span>
@@ -1418,7 +1421,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                                   : 'کاربر ایوان'}
                           </div>
                         </div>
-                      </div>
+                      </button>
 
                       <div className="shrink-0">
                         {user.relationshipStatus === 'none' && (
@@ -2148,7 +2151,12 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                   data-testid={`incoming-request-${req.user.username}`}
                   className="px-4 py-3.5 flex flex-wrap items-center justify-between gap-3"
                 >
-                  <div className="flex items-center gap-3 min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => handleOpenPublicProfile(req.user.userId)}
+                    className="flex items-center gap-3 min-w-0 text-right cursor-pointer group focus-visible:outline-none"
+                    title="مشاهده پروفایل بازیکن"
+                  >
                     <ProfileAvatar
                       avatarCode={toValidAvatarCode(req.user.avatarCode)}
                       username={req.user.username}
@@ -2157,7 +2165,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                     <div className="min-w-0">
                       <div
                         dir="ltr"
-                        className="text-sm font-extrabold theme-heading truncate text-right"
+                        className="text-sm font-extrabold theme-heading truncate text-right group-hover:underline"
                       >
                         {req.user.username}
                       </div>
@@ -2165,7 +2173,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                         درخواست دوستی برای شما ارسال کرده است
                       </div>
                     </div>
-                  </div>
+                  </button>
 
                   <div className="flex items-center gap-2 shrink-0">
                     <button
@@ -2219,7 +2227,12 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                   data-testid={`outgoing-request-${req.user.username}`}
                   className="px-4 py-3.5 flex items-center justify-between gap-3"
                 >
-                  <div className="flex items-center gap-3 min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => handleOpenPublicProfile(req.user.userId)}
+                    className="flex items-center gap-3 min-w-0 text-right cursor-pointer group focus-visible:outline-none"
+                    title="مشاهده پروفایل بازیکن"
+                  >
                     <ProfileAvatar
                       avatarCode={toValidAvatarCode(req.user.avatarCode)}
                       username={req.user.username}
@@ -2228,7 +2241,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                     <div className="min-w-0">
                       <div
                         dir="ltr"
-                        className="text-sm font-extrabold theme-heading truncate text-right"
+                        className="text-sm font-extrabold theme-heading truncate text-right group-hover:underline"
                       >
                         {req.user.username}
                       </div>
@@ -2236,7 +2249,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                         در انتظار تأیید کاربر مقابل
                       </div>
                     </div>
-                  </div>
+                  </button>
 
                   <button
                     type="button"
@@ -2272,7 +2285,12 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                 data-testid={`blocked-user-${blk.username}`}
                 className="px-4 py-3.5 flex items-center justify-between gap-3"
               >
-                <div className="flex items-center gap-3 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => handleOpenPublicProfile(blk.userId)}
+                  className="flex items-center gap-3 min-w-0 text-right cursor-pointer group focus-visible:outline-none"
+                  title="مشاهده پروفایل بازیکن"
+                >
                   <ProfileAvatar
                     avatarCode={toValidAvatarCode(blk.avatarCode)}
                     username={blk.username}
@@ -2281,7 +2299,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                   <div className="min-w-0">
                     <div
                       dir="ltr"
-                      className="text-sm font-extrabold theme-heading truncate text-right"
+                      className="text-sm font-extrabold theme-heading truncate text-right group-hover:underline"
                     >
                       {blk.username}
                     </div>
@@ -2289,7 +2307,7 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
                       کاربر مسدودشده
                     </div>
                   </div>
-                </div>
+                </button>
 
                 <button
                   type="button"
@@ -2310,111 +2328,6 @@ export const FriendsPage: React.FC<FriendsPageProps> = ({
           })
         )}
       </section>
-
-      {publicProfileModal && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="پروفایل عمومی بازیکن"
-          data-testid="public-profile-modal"
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/68 backdrop-blur-sm"
-          onClick={() => setPublicProfileModal(null)}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-[360px] rounded-[24px] theme-drawer border border-[var(--eyvan-gold-border)] shadow-[0_24px_64px_rgba(0,0,0,0.58)] overflow-hidden"
-          >
-            {publicProfileModal.loading ? (
-              <div className="p-8 flex items-center justify-center gap-2 text-xs font-bold theme-muted">
-                <Loader2 className="w-4 h-4 animate-spin theme-accent-teal" />
-                <span>در حال دریافت پروفایل عمومی...</span>
-              </div>
-            ) : publicProfileModal.error || !publicProfileModal.profile ? (
-              <div className="p-6 text-center space-y-3">
-                <p className="text-xs font-bold theme-loss">
-                  {publicProfileModal.error ?? 'پروفایل یافت نشد.'}
-                </p>
-                <button
-                  type="button"
-                  onClick={() => setPublicProfileModal(null)}
-                  className="min-h-[38px] px-4 rounded-xl theme-btn-secondary border text-xs font-bold cursor-pointer"
-                >
-                  بستن
-                </button>
-              </div>
-            ) : (
-              <div>
-                <div className="relative h-28 w-full overflow-hidden">
-                  <PlayerBannerStage
-                    bannerItemIdOrCode={
-                      publicProfileModal.profile.appearance.bannerItemId ??
-                      publicProfileModal.profile.appearance.bannerCode
-                    }
-                    emptyText=""
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setPublicProfileModal(null)}
-                    aria-label="بستن پروفایل"
-                    className="absolute top-3 left-3 w-8 h-8 rounded-full bg-black/60 text-white flex items-center justify-center cursor-pointer"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-
-                <div className="px-5 pb-5 -mt-9 flex flex-col items-center text-center space-y-2">
-                  <div className="rounded-full ring-4 ring-[var(--eyvan-modal-bg)]">
-                    <FramedPlayerAvatar
-                      avatarCode={toValidAvatarCode(publicProfileModal.profile.avatarCode)}
-                      username={publicProfileModal.profile.username}
-                      customAvatarUrl={publicProfileModal.profile.avatarUrl}
-                      avatarFrameId={publicProfileModal.profile.appearance.avatarFrameId}
-                      size="lg"
-                    />
-                  </div>
-                  <div className="flex items-center justify-center gap-1.5">
-                    <PlayerBadgeInline badgeId={publicProfileModal.profile.appearance.badgeId} />
-                    <h3 dir="ltr" className="text-base font-black theme-heading">
-                      {publicProfileModal.profile.username}
-                    </h3>
-                    {publicProfileModal.profile.accountCode && (
-                      <span
-                        dir="ltr"
-                        className="text-[11px] font-mono theme-muted"
-                      >
-                        #{publicProfileModal.profile.accountCode}
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-xs font-bold theme-accent-teal tabular-nums">
-                    سطح {toPersianDigits(publicProfileModal.profile.level)}
-                  </div>
-                  <div className="w-full grid grid-cols-3 gap-2 pt-2 border-t border-[var(--eyvan-line)] text-center">
-                    <div>
-                      <div className="text-[10px] theme-muted">بازی</div>
-                      <div className="text-sm font-black theme-heading tabular-nums">
-                        {toPersianDigits(publicProfileModal.profile.stats.matchesPlayed)}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] theme-muted">برد</div>
-                      <div className="text-sm font-black theme-win tabular-nums">
-                        {toPersianDigits(publicProfileModal.profile.stats.wins)}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] theme-muted">باخت</div>
-                      <div className="text-sm font-black theme-loss tabular-nums">
-                        {toPersianDigits(publicProfileModal.profile.stats.losses)}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 };

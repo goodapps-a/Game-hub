@@ -59,6 +59,7 @@ import {
   validateRegisterPayload,
 } from './validation';
 import { allocateUniqueAccountCode, ensureUserAccountCode } from './accountCode';
+import { ensureUserInventoryInitialized } from '../items/inventoryService';
 
 const SESSION_LAST_SEEN_TOUCH_MS = 5 * 60 * 1000; // Throttle D1 writes to once per 5 min
 
@@ -68,6 +69,7 @@ interface UserDbRow {
   username_key: string;
   display_name: string;
   account_code: string | null;
+  bio?: string;
   email: string | null;
   email_key: string | null;
   email_verified: number;
@@ -100,6 +102,7 @@ function mapUserRowToPublic(row: UserDbRow): PublicAuthUser {
     username: row.username,
     displayName: row.display_name,
     accountCode: row.account_code ?? null,
+    bio: typeof row.bio === 'string' ? row.bio : '',
     email: row.email,
     emailVerified: row.email_verified === 1,
     avatarCode: row.avatar_code,
@@ -405,6 +408,7 @@ export async function loginWithCredentials(
     .prepare(
       `SELECT
          u.user_id, u.username, u.username_key, u.display_name, u.account_code,
+         COALESCE(u.bio, '') AS bio,
          u.email, u.email_key, u.email_verified,
          u.avatar_code, u.avatar_url, u.auth_provider, u.account_status,
          u.created_at, u.last_seen_at,
@@ -565,6 +569,7 @@ export async function verifyAuthSession(
          s.expires_at AS session_expires_at,
          s.revoked_at AS session_revoked_at,
          u.user_id, u.username, u.username_key, u.display_name, u.account_code,
+         COALESCE(u.bio, '') AS bio,
          u.email, u.email_key, u.email_verified,
          u.avatar_code, u.avatar_url, u.auth_provider, u.account_status,
          u.created_at, u.last_seen_at
@@ -1052,6 +1057,7 @@ export async function updateAuthenticatedProfile(
              username_key = ?,
              display_name = ?,
              avatar_code = ?,
+             bio = CASE WHEN ? = 1 THEN ? ELSE bio END,
              username_changed_at = CASE
                WHEN username_key != ? THEN ?
                ELSE username_changed_at
@@ -1064,6 +1070,8 @@ export async function updateAuthenticatedProfile(
         validated.usernameKey,
         validated.username,
         validated.avatarCode,
+        validated.bio !== undefined ? 1 : 0,
+        validated.bio ?? '',
         validated.usernameKey,
         now,
         now,
@@ -1086,6 +1094,7 @@ export async function updateAuthenticatedProfile(
     .prepare(
       `SELECT
          user_id, username, username_key, display_name, account_code,
+         COALESCE(bio, '') AS bio,
          email, email_key, email_verified,
          avatar_code, avatar_url, auth_provider, account_status,
          created_at, last_seen_at
@@ -1169,6 +1178,7 @@ export async function upgradeGuestAccountToRegistered(
       .prepare(
         `SELECT
            user_id, username, username_key, display_name, account_code,
+           COALESCE(bio, '') AS bio,
            email, email_key, email_verified,
            avatar_code, avatar_url, auth_provider, account_status,
            created_at, last_seen_at
@@ -1475,5 +1485,133 @@ export async function pruneExpiredAuthSessionsBatched(
 
   return totalDeleted;
 }
+
+/**
+ * Provisions a real, active, verified central Eyvan account & HttpOnly session automatically
+ * when Shop/App Test Mode is explicitly enabled (`SHOP_TEST_MODE`).
+ * Strictly enforces server-side uniqueness, pure 6-digit account_code, initialized wallet/inventory,
+ * and standard `auth_sessions` row.
+ */
+export async function createOrResumeTestModeSession(
+  db: D1DatabaseLike,
+  ctx: AuthRequestContext
+): Promise<AuthSessionResult> {
+  const now = ctx.now ?? Date.now();
+  const ttlSec = resolveAuthSessionTtlSec(ctx.sessionTtlSec);
+  const ipHash = await sha256Hex(`ip:${ctx.clientIp || 'unknown'}`);
+  const uaHash = await sha256Hex(`ua:${ctx.userAgent || 'unknown'}`);
+
+  const rlSlot = await consumeRateLimitSlot(
+    db,
+    `test_session:ip:${ipHash}`,
+    {
+      action: 'test_session_ip',
+      maxAttempts: 40,
+      windowMs: 15 * 60 * 1000,
+      blockMs: 5 * 60 * 1000,
+    },
+    now
+  );
+  if (!rlSlot.allowed) {
+    return {
+      ok: false,
+      status: 429,
+      code: 'RATE_LIMITED',
+      message: 'تعداد درخواست‌های ساخت نشست آزمایشی بیش از حد مجاز است.',
+      retryAfterSec: rlSlot.retryAfterSec,
+    };
+  }
+
+  let userId = '';
+  let username = '';
+  let usernameKey = '';
+  let accountCode = '';
+
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const suffix = generateOpaqueToken(4)
+      .replace(/[^a-zA-Z0-9]/g, '')
+      .slice(0, 6)
+      .toLowerCase() || String(Math.floor(100000 + Math.random() * 900000));
+    const candidateUsername = `player_${suffix}`.slice(0, 20);
+    const candidateKey = candidateUsername.toLowerCase();
+    const existing = await db
+      .prepare(`SELECT 1 AS hit FROM users WHERE username_key = ? LIMIT 1`)
+      .bind(candidateKey)
+      .first<{ hit: number }>();
+    if (!existing) {
+      userId = generatePrefixedId('usr', 12);
+      username = candidateUsername;
+      usernameKey = candidateKey;
+      accountCode = await allocateUniqueAccountCode(db);
+      break;
+    }
+  }
+
+  if (!userId) {
+    return {
+      ok: false,
+      status: 500,
+      code: 'DATABASE_ERROR',
+      message: 'خطا در ایجاد حساب آزمایشی یکتا.',
+    };
+  }
+
+  const sessionId = generatePrefixedId('ses', 12);
+  const rawSessionToken = generateOpaqueToken(32);
+  const tokenHash = await sha256Hex(rawSessionToken);
+  const expiresAt = now + ttlSec * 1000;
+
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO users (
+           user_id, username, username_key, display_name, account_code, bio,
+           email, email_key, email_verified,
+           avatar_code, avatar_url,
+           auth_provider, account_status,
+           created_at, last_seen_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, '', NULL, NULL, 1, 'portrait', NULL, 'password', 'active', ?, ?, ?)`
+      )
+      .bind(userId, username, usernameKey, username, accountCode, now, now, now),
+    db
+      .prepare(
+        `INSERT INTO auth_sessions (
+           session_id, user_id, token_hash, ip_hash, user_agent_hash,
+           created_at, last_seen_at, expires_at, revoked_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+      )
+      .bind(sessionId, userId, tokenHash, ipHash, uaHash, now, now, expiresAt),
+  ]);
+
+  await ensureUserInventoryInitialized(db, userId, now);
+
+  return {
+    ok: true,
+    status: 201,
+    user: {
+      userId,
+      username,
+      displayName: username,
+      accountCode,
+      bio: '',
+      email: null,
+      emailVerified: true,
+      avatarCode: 'portrait',
+      avatarUrl: null,
+      authProvider: 'password',
+      accountStatus: 'active',
+      createdAt: now,
+      lastSeenAt: now,
+    },
+    session: {
+      sessionId,
+      createdAt: now,
+      expiresAt,
+    },
+    rawSessionToken,
+    sessionTtlSec: ttlSec,
+  };
+}
+
 
 

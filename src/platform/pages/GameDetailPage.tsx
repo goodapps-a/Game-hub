@@ -59,6 +59,7 @@ interface GameDetailPageProps {
   onRequireAuth?: () => void;
   onInventorySync?: (inventory: ServerInventoryState) => void;
   onOpenFriendGroups?: () => void;
+  onInspectPlayer?: (userId: string) => void;
   onBack: () => void;
   onLaunchHokm: (req: GameHubLaunchRequest) => void;
   onOpenFullShop: (category?: ShopCategoryFilter) => void;
@@ -151,6 +152,7 @@ export const GameDetailPage: React.FC<GameDetailPageProps> = ({
   onRequireAuth,
   onInventorySync,
   onOpenFriendGroups,
+  onInspectPlayer,
   onBack,
   onLaunchHokm,
   onOpenFullShop,
@@ -830,6 +832,7 @@ export const GameDetailPage: React.FC<GameDetailPageProps> = ({
           <HokmLeaderboardTab
             currentUserId={currentUserId}
             onJumpToPlay={() => setSubView('modes')}
+            onInspectPlayer={onInspectPlayer}
           />
         )}
 

@@ -1261,10 +1261,14 @@ export class HokmRoomController {
         ? sanitizeSeatAppearance(m.appearance)
         : undefined;
 
+      const centralUserId =
+        m?.userId && !m.userId.startsWith('guest_') ? m.userId : null;
+
       return {
         visualSeat,
         canonicalSeat,
         playerId: m?.playerId ?? null,
+        ...(centralUserId ? { userId: centralUserId } : {}),
         username: m?.username ?? null,
         avatarCode: m?.avatarCode ?? 'portrait',
         ...(sanitizedAppearance ? { appearance: sanitizedAppearance } : {}),

@@ -24,9 +24,12 @@ import {
   hasAuthCookieInHeader,
   parseAuthCookieFromHeader,
 } from './authCookie';
+import { resolveShopTestModeEnabled } from '../../../../src/platform/items/shopTestMode';
+import { ensureUserInventoryInitialized } from '../items/inventoryService';
 import {
   checkEmailExists,
   checkUsernameAvailability,
+  createOrResumeTestModeSession,
   listActiveAuthSessions,
   listLinkedAuthProviders,
   loginWithCredentials,
@@ -85,6 +88,7 @@ export interface AuthHttpEnv {
   readonly now?: number;
   readonly publicAppBaseUrl?: string;
   readonly isProduction?: boolean;
+  readonly shopTestMode?: boolean | string;
   readonly emailSender?: EmailSender;
   readonly googleOAuth?: GoogleOAuthConfig;
 }
@@ -427,6 +431,106 @@ export async function handleAuthHttpRequest(
           message: 'خطا در بررسی وضعیت حساب کاربری.',
         },
         503,
+        env.corsHeaders
+      );
+    }
+  }
+
+  // 1b) POST /api/auth/test-session — Provision/resume verified central test account when shopTestMode is enabled
+  if (pathname === '/api/auth/test-session' && method === 'POST') {
+    const csrfErr = verifyMutatingCsrf(request, env, false);
+    if (csrfErr) return csrfErr;
+
+    if (!resolveShopTestModeEnabled(env.shopTestMode)) {
+      return buildAuthResponse(
+        {
+          ok: false,
+          code: 'FORBIDDEN_IN_LIVE_MODE',
+          message: 'ورود خودکار آزمایشی در حالت انتشار غیرفعال است.',
+        },
+        403,
+        env.corsHeaders
+      );
+    }
+
+    try {
+      const rawToken = parseAuthCookieFromHeader(request.headers.get('Cookie'));
+      if (rawToken) {
+        const verified = await verifyAuthSession(env.db, rawToken, now);
+        if (verified.authenticated && verified.user && verified.session) {
+          await ensureUserInventoryInitialized(env.db, verified.user.userId, now);
+          const providers = await listLinkedAuthProviders(env.db, verified.user.userId);
+          return buildAuthResponse(
+            {
+              ok: true,
+              authenticated: true,
+              resumed: true,
+              user: verified.user,
+              session: verified.session,
+              providers,
+            },
+            200,
+            env.corsHeaders
+          );
+        }
+      }
+
+      const result = await createOrResumeTestModeSession(env.db, {
+        clientIp: env.clientIp,
+        userAgent: env.userAgent,
+        now,
+        sessionTtlSec: ttlSec,
+      });
+
+      if (result.ok === false) {
+        const extra =
+          result.retryAfterSec !== undefined
+            ? { 'Retry-After': String(result.retryAfterSec) }
+            : undefined;
+        return buildAuthResponse(
+          {
+            ok: false,
+            code: result.code,
+            message: result.message,
+          },
+          result.status,
+          env.corsHeaders,
+          extra
+        );
+      }
+
+      const setCookie = buildSetAuthCookieHeader(
+        result.rawSessionToken,
+        env.secureCookie,
+        result.sessionTtlSec,
+        env.cookieOptions
+      );
+
+      return buildAuthResponse(
+        {
+          ok: true,
+          authenticated: true,
+          resumed: false,
+          user: result.user,
+          session: result.session,
+          providers: ['password'],
+        },
+        result.status,
+        env.corsHeaders,
+        { 'Set-Cookie': setCookie }
+      );
+    } catch (err) {
+      console.error(
+        '[Auth] /api/auth/test-session error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      return buildAuthResponse(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'خطا در ایجاد نشست آزمایشی.',
+        },
+        500,
         env.corsHeaders
       );
     }

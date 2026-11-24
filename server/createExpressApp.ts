@@ -371,6 +371,7 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
         sessionTtlSec: config.authSessionTtlSec,
         publicAppBaseUrl: publicAppBaseUrl ?? undefined,
         isProduction: config.isProduction,
+        shopTestMode: config.shopTestMode ?? process.env.SHOP_TEST_MODE,
         emailSender,
         googleOAuth: {
           clientId: config.googleOAuthClientId,

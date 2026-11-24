@@ -392,6 +392,11 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
       }
       setPassword('');
       setIdentifier('');
+      try {
+        window.sessionStorage.removeItem('eyvan_test_logged_out');
+      } catch {
+        // Ignore storage restriction
+      }
       onAuthChange(res.user);
       setInfoMsg('با موفقیت وارد حساب کاربری خود شدید.');
     } catch (err) {
@@ -422,6 +427,11 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
       setPassword('');
       setConfirmPassword('');
       setResendEmail(email.trim());
+      try {
+        window.sessionStorage.removeItem('eyvan_test_logged_out');
+      } catch {
+        // Ignore storage restriction
+      }
       setMode('pending_verify');
       setInfoMsg(
         res.message ??
@@ -539,6 +549,11 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
         setErrorMsg(res.message ?? 'خطا در خروج از حساب کاربری.');
         return;
       }
+      try {
+        window.sessionStorage.setItem('eyvan_test_logged_out', '1');
+      } catch {
+        // Ignore storage restriction
+      }
       onAuthChange(null);
       setInfoMsg(
         'از حساب کاربری خارج شدید. همچنان می‌توانید به‌صورت مهمان بازی کنید.'
@@ -559,6 +574,11 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
       if (!res.ok) {
         setErrorMsg(res.message ?? 'خطا در لغو نشست‌ها.');
         return;
+      }
+      try {
+        window.sessionStorage.setItem('eyvan_test_logged_out', '1');
+      } catch {
+        // Ignore storage restriction
       }
       onAuthChange(null);
       setInfoMsg('تمام نشست‌های فعال حساب شما لغو شدند.');
@@ -581,6 +601,11 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
       }
       const me = await fetchCurrentAuthSession();
       if (me.ok && me.authenticated && me.user) {
+        try {
+          window.sessionStorage.removeItem('eyvan_test_logged_out');
+        } catch {
+          // Ignore storage restriction
+        }
         onAuthChange(me.user);
         if (Array.isArray(me.providers)) {
           setLinkedProviders(me.providers);
@@ -613,6 +638,11 @@ export const AccountAuthPanel: React.FC<AccountAuthPanelProps> = ({
         return;
       }
       if (res.revokedCurrentSession) {
+        try {
+          window.sessionStorage.setItem('eyvan_test_logged_out', '1');
+        } catch {
+          // Ignore storage restriction
+        }
         onAuthChange(null);
         setInfoMsg('نشست فعلی لغو شد.');
         return;

@@ -291,6 +291,10 @@ export function getItemCategoryLabel(
   }
 }
 
+export function getItemKindLabelFa(kind?: string | null): string {
+  return getItemCategoryLabel(kind as UniversalItemDefinition['kind'] | null);
+}
+
 export {
   DEFAULT_EQUIPPED_SLOTS,
   extractDeckIdFromItemId,

@@ -83,6 +83,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
     west: 0,
   });
   const [flyingDealCards, setFlyingDealCards] = useState<FlyingDealCard[]>([]);
+  const [remainingDeckCount, setRemainingDeckCount] = useState<number>(52);
   const [southDealCards, setSouthDealCards] = useState<Card[]>([]);
   const [southHandSorted, setSouthHandSorted] = useState(false);
   const [handGathered, setHandGathered] = useState(false);
@@ -250,15 +251,18 @@ export const HokmGame: React.FC<HokmGameProps> = ({
       dealSequence: Array<{ seat: Seat; card: Card }>,
       startingCounts: Record<Seat, number>,
       startingSouthCards: readonly Card[],
+      startingDeckCount: number,
       waveTag: string,
       expectedRunId: number,
       onComplete: (finalCounts: Record<Seat, number>) => void
     ) => {
       setIsDealingAnim(true);
-      const stepDelay = reducedMotionRef.current ? 12 : 108;
-      const flyDuration = reducedMotionRef.current ? 50 : 295;
+      const stepDelay = reducedMotionRef.current ? 12 : 102;
+      const flyDuration = reducedMotionRef.current ? 50 : 285;
       const runningCounts: Record<Seat, number> = { ...startingCounts };
       const runningSouthCards: Card[] = [...startingSouthCards];
+      let runningDeck = startingDeckCount;
+      setRemainingDeckCount(runningDeck);
       southDealCardsRef.current = runningSouthCards;
       setSouthDealCards([...runningSouthCards]);
 
@@ -266,9 +270,14 @@ export const HokmGame: React.FC<HokmGameProps> = ({
         schedule(
           () => {
             const flyId = `deal-${expectedRunId}-${waveTag}-${idx}-${entry.seat}`;
+            const baseDir =
+              entry.seat === 'south' || entry.seat === 'east' ? 1 : -1;
+            const spinDeg = baseDir * (175 + ((idx % 3) - 1) * 18);
+            runningDeck = Math.max(0, runningDeck - 1);
+            setRemainingDeckCount(runningDeck);
             setFlyingDealCards((prev) => [
               ...prev.slice(-6),
-              { id: flyId, targetSeat: entry.seat },
+              { id: flyId, targetSeat: entry.seat, spinDeg },
             ]);
             hokmSound.playDealTick();
             runningCounts[entry.seat] += 1;
@@ -295,6 +304,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
       schedule(
         () => {
           setFlyingDealCards([]);
+          setRemainingDeckCount(Math.max(0, startingDeckCount - dealSequence.length));
           onComplete({ ...runningCounts });
         },
         dealSequence.length * stepDelay + flyDuration + 35,
@@ -358,6 +368,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
       setTrickCollectPhase('idle');
       setCollectingWinnerTeam(null);
       setFlyingDealCards([]);
+      setRemainingDeckCount(52);
       southDealCardsRef.current = [];
       setSouthDealCards([]);
       setSouthHandSorted(false);
@@ -379,6 +390,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
             dealSequence,
             { south: 0, east: 0, north: 0, west: 0 },
             [],
+            52,
             'init5',
             runId,
             () => {
@@ -444,6 +456,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
             continuousEightSequence,
             { south: 5, east: 5, north: 5, west: 5 },
             existingUnsortedFive,
+            32,
             'wave8',
             runId,
             () => {
@@ -699,6 +712,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
       reducedMotion={reducedMotion}
       canHumanPlay={canHumanPlay}
       exitConfirmOpen={exitConfirmOpen}
+      deckCount={remainingDeckCount}
       onPlayCard={handleHumanPlayCard}
       onChooseTrump={handleChooseTrump}
       onRequestExit={handleRequestExit}

@@ -936,7 +936,7 @@ describe('Stage 10 Audit & Staging Readiness Verification', () => {
       const freshPath = path.join(dir, 'fresh.sqlite');
       const freshRaw = new Database(freshPath);
       const freshApplied = runDatabaseMigrations(freshRaw);
-      assert.equal(freshApplied.applied.length, 14);
+      assert.equal(freshApplied.applied.length, 15);
 
       // Verify all 9 indexes from 0012 exist
       const idxRows = freshRaw

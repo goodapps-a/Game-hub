@@ -20,6 +20,7 @@ export interface UserProfile {
   /** Public 6-digit random account identifier for logged-in accounts */
   accountCode?: string | null;
   username: string;
+  bio?: string;
   avatarCode: 'portrait' | 'shamsa' | 'turquoise' | 'lapis' | 'jade';
   customAvatarUrl?: string | null;
   bannerCode?: ProfileBannerCode;

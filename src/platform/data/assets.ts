@@ -4,7 +4,7 @@ import hokmHeroLightImg from '../../assets/images/opt/hokm_hero_light.jpg';
 import chessArtImg from '../../assets/images/opt/chess.jpg';
 import chessArtLightImg from '../../assets/images/chess_light_v2_1795523506723.jpg';
 import backgammonArtImg from '../../assets/images/opt/backgammon.jpg';
-import backgammonArtLightImg from '../../assets/images/backgammon_light_v2_1795523499985.jpg';
+import backgammonArtLightImg from '../../assets/images/backgammon_light_v3_1795528111068.jpg';
 import ludoArtImg from '../../assets/images/opt/ludo.jpg';
 import ludoArtLightImg from '../../assets/images/ludo_light_v2_1795523501233.jpg';
 import pasoorArtImg from '../../assets/images/opt/pasoor.jpg';

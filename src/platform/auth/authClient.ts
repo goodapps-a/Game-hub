@@ -13,6 +13,7 @@ import { buildOnlineHttpUrl } from '../../games/hokm/online/client';
 export interface AuthUserSummary {
   readonly userId: string;
   readonly accountCode?: string | null;
+  readonly bio?: string;
   readonly username: string;
   readonly displayName: string;
   readonly email: string | null;
@@ -189,6 +190,20 @@ export async function fetchCurrentAuthSession(): Promise<AuthMeResponse> {
     headers: { Accept: 'application/json' },
   });
   return parseAuthJson<AuthMeResponse>(res, 'خطا در بررسی وضعیت حساب کاربری.');
+}
+
+export async function requestTestModeSessionApi(): Promise<AuthMutationResponse> {
+  const res = await fetch(buildOnlineHttpUrl('/api/auth/test-session'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'X-Requested-With': 'eyvan-client',
+    },
+  });
+  return parseAuthJson<AuthMutationResponse>(
+    res,
+    'خطا در ایجاد نشست آزمایشی.'
+  );
 }
 
 export async function registerAccount(input: {
@@ -390,6 +405,7 @@ export async function checkEmailExistsRequest(
 export async function updateAccountProfileRequest(input: {
   username: string;
   avatarCode: string;
+  bio?: string;
 }): Promise<AuthMutationResponse> {
   const res = await fetch(buildOnlineHttpUrl('/api/auth/profile'), {
     method: 'POST',
