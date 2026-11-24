@@ -720,74 +720,142 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
     );
   };
 
+  const [showInviteTray, setShowInviteTray] = useState(false);
+
   return (
     <section
-      className="eyvan-card rounded-2xl overflow-hidden flex flex-col border border-[var(--eyvan-gold-border)]"
+      className="fixed inset-0 z-50 flex flex-col bg-[var(--eyvan-bg)] text-[var(--eyvan-text)]"
       data-testid="private-chat-panel"
     >
-      {/* Chat Header */}
-      <header className="px-4 py-3 border-b border-[var(--eyvan-line)] flex items-center justify-between gap-3 bg-black/15">
-        <button
-          type="button"
-          onClick={() => onInspectPlayer?.(conversation.partner.userId)}
-          disabled={!onInspectPlayer}
-          className={`flex items-center gap-3 min-w-0 text-right ${
-            onInspectPlayer ? 'cursor-pointer hover:opacity-90 transition-opacity' : ''
-          }`}
-        >
-          <div className="relative shrink-0">
-            <ProfileAvatar
-              avatarCode={toValidAvatarCode(conversation.partner.avatarCode)}
-              username={conversation.partner.username}
-              size="sm"
-            />
-            <span
-              className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[var(--eyvan-surface)] ${
-                conversation.partner.onlineStatus === 'online'
-                  ? 'bg-[#22C55E]'
-                  : 'bg-[#64748B]'
-              }`}
-            />
-          </div>
-
-          <div className="min-w-0">
-            <div
-              dir="ltr"
-              className="text-sm font-extrabold theme-heading truncate text-right"
-              data-testid="chat-partner-username"
-            >
-              {conversation.partner.username}
-            </div>
-            <div className="text-[11px] theme-muted">
-              {conversation.partner.onlineStatus === 'online'
-                ? 'آنلاین'
-                : 'آفلاین'}
-            </div>
-          </div>
-        </button>
-
-        <div className="flex items-center gap-2 shrink-0">
-          <span className="hidden sm:inline-flex items-center gap-1.5 text-[11px] font-bold theme-accent-teal shrink-0">
-            <MessageSquare className="w-3.5 h-3.5" />
-            <span>گفتگوی خصوصی</span>
-          </span>
-
+      {/* Telegram-Style Sticky Top Header */}
+      <header className="h-14 shrink-0 px-2.5 sm:px-4 border-b border-[var(--eyvan-line)] theme-drawer flex items-center justify-between gap-2 shadow-sm">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
           <button
             type="button"
             onClick={onClose}
             data-testid="chat-close-btn"
-            aria-label="بازگشت به لیست دوستان"
-            className="min-h-[36px] px-2.5 rounded-xl theme-btn-secondary border inline-flex items-center gap-1 text-xs font-extrabold shrink-0 cursor-pointer"
+            aria-label="بازگشت به لیست گفتگوها"
+            className="w-9 h-9 rounded-full hover:bg-white/8 flex items-center justify-center theme-heading shrink-0 cursor-pointer transition-colors"
           >
-            <span>بازگشت</span>
-            <ArrowLeft className="w-4 h-4 shrink-0" />
+            <ArrowLeft className="w-5 h-5 rotate-180" />
           </button>
+
+          <button
+            type="button"
+            onClick={() => onInspectPlayer?.(conversation.partner.userId)}
+            disabled={!onInspectPlayer}
+            className={`flex items-center gap-2.5 min-w-0 flex-1 text-right py-1 ${
+              onInspectPlayer ? 'cursor-pointer hover:opacity-90 transition-opacity' : ''
+            }`}
+          >
+            <div className="relative shrink-0">
+              <ProfileAvatar
+                avatarCode={toValidAvatarCode(conversation.partner.avatarCode)}
+                username={conversation.partner.username}
+                size="sm"
+              />
+              {conversation.partner.onlineStatus === 'online' && (
+                <span
+                  aria-label="آنلاین"
+                  className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[var(--eyvan-bg)] bg-[#22C55E] shadow-[0_0_6px_rgba(34,197,94,0.8)]"
+                />
+              )}
+            </div>
+
+            <div className="min-w-0 flex-1">
+              <div
+                dir="ltr"
+                className="text-sm font-black theme-heading truncate text-right leading-tight"
+                data-testid="chat-partner-username"
+              >
+                {conversation.partner.username}
+              </div>
+              <div
+                className={`text-[11px] font-bold leading-tight mt-0.5 ${
+                  conversation.partner.onlineStatus === 'online'
+                    ? 'text-[#22C55E]'
+                    : 'theme-muted'
+                }`}
+              >
+                {conversation.partner.onlineStatus === 'online'
+                  ? 'آنلاین'
+                  : 'آفلاین'}
+              </div>
+            </div>
+          </button>
+        </div>
+
+        <div className="flex items-center gap-1.5 shrink-0">
+          {!revoked && (
+            <button
+              type="button"
+              onClick={() => setShowInviteTray((prev) => !prev)}
+              aria-label="دعوت به بازی"
+              data-testid="chat-invite-toggle-btn"
+              className={`h-9 px-2.5 rounded-full border text-[11px] font-extrabold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                showInviteTray
+                  ? 'bg-[#0D8A8A]/20 border-[#2CC5BE]/60 text-[#2CC5BE]'
+                  : 'theme-btn-secondary'
+              }`}
+            >
+              <Gamepad2 className="w-4 h-4 shrink-0" />
+              <span className="hidden sm:inline">دعوت بازی</span>
+            </button>
+          )}
         </div>
       </header>
 
+      {/* Collapsible 2-Player Invite Drawer */}
+      {!revoked && showInviteTray && (
+        <div className="shrink-0 px-3.5 py-2.5 border-b border-[var(--eyvan-line)] theme-subcard space-y-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-bold theme-muted inline-flex items-center gap-1 ml-1">
+              <Gamepad2 className="w-3.5 h-3.5 theme-accent-teal shrink-0" />
+              <span>دعوت دونفره:</span>
+            </span>
+            {TWO_PLAYER_GAMES.map((g) => (
+              <button
+                key={g.id}
+                type="button"
+                disabled={offline}
+                data-testid={`pv-invite-${g.id}`}
+                onClick={() => {
+                  handleSendTwoPlayerInvite(g.id, g.label);
+                  setShowInviteTray(false);
+                }}
+                className="min-h-[30px] px-2.5 rounded-xl theme-btn-secondary border text-[11px] font-extrabold hover:border-[var(--eyvan-teal)] cursor-pointer disabled:opacity-50"
+              >
+                {g.label}
+              </button>
+            ))}
+          </div>
+
+          <div
+            data-testid="pv-hokm-group-notice"
+            className="flex flex-wrap items-center justify-between gap-2 text-[11px] theme-muted"
+          >
+            <span>حکم بازی ۴ نفره است — برای دعوت دوستان، گروه بسازید.</span>
+            {onOpenFriendGroups && (
+              <button
+                type="button"
+                data-testid="pv-go-to-groups-btn"
+                onClick={() => {
+                  setShowInviteTray(false);
+                  onOpenFriendGroups();
+                }}
+                className="inline-flex items-center gap-1 font-extrabold theme-accent-gold hover:underline cursor-pointer shrink-0"
+              >
+                <Users className="w-3 h-3 shrink-0" />
+                <span>گروه‌های دوستان</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Offline banner */}
       {offline && (
-        <div className="px-4 py-2 bg-amber-500/15 border-b border-amber-500/30 text-xs font-bold text-amber-300 flex items-center gap-2">
+        <div className="shrink-0 px-4 py-2 bg-amber-500/15 border-b border-amber-500/30 text-xs font-bold text-amber-300 flex items-center gap-2">
           <WifiOff className="w-3.5 h-3.5 shrink-0" />
           <span>اتصال اینترنت قطع است. پیام‌ها پس از اتصال مجدد همگام‌سازی می‌شوند.</span>
         </div>
@@ -798,16 +866,16 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
         <div
           role="alert"
           data-testid="chat-error-banner"
-          className="px-4 py-2.5 bg-red-500/12 border-b border-red-500/30 text-xs font-bold text-red-400 flex items-center gap-2"
+          className="shrink-0 px-4 py-2 bg-red-500/12 border-b border-red-500/30 text-xs font-bold text-red-400 flex items-center gap-2"
         >
           <AlertCircle className="w-4 h-4 shrink-0" />
           <span>{errorMsg}</span>
         </div>
       )}
 
-      {/* Messages List */}
+      {/* Full-Height Telegram Message Stream */}
       <div
-        className="flex-1 min-h-[280px] max-h-[420px] overflow-y-auto px-4 py-3 space-y-2.5"
+        className="flex-1 overflow-y-auto px-3 sm:px-5 py-3 space-y-2 max-w-3xl w-full mx-auto"
         data-testid="chat-messages-list"
       >
         {hasMore && (
@@ -817,29 +885,32 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
               disabled={loadingOlder}
               onClick={() => void handleLoadOlder()}
               data-testid="chat-load-older-btn"
-              className="min-h-[34px] px-3.5 rounded-xl theme-btn-secondary border text-xs font-bold cursor-pointer disabled:opacity-50 inline-flex items-center gap-1.5"
+              className="min-h-[32px] px-3.5 rounded-full theme-btn-secondary border text-xs font-bold cursor-pointer disabled:opacity-50 inline-flex items-center gap-1.5"
             >
               {loadingOlder && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              <span>بارگذاری پیام‌های قدیمی‌تر</span>
+              <span>پیام‌های قدیمی‌تر</span>
             </button>
           </div>
         )}
 
         {loading ? (
-          <div className="py-12 flex items-center justify-center gap-2 theme-muted text-xs font-bold">
+          <div className="py-16 flex items-center justify-center gap-2 theme-muted text-xs font-bold">
             <Loader2 className="w-4 h-4 animate-spin theme-accent-teal" />
             <span>در حال دریافت پیام‌ها...</span>
           </div>
         ) : messages.length === 0 ? (
           <div
-            className="py-12 text-center space-y-1.5"
+            className="py-16 text-center space-y-1.5"
             data-testid="chat-empty-state"
           >
-            <p className="text-xs font-bold theme-heading">
-              هنوز پیامی ردوبدل نشده است.
+            <div className="w-12 h-12 mx-auto rounded-full theme-subcard border border-[var(--eyvan-line)] flex items-center justify-center mb-2">
+              <MessageSquare className="w-5 h-5 theme-accent-teal" />
+            </div>
+            <p className="text-xs font-extrabold theme-heading">
+              هنوز پیامی ارسال نشده است
             </p>
             <p className="text-[11px] theme-muted">
-              اولین پیام را برای شروع گفتگو ارسال کنید.
+              اولین پیام را بنویسید تا گفتگو شروع شود.
             </p>
           </div>
         ) : (
@@ -855,13 +926,13 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
                 className={`flex ${isMine ? 'justify-start' : 'justify-end'}`}
               >
                 <div
-                  className={`max-w-[82%] rounded-2xl px-3.5 py-2.5 text-xs sm:text-sm leading-relaxed break-words whitespace-pre-wrap border ${
+                  className={`max-w-[82%] sm:max-w-[72%] rounded-2xl px-3.5 py-2 text-[13px] sm:text-sm leading-relaxed break-words whitespace-pre-wrap border shadow-xs ${
                     isMine
                       ? msg.localStatus === 'failed'
-                        ? 'bg-red-500/12 border-red-500/40 theme-heading rounded-tr-sm'
+                        ? 'bg-red-500/14 border-red-500/40 theme-heading rounded-tr-sm'
                         : msg.kind === 'game_invite'
-                          ? 'bg-[#D4AE58]/16 border-[#D4AE58]/45 theme-heading rounded-tr-sm'
-                          : 'bg-[#0D8A8A]/22 border-[#0D8A8A]/45 theme-heading rounded-tr-sm'
+                          ? 'bg-[#D4AE58]/18 border-[#D4AE58]/45 theme-heading rounded-tr-sm'
+                          : 'bg-[#0D8A8A]/24 border-[#2CC5BE]/35 theme-heading rounded-tr-sm'
                       : msg.kind === 'game_invite'
                         ? 'bg-[#0D8A8A]/12 border-[#0D8A8A]/35 theme-heading rounded-tl-sm'
                         : 'theme-subcard border-[var(--eyvan-line)] theme-heading rounded-tl-sm'
@@ -890,8 +961,8 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
                     </div>
                   )}
 
-                  <div className="mt-1 flex items-center justify-end gap-1 text-[10px] theme-muted">
-                    <span>{formatMessageTime(msg.createdAt)}</span>
+                  <div className="mt-0.5 flex items-center justify-end gap-1 text-[10px] theme-muted">
+                    <span className="tabular-nums">{formatMessageTime(msg.createdAt)}</span>
                     {isMine && msg.localStatus === 'sending' && (
                       <Clock
                         className="w-3 h-3 opacity-70"
@@ -922,90 +993,51 @@ export const PrivateChatPanel: React.FC<PrivateChatPanelProps> = ({
         <div ref={bottomRef} />
       </div>
 
-      {/* 2-Player Direct Invites + 4-Player Hokm Group Notice */}
-      {!revoked && (
-        <div className="px-3 py-2 border-t border-[var(--eyvan-line)] bg-black/5 space-y-1.5">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[11px] font-bold theme-muted inline-flex items-center gap-1 ml-1">
-              <Gamepad2 className="w-3.5 h-3.5 theme-accent-teal shrink-0" />
-              <span>دعوت دونفره:</span>
-            </span>
-            {TWO_PLAYER_GAMES.map((g) => (
-              <button
-                key={g.id}
-                type="button"
-                disabled={offline}
-                data-testid={`pv-invite-${g.id}`}
-                onClick={() => handleSendTwoPlayerInvite(g.id, g.label)}
-                className="min-h-[28px] px-2.5 rounded-lg theme-btn-secondary border text-[11px] font-extrabold hover:border-[var(--eyvan-teal)] cursor-pointer disabled:opacity-50"
-              >
-                {g.label}
-              </button>
-            ))}
-          </div>
-
-          <div
-            data-testid="pv-hokm-group-notice"
-            className="flex flex-wrap items-center justify-between gap-2 text-[11px] theme-muted"
-          >
-            <span>حکم بازی ۴ نفره است — برای دعوت دوستان، گروه بسازید.</span>
-            {onOpenFriendGroups && (
-              <button
-                type="button"
-                data-testid="pv-go-to-groups-btn"
-                onClick={onOpenFriendGroups}
-                className="inline-flex items-center gap-1 font-extrabold theme-accent-gold hover:underline cursor-pointer shrink-0"
-              >
-                <Users className="w-3 h-3 shrink-0" />
-                <span>رفتن به گروه‌های دوستان</span>
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Composer */}
+      {/* Pinned Telegram Bottom Composer */}
       <form
         onSubmit={handleSend}
-        className="p-3 border-t border-[var(--eyvan-line)] bg-black/10 flex items-end gap-2"
+        className="shrink-0 px-3 py-2.5 border-t border-[var(--eyvan-line)] theme-drawer"
+        style={{ paddingBottom: 'max(0.625rem, env(safe-area-inset-bottom))' }}
       >
-        <div className="flex-1 min-w-0">
-          <textarea
-            value={draft}
-            disabled={revoked}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                void handleSend(e);
+        <div className="max-w-3xl mx-auto flex items-end gap-2">
+          <div className="flex-1 min-w-0">
+            <textarea
+              value={draft}
+              disabled={revoked}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  void handleSend(e);
+                }
+              }}
+              rows={1}
+              maxLength={MAX_CHAT_CHARS}
+              placeholder={
+                revoked
+                  ? 'امکان ارسال پیام در این گفتگو فعال نیست.'
+                  : 'پیام...'
               }
-            }}
-            rows={1}
-            maxLength={MAX_CHAT_CHARS}
-            placeholder={
-              revoked
-                ? 'امکان ارسال پیام در این گفتگو فعال نیست.'
-                : 'پیام خود را بنویسید...'
-            }
-            data-testid="chat-message-input"
-            className="w-full min-h-[42px] max-h-[110px] px-3 py-2.5 rounded-xl theme-input border text-xs sm:text-sm focus:outline-none focus:border-[#0D8A8A] resize-none disabled:opacity-50"
-          />
-          {draft.length > 1600 && (
-            <div className="text-[10px] theme-muted text-left mt-0.5 px-1">
-              {toPersianDigits(draft.length)} / {toPersianDigits(MAX_CHAT_CHARS)}
-            </div>
-          )}
-        </div>
+              data-testid="chat-message-input"
+              className="w-full min-h-[42px] max-h-[112px] px-4 py-2.5 rounded-3xl theme-input border text-sm focus:outline-none focus:border-[#0D8A8A] resize-none disabled:opacity-50"
+            />
+            {draft.length > 1600 && (
+              <div className="text-[10px] theme-muted text-left mt-0.5 px-2">
+                {toPersianDigits(draft.length)} / {toPersianDigits(MAX_CHAT_CHARS)}
+              </div>
+            )}
+          </div>
 
-        <button
-          type="submit"
-          disabled={draft.trim().length === 0 || offline || revoked}
-          data-testid="chat-send-btn"
-          className="min-h-[42px] px-4 rounded-xl bg-gradient-to-b from-[#F3D179] to-[#C89B3C] hover:from-[#F8DD94] hover:to-[#D4AE58] disabled:opacity-50 text-[#0B1628] text-xs font-extrabold inline-flex items-center gap-1.5 shrink-0 cursor-pointer"
-        >
-          <Send className="w-4 h-4" />
-          <span>ارسال</span>
-        </button>
+          <button
+            type="submit"
+            disabled={draft.trim().length === 0 || offline || revoked}
+            data-testid="chat-send-btn"
+            aria-label="ارسال پیام"
+            className="w-[42px] h-[42px] rounded-full bg-gradient-to-b from-[#F3D179] to-[#C89B3C] hover:from-[#F8DD94] hover:to-[#D4AE58] disabled:opacity-40 text-[#0B1628] flex items-center justify-center shrink-0 cursor-pointer shadow-sm transition-opacity"
+          >
+            <Send className="w-4 h-4 -translate-x-[1px]" />
+          </button>
+        </div>
       </form>
     </section>
   );

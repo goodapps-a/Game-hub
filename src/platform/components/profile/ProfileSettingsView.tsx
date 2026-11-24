@@ -4,7 +4,6 @@ import {
   Check,
   ChevronLeft,
   Copy,
-  Gamepad2,
   Globe,
   HelpCircle,
   Info,
@@ -16,7 +15,6 @@ import {
   User,
 } from 'lucide-react';
 import { AuthUserSummary, PendingAuthUrlAction } from '../../auth/authClient';
-import { ANIMATION_SPEED_LABELS, AnimationSpeed } from '../../theme/tokens';
 import { UserProfile } from '../../types/platform';
 import { AccountAuthPanel } from '../AccountAuthPanel';
 import { PWAInstallButton } from '../PWAInstallButton';
@@ -72,7 +70,6 @@ const SETTINGS_GROUPS: ReadonlyArray<
   ],
   [
     { id: 'language', label: 'زبان', icon: Globe },
-    { id: 'games', label: 'بازی‌ها', icon: Gamepad2 },
     { id: 'notifications', label: 'اعلان‌ها و صدا', icon: Bell },
     { id: 'privacy', label: 'حریم خصوصی و دسترسی‌پذیری', icon: Lock },
     { id: 'themes', label: 'ظاهر و تم', icon: Palette },
@@ -122,8 +119,10 @@ export const ProfileSettingsView: React.FC<ProfileSettingsViewProps> = ({
   onSelectSection,
 }) => {
   const [copiedCode, setCopiedCode] = useState(false);
-  const { themeMode, soundEnabled, reducedMotion, animationSpeed } =
+  const { themeMode, soundEnabled, musicEnabled, sfxEnabled, reducedMotion } =
     profile.appSettings;
+  const effectiveMusic = musicEnabled ?? soundEnabled;
+  const effectiveSfx = sfxEnabled ?? soundEnabled;
 
   const accountCode = authUser?.accountCode ?? profile.accountCode ?? '------';
 
@@ -220,61 +219,45 @@ export const ProfileSettingsView: React.FC<ProfileSettingsViewProps> = ({
         </div>
       )}
 
-      {activeSection === 'games' && (
-        <div className="rounded-2xl theme-subcard border p-4 space-y-3.5">
-          <div>
-            <div className="text-sm font-black theme-heading">
-              سرعت حرکت کارت‌ها در بازی حکم
-            </div>
-            <p className="text-xs theme-muted mt-1">
-              سرعت پخش ورق و جمع‌آوری دست‌ها را متناسب با سبک بازی خود تنظیم کنید.
-            </p>
-          </div>
-          <div className="grid grid-cols-3 gap-1 p-1 theme-tab-track rounded-xl">
-            {(['slow', 'normal', 'fast'] as AnimationSpeed[]).map((spd) => {
-              const active = animationSpeed === spd;
-              return (
-                <button
-                  key={spd}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() =>
-                    onUpdateProfile((prev) => ({
-                      ...prev,
-                      appSettings: {
-                        ...prev.appSettings,
-                        animationSpeed: spd,
-                      },
-                    }))
-                  }
-                  className={`min-h-[42px] rounded-lg text-xs font-extrabold cursor-pointer transition-colors ${
-                    active
-                      ? 'bg-gradient-to-b from-[#F3D179] to-[#C89B3C] text-[#0B1528]'
-                      : 'theme-muted hover:text-[var(--eyvan-text)]'
-                  }`}
-                >
-                  {ANIMATION_SPEED_LABELS[spd]}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
       {activeSection === 'notifications' && (
         <div className="rounded-2xl theme-subcard border px-4 divide-y divide-[var(--eyvan-line)]">
           <ToggleSwitchRow
-            title="صدای افکت‌های بازی و موسیقی"
-            desc="پخش صدای ورق‌ها، موسیقی پس‌زمینه و جلوه‌های صوتی میز حکم"
-            checked={soundEnabled}
+            title="موسیقی پس‌زمینه"
+            desc="پخش موسیقی آرام پس‌زمینه در منوها و میز بازی"
+            checked={effectiveMusic}
             onToggle={() =>
-              onUpdateProfile((prev) => ({
-                ...prev,
-                appSettings: {
-                  ...prev.appSettings,
-                  soundEnabled: !prev.appSettings.soundEnabled,
-                },
-              }))
+              onUpdateProfile((prev) => {
+                const nextMusic = !(
+                  prev.appSettings.musicEnabled ?? prev.appSettings.soundEnabled
+                );
+                return {
+                  ...prev,
+                  appSettings: {
+                    ...prev.appSettings,
+                    musicEnabled: nextMusic,
+                  },
+                };
+              })
+            }
+          />
+          <ToggleSwitchRow
+            title="افکت‌های صوتی بازی"
+            desc="صدای پخش ورق، بازی کارت، بریدن حکم و امتیازها"
+            checked={effectiveSfx}
+            onToggle={() =>
+              onUpdateProfile((prev) => {
+                const nextSfx = !(
+                  prev.appSettings.sfxEnabled ?? prev.appSettings.soundEnabled
+                );
+                return {
+                  ...prev,
+                  appSettings: {
+                    ...prev.appSettings,
+                    soundEnabled: nextSfx,
+                    sfxEnabled: nextSfx,
+                  },
+                };
+              })
             }
           />
         </div>

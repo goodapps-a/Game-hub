@@ -14,7 +14,10 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import { AuthUserSummary } from '../../auth/authClient';
+import {
+  AuthUserSummary,
+  updateAccountProfileRequest,
+} from '../../auth/authClient';
 import { PLATFORM_ASSETS } from '../../data/assets';
 import { saveLocalCosmetics } from '../../data/guestDefaults';
 import {
@@ -22,6 +25,7 @@ import {
   getBannerVisual,
   getItemKindLabelFa,
 } from '../../items/itemCatalog';
+import { ItemSlot } from '../../items/itemTypes';
 import { toPersianDigits } from '../../theme/tokens';
 import { ProfileBannerCode, UserProfile } from '../../types/platform';
 import {
@@ -41,6 +45,9 @@ interface ProfileOverviewProps {
   profile: UserProfile;
   authUser: AuthUserSummary | null;
   onUpdateProfile: (updater: (prev: UserProfile) => UserProfile) => void;
+  onAuthChange?: (user: AuthUserSummary | null) => void;
+  onEquipItemById?: (itemId: string) => void;
+  onUnequipSlot?: (slot: ItemSlot) => void;
   onNavigate: (view: ProfileSubView) => void;
   onOpenAuth?: (mode: 'login' | 'register') => void;
   onOpenBannerShop?: () => void;
@@ -97,6 +104,9 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
   profile,
   authUser,
   onUpdateProfile,
+  onAuthChange,
+  onEquipItemById,
+  onUnequipSlot,
   onNavigate,
   onOpenAuth,
   onOpenBannerShop,
@@ -105,11 +115,22 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
   const [copiedId, setCopiedId] = useState(false);
   const [lightbox, setLightbox] = useState<'avatar' | 'banner' | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [editingBio, setEditingBio] = useState(false);
+  const [bioDraft, setBioDraft] = useState('');
+  const [savingBio, setSavingBio] = useState(false);
 
   const avatarFileRef = useRef<HTMLInputElement | null>(null);
+  const bioInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   const xp = computeXpProgress(profile.xp, profile.xpToNextLevel);
   const stats = computeWinRateSummary(profile.stats);
+  const accountAgeDays = useMemo(() => {
+    const createdMs = authUser?.createdAt;
+    if (typeof createdMs === 'number' && createdMs > 0) {
+      return Math.max(1, Math.floor((Date.now() - createdMs) / 86_400_000) + 1);
+    }
+    return 1;
+  }, [authUser?.createdAt]);
 
   // Strictly display 6-digit numeric account code — never raw UUID or guest_ prefix
   const numericAccountCode =
@@ -154,12 +175,29 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
       .map((item) => ({
         id: item.id,
         name: item.name,
+        kind: item.kind,
         kindLabel: getItemKindLabelFa(item.kind),
         imageSrc: item.imageSrc,
         accent: item.palette[0],
-        equipped: equippedValues.has(item.id),
+        accentSecondary: item.palette[1] ?? item.palette[0],
+        isEquippable: Boolean(item.isEquippable && item.slot),
+        equipped:
+          equippedValues.has(item.id) ||
+          (item.slot === 'table_skin' && profile.equippedTableSkinId === item.id) ||
+          (item.slot === 'card_deck' &&
+            item.deckId === profile.equippedDeckId) ||
+          (item.slot === 'banner' &&
+            profile.bannerCode !== 'none' &&
+            item.visualMeta?.bannerCode === profile.bannerCode),
       }));
-  }, [catalog, ownedIds, profile.equippedSlots]);
+  }, [
+    catalog,
+    ownedIds,
+    profile.bannerCode,
+    profile.equippedDeckId,
+    profile.equippedSlots,
+    profile.equippedTableSkinId,
+  ]);
 
   const bannerCode = profile.bannerCode ?? 'royal';
   const activeBannerIdOrCode =
@@ -174,6 +212,42 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
   const activeBadgeId =
     profile.equippedBadgeId ?? profile.equippedSlots?.profile_badge ?? null;
   const bioText = (profile.bio ?? authUser?.bio ?? '').trim();
+
+  const handleStartInlineBioEdit = () => {
+    setBioDraft(bioText);
+    setEditingBio(true);
+    window.setTimeout(() => {
+      bioInputRef.current?.focus();
+    }, 20);
+  };
+
+  const handleSaveInlineBio = async () => {
+    if (savingBio) return;
+    const cleanBio = bioDraft.trim().slice(0, 160);
+    setEditingBio(false);
+    if (cleanBio === bioText) return;
+
+    saveLocalCosmetics({ bio: cleanBio });
+    onUpdateProfile((prev) => ({ ...prev, bio: cleanBio }));
+
+    if (authUser) {
+      setSavingBio(true);
+      try {
+        const res = await updateAccountProfileRequest({
+          username: authUser.username,
+          avatarCode: authUser.avatarCode,
+          bio: cleanBio,
+        });
+        if (res.ok && res.user) {
+          onAuthChange?.(res.user);
+        }
+      } catch {
+        // Keep local optimistic bio if offline
+      } finally {
+        setSavingBio(false);
+      }
+    }
+  };
 
   const handleCopyId = async () => {
     try {
@@ -224,6 +298,7 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
         banner: shopItemId,
       },
     }));
+    onEquipItemById?.(shopItemId);
   };
 
   const handleRemoveBanner = () => {
@@ -234,6 +309,7 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
       bannerCode: 'none',
       customBannerUrl: null,
     }));
+    onUnequipSlot?.('banner');
   };
 
   return (
@@ -334,9 +410,11 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
               type="button"
               onClick={() => void handleCopyId()}
               className="mt-1 inline-flex items-center gap-1.5 text-xs theme-muted hover:text-[var(--eyvan-text)] transition-colors cursor-pointer"
-              title="کپی آیدی عددی"
+              title="کپی ID عددی"
             >
-              <span>آیدی:</span>
+              <span dir="ltr" className="font-mono font-bold tracking-wide">
+                ID:
+              </span>
               <code
                 dir="ltr"
                 data-testid="profile-persistent-id"
@@ -351,23 +429,64 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
               )}
             </button>
 
-            {/* Bio Display or Tappable Placeholder */}
+            {/* Direct Inline Editable Bio (Click right on text -> edit in place, no modal/screen!) */}
             <div className="mt-2.5 w-full max-w-md text-center">
-              {bioText ? (
+              {editingBio ? (
+                <div className="space-y-1.5" data-testid="profile-bio-inline-editor">
+                  <textarea
+                    ref={bioInputRef}
+                    value={bioDraft}
+                    onChange={(e) => setBioDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        void handleSaveInlineBio();
+                      } else if (e.key === 'Escape') {
+                        setEditingBio(false);
+                      }
+                    }}
+                    rows={2}
+                    maxLength={160}
+                    placeholder="درباره خودت بنویس..."
+                    data-testid="profile-bio-inline-input"
+                    className="w-full px-3 py-2 rounded-xl theme-input border border-[#0D8A8A]/60 text-xs sm:text-sm text-center leading-relaxed focus:outline-none focus:border-[#0D8A8A] resize-none"
+                  />
+                  <div className="flex items-center justify-center gap-2">
+                    <button
+                      type="button"
+                      disabled={savingBio}
+                      onClick={() => void handleSaveInlineBio()}
+                      data-testid="profile-bio-inline-save"
+                      className="min-h-[30px] px-3 rounded-lg bg-[#0D8A8A] hover:bg-[#0F9B9B] text-white text-[11px] font-extrabold inline-flex items-center gap-1 cursor-pointer disabled:opacity-60"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      <span>ذخیره</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingBio(false)}
+                      data-testid="profile-bio-inline-cancel"
+                      className="min-h-[30px] px-3 rounded-lg theme-btn-secondary border text-[11px] font-bold cursor-pointer"
+                    >
+                      انصراف
+                    </button>
+                  </div>
+                </div>
+              ) : bioText ? (
                 <button
                   type="button"
-                  onClick={() => onNavigate('edit')}
+                  onClick={handleStartInlineBioEdit}
                   data-testid="profile-bio-display"
-                  className="text-xs sm:text-sm theme-text/90 leading-relaxed hover:text-[var(--eyvan-teal)] transition-colors cursor-pointer"
+                  className="text-xs sm:text-sm theme-text/90 leading-relaxed hover:text-[var(--eyvan-teal)] transition-colors cursor-text px-2 py-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/[0.04]"
                 >
                   {bioText}
                 </button>
               ) : (
                 <button
                   type="button"
-                  onClick={() => onNavigate('edit')}
+                  onClick={handleStartInlineBioEdit}
                   data-testid="profile-bio-placeholder"
-                  className="text-xs theme-muted hover:text-[var(--eyvan-teal)] transition-colors cursor-pointer"
+                  className="text-xs theme-muted hover:text-[var(--eyvan-teal)] transition-colors cursor-text px-2.5 py-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/[0.04]"
                 >
                   درباره خودت بنویس...
                 </button>
@@ -375,27 +494,27 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
             </div>
           </div>
 
-          {/* 3-Column Scannable Stats Row with Vertical Hairline Dividers (Wins | History | Score) */}
+          {/* 3-Column Scannable Stats Row (Wins | Account Age in Days | Account Level) */}
           <div
             data-testid="profile-stats-summary"
             className="mt-5 pt-4 border-t border-[var(--eyvan-line)] grid grid-cols-3 divide-x divide-x-reverse divide-[var(--eyvan-line)] text-center"
           >
             <div className="px-2">
-              <div className="text-[11px] font-bold theme-muted">برد</div>
+              <div className="text-[11px] font-bold theme-muted">تعداد برد</div>
               <div className="text-base sm:text-lg font-black theme-heading mt-0.5 tabular-nums">
                 {toPersianDigits(stats.wins)}
               </div>
             </div>
             <div className="px-2">
-              <div className="text-[11px] font-bold theme-muted">سابقه</div>
+              <div className="text-[11px] font-bold theme-muted">عمر حساب</div>
               <div className="text-base sm:text-lg font-black theme-heading mt-0.5 tabular-nums">
-                {toPersianDigits(stats.gamesPlayed)} بازی
+                {toPersianDigits(accountAgeDays)} روز
               </div>
             </div>
             <div className="px-2">
-              <div className="text-[11px] font-bold theme-muted">امتیاز</div>
+              <div className="text-[11px] font-bold theme-muted">لول اکانت</div>
               <div className="text-base sm:text-lg font-black theme-accent-gold mt-0.5 tabular-nums">
-                {toPersianDigits(stats.rating)}
+                {toPersianDigits(profile.level)}
               </div>
             </div>
           </div>
@@ -470,59 +589,113 @@ export const ProfileOverview: React.FC<ProfileOverviewProps> = ({
         </div>
       </section>
 
-      {/* 3. My Collection Section ("کلکسیون من") */}
+      {/* 3. Redesigned Luxury Visual "کلکسیون من" Gallery with Direct 1-Tap Equip */}
       <section
-        className="rounded-[22px] theme-subcard border p-4 space-y-3"
+        className="rounded-[24px] theme-subcard border p-4 space-y-3.5"
         data-testid="profile-collection-section"
       >
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <Layers className="w-4 h-4 theme-accent-teal shrink-0" />
-            <h4 className="text-sm font-black theme-heading">کلکسیون من</h4>
+            <div className="w-7 h-7 rounded-xl bg-[#0D8A8A]/14 border border-[#0D8A8A]/35 flex items-center justify-center shrink-0">
+              <Layers className="w-3.5 h-3.5 theme-accent-teal" />
+            </div>
+            <div>
+              <h4 className="text-sm font-black theme-heading leading-tight">
+                کلکسیون من
+              </h4>
+              <p className="text-[10px] theme-muted">
+                برای فعال‌سازی سریع هر آیتم روی آن لمس کنید
+              </p>
+            </div>
           </div>
-          <span className="text-xs font-bold theme-muted tabular-nums">
+          <span className="px-2.5 py-1 rounded-xl bg-[var(--eyvan-surface-muted)] border border-[var(--eyvan-line)] text-[11px] font-extrabold theme-heading tabular-nums">
             {toPersianDigits(ownedCollection.length)} آیتم
           </span>
         </div>
 
         {ownedCollection.length === 0 ? (
-          <p className="text-xs theme-muted py-2">
-            هنوز آیتم اختصاصی‌ای در کلکسیون شما ثبت نشده است.
-          </p>
+          <div className="rounded-2xl border border-dashed border-[var(--eyvan-line)] py-6 px-4 text-center space-y-2">
+            <Sparkles className="w-6 h-6 mx-auto theme-accent-gold opacity-80" />
+            <p className="text-xs font-bold theme-muted">
+              هنوز آیتمی در کلکسیون شما نیست — از فروشگاه آیتم‌های جذاب انتخاب کنید.
+            </p>
+          </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
-            {ownedCollection.slice(0, 9).map((item) => (
-              <div
+          <div className="grid grid-cols-2 gap-3">
+            {ownedCollection.map((item) => (
+              <button
                 key={item.id}
-                className={`rounded-xl border p-2.5 flex items-center gap-2.5 ${
+                type="button"
+                disabled={!item.isEquippable || item.equipped}
+                onClick={() => {
+                  if (item.isEquippable && !item.equipped) {
+                    onEquipItemById?.(item.id);
+                  }
+                }}
+                data-testid={`collection-item-${item.id}`}
+                className={`group relative rounded-2xl overflow-hidden border text-right transition-all ${
                   item.equipped
-                    ? 'border-[#0D8A8A]/55 bg-[#0D8A8A]/8'
-                    : 'border-[var(--eyvan-line)] bg-[var(--eyvan-card-bg)]/50'
+                    ? 'border-[#0D8A8A] ring-2 ring-[#0D8A8A]/25 shadow-[0_6px_20px_rgba(13,138,138,0.18)]'
+                    : item.isEquippable
+                      ? 'border-[var(--eyvan-line)] hover:border-[var(--eyvan-gold-border)] hover:-translate-y-0.5 cursor-pointer'
+                      : 'border-[var(--eyvan-line)]'
                 }`}
               >
+                {/* Visual Artwork Showcase Header */}
                 <div
-                  className="w-9 h-9 rounded-lg overflow-hidden shrink-0 border border-white/10 flex items-center justify-center"
-                  style={{ backgroundColor: item.accent }}
+                  className="relative h-[86px] w-full overflow-hidden flex items-center justify-center"
+                  style={{
+                    background: `linear-gradient(135deg, ${item.accent}, ${item.accentSecondary})`,
+                  }}
                 >
                   {item.imageSrc ? (
                     <img
                       src={item.imageSrc}
                       alt={item.name}
-                      className="w-full h-full object-cover"
+                      className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
                     />
                   ) : (
-                    <Sparkles className="w-4 h-4 text-white/90" />
+                    <div className="flex flex-col items-center justify-center gap-1 text-white/95">
+                      <Sparkles className="w-6 h-6 drop-shadow" />
+                    </div>
+                  )}
+                  <div
+                    className="absolute inset-0 bg-gradient-to-t from-black/55 via-transparent to-black/15"
+                    aria-hidden="true"
+                  />
+
+                  {/* Category label top-right */}
+                  <span className="absolute top-2 right-2 px-2 py-0.5 rounded-lg bg-black/55 backdrop-blur-xs text-[10px] font-bold text-white/95 border border-white/15">
+                    {item.kindLabel}
+                  </span>
+
+                  {/* Active checkmark top-left */}
+                  {item.equipped && (
+                    <span className="absolute top-2 left-2 px-2 py-0.5 rounded-lg bg-[#0D8A8A] text-white text-[10px] font-black inline-flex items-center gap-1 shadow-sm">
+                      <Check className="w-3 h-3" />
+                      <span>فعال</span>
+                    </span>
                   )}
                 </div>
-                <div className="min-w-0 flex-1">
-                  <div className="text-xs font-extrabold theme-heading truncate">
+
+                {/* Card Footer */}
+                <div className="p-2.5 bg-[var(--eyvan-card-bg)] space-y-0.5">
+                  <div className="text-xs font-black theme-heading truncate">
                     {item.name}
                   </div>
-                  <div className="text-[10px] font-bold theme-muted truncate">
-                    {item.kindLabel}
+                  <div
+                    className={`text-[10px] font-bold ${
+                      item.equipped ? 'theme-accent-teal' : 'theme-muted'
+                    }`}
+                  >
+                    {item.equipped
+                      ? 'در حال نمایش در پروفایل و میز بازی'
+                      : item.isEquippable
+                        ? 'لمس برای فعال‌سازی'
+                        : 'آیتم کلکسیونی'}
                   </div>
                 </div>
-              </div>
+              </button>
             ))}
           </div>
         )}

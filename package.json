@@ -34,7 +34,7 @@
     "test:items": "tsx --test server/universalItemsAndMultiDeck.test.ts"
   },
   "dependencies": {
-    "@google/genai": "^2.4.0",
+    "@google/genai": "^3.6.1",
     "@tailwindcss/vite": "^4.3.3",
     "@types/better-sqlite3": "^9.6.0",
     "@types/ws": "^8.18.2",

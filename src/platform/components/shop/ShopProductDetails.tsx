@@ -281,7 +281,7 @@ export const ShopProductDetails: React.FC<ShopProductDetailsProps> = ({
                   <span>در مجموعه شما فعال است</span>
                 </div>
               )
-            ) : !isAuthenticated && onRequireAuth ? (
+            ) : !isAuthenticated && !shopTestMode && onRequireAuth ? (
               <button
                 type="button"
                 onClick={() => {

@@ -12,7 +12,7 @@ interface AmbientParticle {
   size: number;
   alpha: number;
   phase: number;
-  kind: 'mote' | 'suit';
+  kind: 'mote' | 'suit' | 'card';
   suitChar?: string;
   isRed?: boolean;
   rotation: number;
@@ -27,11 +27,10 @@ const SUIT_GLYPHS: readonly { char: string; isRed: boolean }[] = [
 ];
 
 /**
- * Calm, luxury atmospheric backdrop for the Hokm Hub & Modes screens.
- * - Matches Main Menu exact base tones (`#08101E` Dark, `#F4F6FA` Light).
- * - Uses soft silk-aurora glow veils, whisper-subtle Persian girih lattice,
- *   a slow diagonal sheen, and sparse ambient dust motes without cluttered
- *   astrolabe wireframes or floating card outlines.
+ * Refined atmospheric backdrop for the Hokm Hub & Modes screens.
+ * - Keeps Main Menu base tones (`#08101E` Dark, `#F4F6FA` Light).
+ * - Adds gentle silk-aurora veils, subtle Persian girih lattice,
+ *   luminous floating motes, suit emblems, and translucent playing-card silhouettes.
  */
 export const HokmAnimatedBackdrop: React.FC<HokmAnimatedBackdropProps> = ({
   isLight,
@@ -66,50 +65,94 @@ export const HokmAnimatedBackdrop: React.FC<HokmAnimatedBackdropProps> = ({
 
     const particles: AmbientParticle[] = [];
 
-    // 1. Sparse warm ambient motes (16 gentle dust particles)
-    for (let i = 0; i < 16; i++) {
+    // 1. Luminous warm golden & turquoise ambient motes (28 gentle drifting particles)
+    for (let i = 0; i < 28; i++) {
       particles.push({
         x: Math.random() * width,
         y: Math.random() * height,
-        vy: -(0.08 + Math.random() * 0.14),
-        vx: (Math.random() - 0.5) * 0.08,
-        size: 1.0 + Math.random() * 1.4,
+        vy: -(0.12 + Math.random() * 0.24),
+        vx: (Math.random() - 0.5) * 0.14,
+        size: 1.1 + Math.random() * 2.1,
         alpha: isLight
-          ? 0.09 + Math.random() * 0.12
-          : 0.11 + Math.random() * 0.16,
+          ? 0.12 + Math.random() * 0.16
+          : 0.16 + Math.random() * 0.24,
         phase: Math.random() * Math.PI * 2,
         kind: 'mote',
+        isRed: i % 3 === 0,
         rotation: 0,
         rotSpeed: 0,
       });
     }
 
-    // 2. Whisper-soft ambient suit silhouettes near outer margins (4 subtle symbols)
-    for (let i = 0; i < 4; i++) {
-      const glyph = SUIT_GLYPHS[i];
+    // 2. Ambient suit glyphs floating across margins & upper field (8 crisp symbols)
+    for (let i = 0; i < 8; i++) {
+      const glyph = SUIT_GLYPHS[i % SUIT_GLYPHS.length];
       const onLeft = i % 2 === 0;
       const bandX = onLeft
-        ? 24 + Math.random() * Math.max(48, width * 0.18)
-        : width - 24 - Math.random() * Math.max(48, width * 0.18);
+        ? 18 + Math.random() * Math.max(64, width * 0.26)
+        : width - 18 - Math.random() * Math.max(64, width * 0.26);
       particles.push({
         x: bandX,
-        y: ((i + 0.5) / 4) * height,
-        vy: -(0.09 + Math.random() * 0.1),
-        vx: (Math.random() - 0.5) * 0.05,
-        size: 15 + Math.random() * 7,
-        alpha: isLight ? 0.045 : 0.055,
+        y: ((i + 0.4) / 8) * height,
+        vy: -(0.14 + Math.random() * 0.16),
+        vx: (Math.random() - 0.5) * 0.08,
+        size: 16 + Math.random() * 10,
+        alpha: isLight ? 0.075 : 0.09,
         phase: Math.random() * Math.PI * 2,
         kind: 'suit',
         suitChar: glyph.char,
         isRed: glyph.isRed,
-        rotation: (Math.random() - 0.5) * 0.25,
-        rotSpeed: (Math.random() - 0.5) * 0.0014,
+        rotation: (Math.random() - 0.5) * 0.36,
+        rotSpeed: (Math.random() - 0.5) * 0.0022,
+      });
+    }
+
+    // 3. Tasteful translucent playing-card silhouettes drifting gracefully (6 cards)
+    for (let i = 0; i < 6; i++) {
+      const glyph = SUIT_GLYPHS[i % SUIT_GLYPHS.length];
+      const onLeft = i % 2 === 0;
+      const bandX = onLeft
+        ? 26 + Math.random() * Math.max(70, width * 0.28)
+        : width - 26 - Math.random() * Math.max(70, width * 0.28);
+      particles.push({
+        x: bandX,
+        y: ((i + 0.35) / 6) * height,
+        vy: -(0.16 + Math.random() * 0.18),
+        vx: (Math.random() - 0.5) * 0.1,
+        size: 32 + Math.random() * 14,
+        alpha: isLight ? 0.085 : 0.095,
+        phase: Math.random() * Math.PI * 2,
+        kind: 'card',
+        suitChar: glyph.char,
+        isRed: glyph.isRed,
+        rotation: (Math.random() - 0.5) * 0.55,
+        rotSpeed: (Math.random() - 0.5) * 0.0024,
       });
     }
 
     let rafId = 0;
     let lastFrameTime = 0;
     const FRAME_INTERVAL_MS = 33;
+
+    const drawRoundedRect = (
+      x: number,
+      y: number,
+      w: number,
+      h: number,
+      r: number
+    ) => {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      ctx.lineTo(x + r, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.closePath();
+    };
 
     const renderFrame = (now: number) => {
       rafId = requestAnimationFrame(renderFrame);
@@ -120,27 +163,33 @@ export const HokmAnimatedBackdrop: React.FC<HokmAnimatedBackdropProps> = ({
       ctx.clearRect(0, 0, width, height);
 
       for (const p of particles) {
-        p.phase += 0.012;
+        p.phase += 0.016;
         p.y += p.vy;
-        p.x += p.vx + Math.sin(p.phase) * 0.08;
+        p.x += p.vx + Math.sin(p.phase) * 0.12;
         p.rotation += p.rotSpeed;
 
-        if (p.y < -36) {
-          p.y = height + 32;
+        if (p.y < -64) {
+          p.y = height + 54;
           p.x = Math.random() * width;
         }
-        if (p.x < -36) p.x = width + 24;
-        if (p.x > width + 36) p.x = -24;
+        if (p.x < -64) p.x = width + 48;
+        if (p.x > width + 64) p.x = -48;
 
-        const twinkle = 0.78 + 0.22 * Math.sin(p.phase * 1.1);
+        const twinkle = 0.72 + 0.28 * Math.sin(p.phase * 1.35);
         const curAlpha = p.alpha * twinkle;
 
         if (p.kind === 'mote') {
           ctx.beginPath();
           ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-          ctx.fillStyle = isLight
-            ? `rgba(13, 138, 138, ${curAlpha})`
-            : `rgba(243, 209, 121, ${curAlpha})`;
+          if (isLight) {
+            ctx.fillStyle = p.isRed
+              ? `rgba(180, 130, 35, ${curAlpha})`
+              : `rgba(13, 138, 138, ${curAlpha})`;
+          } else {
+            ctx.fillStyle = p.isRed
+              ? `rgba(44, 197, 194, ${curAlpha})`
+              : `rgba(243, 209, 121, ${curAlpha})`;
+          }
           ctx.fill();
         } else if (p.kind === 'suit' && p.suitChar) {
           ctx.save();
@@ -158,6 +207,36 @@ export const HokmAnimatedBackdrop: React.FC<HokmAnimatedBackdropProps> = ({
               ? `rgba(243, 209, 121, ${curAlpha})`
               : `rgba(44, 197, 194, ${curAlpha})`;
           }
+          ctx.fillText(p.suitChar, 0, 0);
+          ctx.restore();
+        } else if (p.kind === 'card' && p.suitChar) {
+          const cardW = p.size;
+          const cardH = p.size * 1.4;
+          ctx.save();
+          ctx.translate(p.x, p.y);
+          ctx.rotate(p.rotation);
+
+          drawRoundedRect(-cardW / 2, -cardH / 2, cardW, cardH, cardW * 0.14);
+          ctx.fillStyle = isLight
+            ? `rgba(255, 255, 255, ${curAlpha * 1.4})`
+            : `rgba(19, 36, 62, ${curAlpha * 1.6})`;
+          ctx.fill();
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = isLight
+            ? `rgba(13, 138, 138, ${curAlpha * 2.2})`
+            : `rgba(243, 209, 121, ${curAlpha * 2.2})`;
+          ctx.stroke();
+
+          ctx.font = `${Math.round(cardW * 0.46)}px serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = isLight
+            ? p.isRed
+              ? `rgba(185, 28, 28, ${curAlpha * 2.1})`
+              : `rgba(15, 23, 42, ${curAlpha * 1.9})`
+            : p.isRed
+              ? `rgba(243, 209, 121, ${curAlpha * 2.1})`
+              : `rgba(44, 197, 194, ${curAlpha * 2.1})`;
           ctx.fillText(p.suitChar, 0, 0);
           ctx.restore();
         }

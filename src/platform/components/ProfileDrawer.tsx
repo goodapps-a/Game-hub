@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { ArrowRight, Settings, X } from 'lucide-react';
 import { AuthUserSummary, PendingAuthUrlAction } from '../auth/authClient';
+import { ItemSlot } from '../items/itemTypes';
 import { UserProfile } from '../types/platform';
 import { ProfileEditView } from './profile/ProfileEditView';
 import { ProfileOverview, ProfileSubView } from './profile/ProfileOverview';
@@ -18,6 +19,8 @@ interface ProfileDrawerProps {
   onClose: () => void;
   profile: UserProfile;
   onUpdateProfile: (updater: (prev: UserProfile) => UserProfile) => void;
+  onEquipItemById?: (itemId: string) => void;
+  onUnequipSlot?: (slot: ItemSlot) => void;
   authUser: AuthUserSummary | null;
   authLoading: boolean;
   onAuthChange: (user: AuthUserSummary | null) => void;
@@ -40,6 +43,8 @@ export const ProfileDrawer: React.FC<ProfileDrawerProps> = ({
   onClose,
   profile,
   onUpdateProfile,
+  onEquipItemById,
+  onUnequipSlot,
   authUser,
   authLoading,
   onAuthChange,
@@ -224,6 +229,9 @@ export const ProfileDrawer: React.FC<ProfileDrawerProps> = ({
                 profile={profile}
                 authUser={authUser}
                 onUpdateProfile={onUpdateProfile}
+                onAuthChange={onAuthChange}
+                onEquipItemById={onEquipItemById}
+                onUnequipSlot={onUnequipSlot}
                 onNavigate={handleNavigateFromOverview}
                 onOpenAuth={handleRequestAuth}
                 onOpenBannerShop={onOpenBannerShop}

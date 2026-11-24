@@ -38,6 +38,7 @@ import {
 
 interface HokmGameProps {
   playerName: string;
+  playerAvatarSrc?: string;
   tableSkinId?: string;
   deckId?: string;
   cardBackId?: string;
@@ -48,11 +49,13 @@ interface HokmGameProps {
   reducedMotionPreference: boolean;
   onToggleSound: () => void;
   onChangeAnimationSpeed: (speed: AnimationSpeed) => void;
+  onInspectSelf?: () => void;
   onBackToGames: () => void;
 }
 
 export const HokmGame: React.FC<HokmGameProps> = ({
   playerName,
+  playerAvatarSrc,
   tableSkinId = 'tt-traditional',
   deckId = EYVAN_CLASSIC_DECK_ID,
   cardBackId,
@@ -61,6 +64,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
   soundEnabled,
   animationSpeed,
   reducedMotionPreference,
+  onInspectSelf,
   onBackToGames,
 }) => {
   const safeTargetScore = Math.max(
@@ -276,23 +280,33 @@ export const HokmGame: React.FC<HokmGameProps> = ({
             runningDeck = Math.max(0, runningDeck - 1);
             setRemainingDeckCount(runningDeck);
             setFlyingDealCards((prev) => [
-              ...prev.slice(-6),
+              ...prev.slice(-8),
               { id: flyId, targetSeat: entry.seat, spinDeg },
             ]);
             hokmSound.playDealTick();
-            runningCounts[entry.seat] += 1;
-            setDealtCounts({ ...runningCounts });
-            if (entry.seat === 'south') {
-              runningSouthCards.push(entry.card);
-              southDealCardsRef.current = [...runningSouthCards];
-              setSouthDealCards([...runningSouthCards]);
-            }
+
+            // Card lands into recipient's hand right as the flying card reaches the seat
+            // (so the very last card flies solidly all the way into the last player's hand!)
+            const landDelay = Math.max(20, Math.round(flyDuration * 0.78));
+            schedule(
+              () => {
+                runningCounts[entry.seat] += 1;
+                setDealtCounts({ ...runningCounts });
+                if (entry.seat === 'south') {
+                  runningSouthCards.push(entry.card);
+                  southDealCardsRef.current = [...runningSouthCards];
+                  setSouthDealCards([...runningSouthCards]);
+                }
+              },
+              landDelay,
+              expectedRunId
+            );
 
             schedule(
               () => {
                 setFlyingDealCards((prev) => prev.filter((c) => c.id !== flyId));
               },
-              flyDuration,
+              flyDuration + 18,
               expectedRunId
             );
           },
@@ -301,13 +315,14 @@ export const HokmGame: React.FC<HokmGameProps> = ({
         );
       });
 
+      const lastLaunch = Math.max(0, dealSequence.length - 1) * stepDelay;
       schedule(
         () => {
           setFlyingDealCards([]);
           setRemainingDeckCount(Math.max(0, startingDeckCount - dealSequence.length));
           onComplete({ ...runningCounts });
         },
-        dealSequence.length * stepDelay + flyDuration + 35,
+        lastLaunch + flyDuration + 45,
         expectedRunId
       );
     },
@@ -400,7 +415,19 @@ export const HokmGame: React.FC<HokmGameProps> = ({
                 north: dealt5State.hands.north.length,
                 west: dealt5State.hands.west.length,
               });
-              setIsDealingAnim(false);
+              // Collapse & reopen initial 5 cards into sorted order ONLY for Hakem (when South chooses trump)!
+              if (dealt5State.hakem === 'south') {
+                setIsDealingAnim(false);
+                runGatherAndSortAnimation(
+                  dealt5State.hands.south,
+                  runId,
+                  () => {
+                    // Ready for Hakem's Trump Selector
+                  }
+                );
+              } else {
+                setIsDealingAnim(false);
+              }
             }
           );
         },
@@ -408,7 +435,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
         runId
       );
     },
-    [clearAllTimers, runDealWaveAnimation, schedule]
+    [clearAllTimers, runDealWaveAnimation, runGatherAndSortAnimation, schedule]
   );
 
   useEffect(() => {
@@ -469,16 +496,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
               runGatherAndSortAnimation(dealt13State.hands.south, runId, () => {
                 setSouthHandSorted(true);
                 setIsDealingAnim(false);
-                // Exciting non-blocking "Game Started!" burst right when play begins
-                setShowGameStartBanner(true);
                 hokmSound.playGameStart();
-                schedule(
-                  () => {
-                    setShowGameStartBanner(false);
-                  },
-                  1280,
-                  runId
-                );
               });
             }
           );
@@ -528,13 +546,28 @@ export const HokmGame: React.FC<HokmGameProps> = ({
   ]);
 
   const executeCardPlay = useCallback((seat: Seat, cardId: string) => {
+    let wasTrumpCut = false;
     setState((prev) => {
       if (prev.phase !== 'PLAYING_TRICK' || prev.currentTurn !== seat) {
         return prev;
       }
-      return playCard(prev, seat, cardId);
+      const next = playCard(prev, seat, cardId);
+      const played = next.currentTrick[next.currentTrick.length - 1];
+      if (
+        prev.trumpSuit &&
+        next.currentTrick.length >= 2 &&
+        next.currentTrick[0].card.suit !== prev.trumpSuit &&
+        played?.card.suit === prev.trumpSuit
+      ) {
+        wasTrumpCut = true;
+      }
+      return next;
     });
-    hokmSound.playCardSnap();
+    if (wasTrumpCut) {
+      hokmSound.playTrumpCut();
+    } else {
+      hokmSound.playCardSnap();
+    }
     if (seat === 'south') {
       setShowGameStartBanner(false);
     }
@@ -620,7 +653,10 @@ export const HokmGame: React.FC<HokmGameProps> = ({
                     const isKot =
                       collected.handOutcome?.winType === 'kot' ||
                       collected.handOutcome?.winType === 'hakem_kot';
-                    hokmSound.playHandFinish(Boolean(isKot));
+                    hokmSound.playHandFinish(
+                      collected.handOutcome?.winningTeam === 'myTeam',
+                      Boolean(isKot)
+                    );
                   }
                   return collected;
                 });
@@ -638,8 +674,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
     );
   }, [schedule, state.lastCompletedTrick, state.phase]);
 
-  // Seamless auto-next-hand after Hand-Win Celebration Animation,
-  // rotating Hakem counter-clockwise to the next seat whenever the Hakem loses the hand!
+  // Seamless auto-next-hand after physical card scatter -> flying score -> sweep & shuffle
   useEffect(() => {
     if (state.phase !== 'HAND_COMPLETE') return;
     const runId = runIdRef.current;
@@ -649,7 +684,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
         const next = startNextHand(state, nextHakem);
         beginShuffleAndInitialDeal(next);
       },
-      2100,
+      2350,
       runId
     );
     return () => window.clearTimeout(timerId);
@@ -705,6 +740,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
       trickCollectPhase={trickCollectPhase}
       collectingWinnerTeam={collectingWinnerTeam}
       playerName={playerName}
+      playerAvatarSrc={playerAvatarSrc}
       tableSkinId={tableSkinId}
       deckId={deckId}
       cardBackId={cardBackId}
@@ -713,6 +749,7 @@ export const HokmGame: React.FC<HokmGameProps> = ({
       canHumanPlay={canHumanPlay}
       exitConfirmOpen={exitConfirmOpen}
       deckCount={remainingDeckCount}
+      onInspectSelf={onInspectSelf}
       onPlayCard={handleHumanPlayCard}
       onChooseTrump={handleChooseTrump}
       onRequestExit={handleRequestExit}

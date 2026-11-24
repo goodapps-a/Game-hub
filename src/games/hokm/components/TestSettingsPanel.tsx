@@ -6,15 +6,11 @@ import {
   VolumeX,
   X,
   Crown,
-  Gauge,
   RefreshCw,
   Trash2,
 } from 'lucide-react';
 import { DEFAULT_PLAYERS, Seat } from '../engine/types';
-import {
-  ANIMATION_SPEED_LABELS,
-  AnimationSpeed,
-} from '../../../platform/theme/tokens';
+import { AnimationSpeed } from '../../../platform/theme/tokens';
 
 interface TestSettingsPanelProps {
   isOpen: boolean;
@@ -33,7 +29,6 @@ interface TestSettingsPanelProps {
 }
 
 const SEATS: Seat[] = ['south', 'east', 'north', 'west'];
-const SPEEDS: AnimationSpeed[] = ['slow', 'normal', 'fast'];
 
 export const TestSettingsPanel: React.FC<TestSettingsPanelProps> = ({
   isOpen,
@@ -43,8 +38,6 @@ export const TestSettingsPanel: React.FC<TestSettingsPanelProps> = ({
   onChangeConfiguredHakem,
   soundEnabled,
   onToggleSound,
-  animationSpeed,
-  onChangeAnimationSpeed,
   onStartNewMatch,
   onReshuffleDeck,
   onRestartHand,
@@ -105,33 +98,6 @@ export const TestSettingsPanel: React.FC<TestSettingsPanelProps> = ({
                     <div dir="ltr" className="text-xs font-extrabold truncate">
                       {label}
                     </div>
-                  </button>
-                );
-              })}
-            </div>
-          </section>
-
-          {/* Animation Speed */}
-          <section className="space-y-2.5">
-            <div className="flex items-center gap-2 text-sm font-bold theme-heading">
-              <Gauge className="w-4 h-4 theme-accent-teal" />
-              <span>سرعت انیمیشن</span>
-            </div>
-            <div className="grid grid-cols-3 gap-1.5 p-1 theme-tab-track border rounded-xl">
-              {SPEEDS.map((speed) => {
-                const active = animationSpeed === speed;
-                return (
-                  <button
-                    key={speed}
-                    type="button"
-                    onClick={() => onChangeAnimationSpeed(speed)}
-                    className={`min-h-[40px] rounded-lg text-xs font-bold transition-colors cursor-pointer ${
-                      active
-                        ? 'bg-gradient-to-b from-[#F3D179] to-[#C89B3C] text-[#0B1628] shadow-sm'
-                        : 'theme-muted'
-                    }`}
-                  >
-                    {ANIMATION_SPEED_LABELS[speed]}
                   </button>
                 );
               })}

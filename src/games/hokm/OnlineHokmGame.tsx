@@ -59,6 +59,7 @@ interface OnlineHokmGameProps {
   onChangeUsername: (username: string) => void;
   onChangeAvatar: (avatarCode: string) => void;
   onInspectPlayer?: (userId: string) => void;
+  onInspectSelf?: () => void;
   onLaunchOffline: () => void;
   onBackToGames: () => void;
 }
@@ -81,6 +82,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
   onChangeUsername,
   onChangeAvatar,
   onInspectPlayer,
+  onInspectSelf,
   onLaunchOffline,
   onBackToGames,
 }) => {
@@ -315,23 +317,47 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
         case 'DEALT_REMAINING_8':
           hokmSound.playTrumpChosen();
           triggerOnlineDealBurst('rem8', 2);
-          setShowGameStartBanner(true);
+          setShowGameStartBanner(false);
           hokmSound.playGameStart();
-          if (startBannerTimerRef.current !== null) {
-            window.clearTimeout(startBannerTimerRef.current);
-          }
-          startBannerTimerRef.current = window.setTimeout(() => {
-            setShowGameStartBanner(false);
-          }, 1250);
           break;
 
-        case 'CARD_PLAYED':
-          hokmSound.playCardSnap();
+        case 'CARD_PLAYED': {
+          const g = nextSnap.game;
+          const trick = g?.currentTrick ?? [];
+          const latest = trick[trick.length - 1];
+          const isCut = Boolean(
+            g?.trumpSuit &&
+              trick.length >= 2 &&
+              trick[0].card.suit !== g.trumpSuit &&
+              latest?.card.suit === g.trumpSuit
+          );
+          if (isCut) {
+            hokmSound.playTrumpCut();
+          } else {
+            hokmSound.playCardSnap();
+          }
           setShowGameStartBanner(false);
           break;
+        }
 
         case 'TRICK_COMPLETED': {
-          hokmSound.playCardSnap();
+          const g = nextSnap.game;
+          const trick =
+            g?.currentTrick && g.currentTrick.length > 0
+              ? g.currentTrick
+              : g?.lastCompletedTrick?.plays ?? [];
+          const latest = trick[trick.length - 1];
+          const isCut = Boolean(
+            g?.trumpSuit &&
+              trick.length >= 2 &&
+              trick[0].card.suit !== g.trumpSuit &&
+              latest?.card.suit === g.trumpSuit
+          );
+          if (isCut) {
+            hokmSound.playTrumpCut();
+          } else {
+            hokmSound.playCardSnap();
+          }
           const winnerTeam =
             nextSnap.game?.lastCompletedTrick?.winnerTeam ?? null;
           clearTrickTimers();
@@ -364,7 +390,10 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
           const isKot =
             nextSnap.game?.handOutcome?.winType === 'kot' ||
             nextSnap.game?.handOutcome?.winType === 'hakem_kot';
-          hokmSound.playHandFinish(Boolean(isKot));
+          hokmSound.playHandFinish(
+            nextSnap.game?.handOutcome?.winningTeam === 'myTeam',
+            Boolean(isKot)
+          );
           break;
         }
 
@@ -699,6 +728,7 @@ export const OnlineHokmGame: React.FC<OnlineHokmGameProps> = ({
           deckCount={snapshot.game.deckCount}
           canStartRematch={isHost}
           onInspectPlayer={onInspectPlayer}
+          onInspectSelf={onInspectSelf}
           onlineHud={{
             roomCode: snapshot.roomCode,
             connectionState,

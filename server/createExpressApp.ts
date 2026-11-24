@@ -43,6 +43,7 @@ import {
 } from '../cloudflare/src/lib/auth/securityPolicy';
 import { EyvanDatabase } from './database';
 import { HokmRoomManager } from './roomManager';
+import { getOrGenerateVoiceCalloutWav } from './ttsService';
 
 export interface ExpressAppConfig {
   readonly isProduction: boolean;
@@ -290,6 +291,33 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
       disconnectGraceMs,
       serverTime: Date.now(),
     });
+  });
+
+  // High-quality server-side Gemini TTS for whitelisted Persian Hokm voice callouts
+  const handleVoiceCalloutTts = async (calloutIdRaw: string, res: Response) => {
+    const cleanId = calloutIdRaw.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    if (!cleanId) {
+      res.status(400).json({ ok: false, message: 'شناسه صوت نامعتبر است.' });
+      return;
+    }
+    const result = await getOrGenerateVoiceCalloutWav(cleanId);
+    if (result.ok === false) {
+      res.status(result.status).json({ ok: false, message: result.message });
+      return;
+    }
+    res.setHeader('Content-Type', 'audio/wav');
+    res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+    res.setHeader('Content-Length', String(result.wav.byteLength));
+    res.status(200).send(result.wav);
+  };
+
+  app.get('/api/tts/callout/:calloutId', async (req: Request, res: Response) => {
+    await handleVoiceCalloutTts(String(req.params.calloutId ?? ''), res);
+  });
+
+  app.post('/api/tts/callout', async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    await handleVoiceCalloutTts(String(body.calloutId ?? ''), res);
   });
 
   // Central Platform Authentication (`/api/auth/*` — shared handler with Cloudflare Workers)

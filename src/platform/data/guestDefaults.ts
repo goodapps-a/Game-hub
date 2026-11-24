@@ -214,6 +214,41 @@ export function saveLocalCosmetics(prefs: LocalCosmeticPreferences): void {
   }
 }
 
+const AUDIO_PREFS_STORAGE_KEY = 'eyvan_audio_prefs_v1';
+
+export interface LocalAudioPrefs {
+  musicEnabled: boolean;
+  sfxEnabled: boolean;
+}
+
+export function loadLocalAudioPrefs(): LocalAudioPrefs {
+  if (typeof window === 'undefined') {
+    return { musicEnabled: true, sfxEnabled: true };
+  }
+  try {
+    const raw = window.localStorage.getItem(AUDIO_PREFS_STORAGE_KEY);
+    if (!raw) return { musicEnabled: true, sfxEnabled: true };
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      musicEnabled:
+        typeof parsed.musicEnabled === 'boolean' ? parsed.musicEnabled : true,
+      sfxEnabled:
+        typeof parsed.sfxEnabled === 'boolean' ? parsed.sfxEnabled : true,
+    };
+  } catch {
+    return { musicEnabled: true, sfxEnabled: true };
+  }
+}
+
+export function saveLocalAudioPrefs(prefs: LocalAudioPrefs): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(AUDIO_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+  } catch {
+    // Ignore storage restriction errors
+  }
+}
+
 /**
  * Neutral default profile for an unauthenticated guest session with a random guest ID.
  * Guests start with 0 coins & 0 gems and can immediately play Hokm; server-persisted
@@ -278,7 +313,9 @@ export function createInitialGuestProfile(themeMode: ThemeMode): UserProfile {
       compactProfileStats: false,
     },
     appSettings: {
-      soundEnabled: true,
+      soundEnabled: loadLocalAudioPrefs().sfxEnabled,
+      musicEnabled: loadLocalAudioPrefs().musicEnabled,
+      sfxEnabled: loadLocalAudioPrefs().sfxEnabled,
       animationSpeed: 'normal',
       reducedMotion: false,
       themeMode,

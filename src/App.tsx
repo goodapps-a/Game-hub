@@ -11,6 +11,7 @@ import { eyvanBgMusic } from './platform/audio/bgMusic';
 import {
   DEFAULT_OWNED_SHOP_IDS,
   createInitialGuestProfile,
+  saveLocalAudioPrefs,
   saveLocalCosmetics,
 } from './platform/data/guestDefaults';
 import {
@@ -46,6 +47,7 @@ import { fetchMyOnlineStats } from './games/hokm/online/client';
 import { hokmSound } from './games/hokm/audio/soundEffects';
 import { OfflineIndicator } from './platform/components/OfflineIndicator';
 import { BottomNav } from './platform/components/BottomNav';
+import { PWAInstallModal } from './platform/components/PWAInstallModal';
 import {
   getOrCreateTabDeviceId,
   sendPresenceHeartbeat,
@@ -139,6 +141,22 @@ function isEditableElement(el: EventTarget | null): boolean {
   return el.isContentEditable;
 }
 
+const TAB_SWIPE_ORDER: readonly PlatformTabId[] = ['shop', 'games', 'friends'];
+
+function hasHorizontalScrollAncestor(target: EventTarget | null): boolean {
+  let node = target instanceof HTMLElement ? target : null;
+  while (node && node !== document.body) {
+    if (node.scrollWidth > node.clientWidth + 6) {
+      const style = window.getComputedStyle(node);
+      if (style.overflowX === 'auto' || style.overflowX === 'scroll') {
+        return true;
+      }
+    }
+    node = node.parentElement;
+  }
+  return false;
+}
+
 export default function App() {
   const [pendingTomanOrderId, setPendingTomanOrderId] = useState<string | null>(() =>
     consumeTomanOrderFromQuery()
@@ -201,10 +219,44 @@ export default function App() {
   const exitToastTimerRef = useRef<number | null>(null);
   const lastRootBackPressRef = useRef<number>(0);
 
+  // Track whether Telegram full-screen chat inside FriendsPage is open
+  const [isFriendsChatOpen, setIsFriendsChatOpen] = useState(false);
+  const [closeFriendsChatSignal, setCloseFriendsChatSignal] = useState(0);
+
+  // Horizontal touch-swipe tracking for main tabs
+  const swipeStartRef = useRef<{
+    x: number;
+    y: number;
+    ts: number;
+    blocked: boolean;
+  } | null>(null);
+
   const themeMode = profile.appSettings.themeMode;
 
   const [shopTestMode, setShopTestMode] = useState<boolean>(SHOP_TEST_MODE_DEFAULT);
   const [shopNotice, setShopNotice] = useState<string | null>(null);
+  const shopNoticeTimerRef = useRef<number | null>(null);
+
+  const showShopNotice = useCallback((msg: string | null) => {
+    setShopNotice(msg);
+    if (shopNoticeTimerRef.current) {
+      window.clearTimeout(shopNoticeTimerRef.current);
+      shopNoticeTimerRef.current = null;
+    }
+    if (msg) {
+      shopNoticeTimerRef.current = window.setTimeout(() => {
+        setShopNotice(null);
+      }, 3400);
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (shopNoticeTimerRef.current) {
+        window.clearTimeout(shopNoticeTimerRef.current);
+      }
+    };
+  }, []);
 
   const updateProfile = useCallback(
     (updater: UserProfile | ((prev: UserProfile) => UserProfile)) => {
@@ -239,7 +291,7 @@ export default function App() {
     (inv: ServerInventoryState) => {
       setShopTestMode(inv.shopTestMode);
       const pub = inv.publicAppearance ?? buildPublicAppearanceFromSlots(inv.equippedSlots);
-      setProfile((prev) => ({
+      updateProfile((prev) => ({
         ...prev,
         coins: inv.coins,
         gems: inv.gems,
@@ -259,7 +311,7 @@ export default function App() {
         void deckRuntime.activateDeck(pub.deckId);
       }
     },
-    []
+    [updateProfile]
   );
 
   const applyAuthenticatedUser = (user: AuthUserSummary | null) => {
@@ -538,10 +590,19 @@ export default function App() {
     }
   }, [themeMode]);
 
+  const effectiveMusicEnabled =
+    profile.appSettings.musicEnabled ?? profile.appSettings.soundEnabled;
+  const effectiveSfxEnabled =
+    profile.appSettings.sfxEnabled ?? profile.appSettings.soundEnabled;
+
   useEffect(() => {
-    hokmSound.setEnabled(profile.appSettings.soundEnabled);
-    eyvanBgMusic.setEnabled(profile.appSettings.soundEnabled);
-  }, [profile.appSettings.soundEnabled]);
+    hokmSound.setEnabled(effectiveSfxEnabled);
+    eyvanBgMusic.setEnabled(effectiveMusicEnabled);
+    saveLocalAudioPrefs({
+      musicEnabled: effectiveMusicEnabled,
+      sfxEnabled: effectiveSfxEnabled,
+    });
+  }, [effectiveMusicEnabled, effectiveSfxEnabled]);
 
   useEffect(() => {
     document.body.dataset.state = activeGame ? 'playing' : 'platform';
@@ -560,6 +621,7 @@ export default function App() {
     selectedGameHub,
     hokmHubSubView,
     activeTab,
+    isFriendsChatOpen,
   });
   navStateRef.current = {
     activeGame,
@@ -569,13 +631,18 @@ export default function App() {
     selectedGameHub,
     hokmHubSubView,
     activeTab,
+    isFriendsChatOpen,
   };
+
+  const historyGuardDepthRef = useRef(0);
+  const rootGestureArmedRef = useRef(false);
 
   const pushHistoryGuard = useCallback(() => {
     if (typeof window === 'undefined') return;
     try {
+      historyGuardDepthRef.current += 1;
       window.history.pushState(
-        { eyvanNavGuard: true },
+        { eyvanNavGuard: true, depth: historyGuardDepthRef.current },
         '',
         window.location.href
       );
@@ -584,17 +651,42 @@ export default function App() {
     }
   }, []);
 
+  // Arm a genuine user-activated root guard on the very first touch/pointer gesture
+  // so Chrome/Android History Manipulation Intervention never skips our Back handler.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const armOnce = () => {
+      if (rootGestureArmedRef.current) return;
+      rootGestureArmedRef.current = true;
+      pushHistoryGuard();
+    };
+    window.addEventListener('pointerdown', armOnce, { capture: true, passive: true });
+    window.addEventListener('keydown', armOnce, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', armOnce, true);
+      window.removeEventListener('keydown', armOnce, true);
+    };
+  }, [pushHistoryGuard]);
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
     pushHistoryGuard();
 
     const handlePopState = () => {
+      historyGuardDepthRef.current = Math.max(0, historyGuardDepthRef.current - 1);
       const cur = navStateRef.current;
+
+      // Helper: keep at least one guard entry ready while still inside the app
+      const ensureGuard = () => {
+        if (historyGuardDepthRef.current <= 0) {
+          pushHistoryGuard();
+        }
+      };
 
       // Close topmost player profile card first regardless of view
       if (cur.inspectedPlayerUserId) {
-        pushHistoryGuard();
         setInspectedPlayerUserId(null);
+        ensureGuard();
         return;
       }
 
@@ -603,9 +695,22 @@ export default function App() {
         return;
       }
 
+      // Close topmost floating modal before exiting game/hub
+      if (cur.isAuthModalOpen) {
+        setIsAuthModalOpen(false);
+        setAuthModalReason(null);
+        ensureGuard();
+        return;
+      }
+
+      if (cur.isProfileOpen) {
+        setIsProfileOpen(false);
+        ensureGuard();
+        return;
+      }
+
       // Online Hokm lobby/table: exit cleanly back to Hokm Hub
       if (cur.activeGame === 'hokm-online') {
-        pushHistoryGuard();
         setInitialRoomCode('');
         setAutoJoinInviteRoom(false);
         setOnlineLaunchAction(null);
@@ -613,38 +718,33 @@ export default function App() {
         setActiveTab('games');
         setSelectedGameHub('hokm');
         setHokmHubSubView('hub');
-        return;
-      }
-
-      // Close topmost floating modal first
-      if (cur.isAuthModalOpen) {
-        pushHistoryGuard();
-        setIsAuthModalOpen(false);
-        setAuthModalReason(null);
-        return;
-      }
-
-      if (cur.isProfileOpen) {
-        pushHistoryGuard();
-        setIsProfileOpen(false);
+        ensureGuard();
         return;
       }
 
       // Inside Hokm full-screen Hub: step back from subview -> hub -> Games menu
       if (cur.selectedGameHub !== null) {
-        pushHistoryGuard();
         if (cur.hokmHubSubView !== 'hub') {
           setHokmHubSubView('hub');
         } else {
           setSelectedGameHub(null);
         }
+        ensureGuard();
+        return;
+      }
+
+      // Inside full-screen Telegram chat in Friends tab -> close chat first
+      if (cur.activeTab === 'friends' && cur.isFriendsChatOpen) {
+        setCloseFriendsChatSignal((prev) => prev + 1);
+        setIsFriendsChatOpen(false);
+        ensureGuard();
         return;
       }
 
       // Inside Shop or Friends tab -> return to Games Main Menu
       if (cur.activeTab !== 'games') {
-        pushHistoryGuard();
         setActiveTab('games');
+        ensureGuard();
         return;
       }
 
@@ -653,7 +753,6 @@ export default function App() {
       if (now - lastRootBackPressRef.current < 2200) {
         setExitToastVisible(false);
         lastRootBackPressRef.current = 0;
-        // Allow actual browser/device back navigation on second press
         return;
       }
 
@@ -697,6 +796,9 @@ export default function App() {
       setFriendsInitialTab('friends');
     }
     if (tab !== activeTab) {
+      if (tab !== 'games') {
+        pushHistoryGuard();
+      }
       setActiveTab(tab);
     }
   };
@@ -705,6 +807,7 @@ export default function App() {
     mode: AuthModalMode = 'login',
     reason: string | null = null
   ) => {
+    pushHistoryGuard();
     setIsProfileOpen(false);
     setAuthModalMode(mode);
     setAuthModalReason(reason);
@@ -715,6 +818,7 @@ export default function App() {
     initialView: ProfileSubView = 'overview',
     initialAuthMode: ProfileInitialAuthMode = 'login'
   ) => {
+    pushHistoryGuard();
     setIsAuthModalOpen(false);
     setProfileInitialView(initialView);
     setProfileInitialAuthMode(initialAuthMode);
@@ -723,12 +827,20 @@ export default function App() {
 
   const handleOpenGameHub = (gameId: GameId) => {
     if (gameId === 'hokm') {
+      pushHistoryGuard();
       setIsProfileOpen(false);
       setIsAuthModalOpen(false);
       setActiveTab('games');
       setSelectedGameHub('hokm');
       setHokmHubSubView('hub');
     }
+  };
+
+  const handleChangeHokmSubView = (nextSubView: HokmHubSubView) => {
+    if (nextSubView !== 'hub' && hokmHubSubView === 'hub') {
+      pushHistoryGuard();
+    }
+    setHokmHubSubView(nextSubView);
   };
 
   const applyEquippedDefinitionLocally = useCallback(
@@ -766,7 +878,7 @@ export default function App() {
 
   const handleEquipShopItem = useCallback(
     async (item: ShopItem) => {
-      setShopNotice(null);
+      showShopNotice(null);
       const def = resolveCatalogItemDefinition(
         item.id,
         DeckRegistry.getAllCatalogEntries(false)
@@ -776,45 +888,83 @@ export default function App() {
       if (def.deckId) {
         const res = await deckRuntime.activateDeck(def.deckId);
         if (res.fallbackUsed && def.deckId !== EYVAN_CLASSIC_DECK_ID) {
-          setShopNotice('برای فعال‌سازی این دست ورق ابتدا باید بسته‌ی آن دانلود شود.');
+          showShopNotice('برای فعال‌سازی این دست ورق ابتدا باید بسته‌ی آن دانلود شود.');
           return;
         }
       }
 
-      if (authUser) {
+      let activeUser = authUser;
+      if (!activeUser && shopTestMode) {
+        const testRes = await requestTestModeSessionApi().catch(() => null);
+        if (testRes?.ok && testRes.user) {
+          applyAuthenticatedUser(testRes.user);
+          activeUser = testRes.user;
+        }
+      }
+
+      if (activeUser) {
         try {
-          const equipRes = await equipInventoryItemRequest(def.id, def.slot);
+          let equipRes = await equipInventoryItemRequest(def.id, def.slot);
+          // In Shop Test Mode, if user clicks Equip directly on an item not yet claimed on server, auto-claim then equip
+          if (!equipRes.ok && shopTestMode) {
+            const claimRes = await claimShopItemRequest(def.id).catch(() => null);
+            if (claimRes?.ok) {
+              equipRes = await equipInventoryItemRequest(def.id, def.slot);
+            }
+          }
           if (equipRes.ok && equipRes.inventory) {
             applyServerInventoryToProfile(equipRes.inventory);
+            showShopNotice(`«${item.name || def.name}» فعال شد.`);
             return;
           }
-          if (equipRes.message) {
-            setShopNotice(equipRes.message);
+          if (!shopTestMode) {
+            if (equipRes.message) {
+              showShopNotice(equipRes.message);
+            }
+            return;
           }
-          return;
         } catch {
-          setShopNotice('خطا در ذخیره انتخاب روی سرور.');
-          return;
+          if (!shopTestMode) {
+            showShopNotice('خطا در ذخیره انتخاب روی سرور.');
+            return;
+          }
         }
       }
 
+      // Guaranteed local apply (also acts as seamless test-mode fallback if cookies are restricted)
+      if (shopTestMode) {
+        updateProfile((prev) => ({
+          ...prev,
+          ownedShopItemIds: Array.from(
+            new Set([...(prev.ownedShopItemIds ?? []), def.id])
+          ),
+        }));
+      }
       applyEquippedDefinitionLocally(def.id);
+      showShopNotice(`«${item.name || def.name}» فعال شد.`);
     },
-    [authUser, applyEquippedDefinitionLocally, applyServerInventoryToProfile]
+    [
+      authUser,
+      shopTestMode,
+      applyEquippedDefinitionLocally,
+      applyServerInventoryToProfile,
+      showShopNotice,
+      updateProfile,
+    ]
   );
 
   const handleUnequipSlot = useCallback(
     async (slot: ItemSlot) => {
-      setShopNotice(null);
+      showShopNotice(null);
       if (authUser) {
         try {
           const res = await unequipInventorySlotRequest(slot);
           if (res.ok && res.inventory) {
             applyServerInventoryToProfile(res.inventory);
+            return;
           }
-          return;
         } catch {
-          return;
+          // Fall through to local unequip
         }
       }
 
@@ -837,23 +987,46 @@ export default function App() {
           equippedBadgeId: pub.badgeId ?? undefined,
           equippedNameplateId: pub.nameplateId ?? undefined,
           equippedGameEffectId: pub.gameEffectId ?? undefined,
-          bannerCode: pub.bannerCode,
+          bannerCode: slot === 'banner' ? 'none' : pub.bannerCode,
+          customBannerUrl: slot === 'banner' ? null : prev.customBannerUrl,
         };
       });
     },
-    [authUser, applyServerInventoryToProfile, updateProfile]
+    [authUser, applyServerInventoryToProfile, showShopNotice, updateProfile]
   );
 
   const handlePurchaseShopItem = useCallback(
     async (item: ShopItem) => {
-      setShopNotice(null);
+      showShopNotice(null);
       const def = resolveCatalogItemDefinition(
         item.id,
         DeckRegistry.getAllCatalogEntries(false)
       );
       if (!def) return;
 
-      if (!authUser) {
+      let activeUser = authUser;
+      if (!activeUser && shopTestMode) {
+        const testRes = await requestTestModeSessionApi().catch(() => null);
+        if (testRes?.ok && testRes.user) {
+          applyAuthenticatedUser(testRes.user);
+          activeUser = testRes.user;
+        }
+      }
+
+      if (!activeUser) {
+        if (shopTestMode) {
+          updateProfile((prev) => ({
+            ...prev,
+            ownedShopItemIds: Array.from(
+              new Set([...(prev.ownedShopItemIds ?? []), def.id])
+            ),
+          }));
+          if (def.isEquippable && def.slot && def.kind !== 'card_deck') {
+            applyEquippedDefinitionLocally(def.id);
+          }
+          showShopNotice(`«${item.name || def.name}» دریافت و فعال شد.`);
+          return;
+        }
         openAuthModal('login', 'برای دریافت آیتم‌ها و ذخیره دائمی در حساب، ابتدا وارد شوید.');
         return;
       }
@@ -861,7 +1034,20 @@ export default function App() {
       try {
         const claimRes = await claimShopItemRequest(def.id);
         if (!claimRes.ok || !claimRes.inventory) {
-          setShopNotice(claimRes.message ?? 'دریافت آیتم انجام نشد.');
+          if (shopTestMode) {
+            updateProfile((prev) => ({
+              ...prev,
+              ownedShopItemIds: Array.from(
+                new Set([...(prev.ownedShopItemIds ?? []), def.id])
+              ),
+            }));
+            if (def.isEquippable && def.slot && def.kind !== 'card_deck') {
+              applyEquippedDefinitionLocally(def.id);
+            }
+            showShopNotice(`«${item.name || def.name}» دریافت و فعال شد.`);
+            return;
+          }
+          showShopNotice(claimRes.message ?? 'دریافت آیتم انجام نشد.');
           return;
         }
         applyServerInventoryToProfile(claimRes.inventory);
@@ -874,24 +1060,48 @@ export default function App() {
           if (claimRes.grantedGems) {
             parts.push(`${claimRes.grantedGems.toLocaleString('fa-IR')} الماس`);
           }
-          setShopNotice(`تبریک! ${parts.join(' و ')} به حساب شما اضافه شد.`);
+          showShopNotice(`تبریک! ${parts.join(' و ')} به حساب شما اضافه شد.`);
         } else if (def.isEquippable && def.slot && def.kind !== 'card_deck') {
-          // Automatically equip non-deck cosmetics upon claim for instant feedback
-          const equipRes = await equipInventoryItemRequest(def.id, def.slot);
-          if (equipRes.ok && equipRes.inventory) {
+          const equipRes = await equipInventoryItemRequest(def.id, def.slot).catch(() => null);
+          if (equipRes?.ok && equipRes.inventory) {
             applyServerInventoryToProfile(equipRes.inventory);
+          } else {
+            applyEquippedDefinitionLocally(def.id);
           }
+          showShopNotice(`«${item.name || def.name}» دریافت و فعال شد.`);
+        } else {
+          showShopNotice(`«${item.name || def.name}» به کلکسیون شما اضافه شد.`);
         }
       } catch {
-        setShopNotice('ارتباط با سرور فروشگاه برقرار نشد.');
+        if (shopTestMode) {
+          updateProfile((prev) => ({
+            ...prev,
+            ownedShopItemIds: Array.from(
+              new Set([...(prev.ownedShopItemIds ?? []), def.id])
+            ),
+          }));
+          if (def.isEquippable && def.slot && def.kind !== 'card_deck') {
+            applyEquippedDefinitionLocally(def.id);
+          }
+          showShopNotice(`«${item.name || def.name}» دریافت و فعال شد.`);
+          return;
+        }
+        showShopNotice('ارتباط با سرور فروشگاه برقرار نشد.');
       }
     },
-    [authUser, applyServerInventoryToProfile]
+    [
+      authUser,
+      shopTestMode,
+      applyEquippedDefinitionLocally,
+      applyServerInventoryToProfile,
+      showShopNotice,
+      updateProfile,
+    ]
   );
 
   const handleSelectDeck = useCallback(
     async (deckId: string) => {
-      setShopNotice(null);
+      showShopNotice(null);
       const res = await deckRuntime.activateDeck(deckId);
       const targetDeckId = res.activatedDeckId;
       const deckItemId = toDeckItemId(targetDeckId);
@@ -921,10 +1131,44 @@ export default function App() {
         },
       }));
     },
-    [authUser, profile.ownedShopItemIds, applyServerInventoryToProfile, updateProfile]
+    [
+      authUser,
+      profile.ownedShopItemIds,
+      applyServerInventoryToProfile,
+      showShopNotice,
+      updateProfile,
+    ]
+  );
+
+  const handleEquipItemById = useCallback(
+    async (itemId: string) => {
+      const def = resolveCatalogItemDefinition(
+        itemId,
+        DeckRegistry.getAllCatalogEntries(false)
+      );
+      if (!def) return;
+      if (def.kind === 'card_deck' && def.deckId) {
+        await handleSelectDeck(def.deckId);
+        return;
+      }
+      await handleEquipShopItem({
+        id: def.id,
+        section: def.section,
+        name: def.name,
+        subtitle: def.subtitle,
+        description: def.description,
+        price: def.price,
+        currency: def.currency,
+        rarity: def.rarity,
+        palette: [def.palette[0], def.palette[1], def.palette[2]],
+        motif: def.motif,
+      });
+    },
+    [handleEquipShopItem, handleSelectDeck]
   );
 
   const handleLaunchFromGameHub = (req: GameHubLaunchRequest) => {
+    pushHistoryGuard();
     setIsProfileOpen(false);
     setIsAuthModalOpen(false);
     setHokmTargetScore(req.targetMatchScore);
@@ -961,8 +1205,92 @@ export default function App() {
 
   const handleInspectPlayer = (userId: string) => {
     if (!userId) return;
+    pushHistoryGuard();
     setInspectedPlayerUserId(userId);
   };
+
+  const handleMainTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (
+      e.touches.length !== 1 ||
+      isProfileOpen ||
+      isAuthModalOpen ||
+      Boolean(inspectedPlayerUserId) ||
+      isFriendsChatOpen
+    ) {
+      swipeStartRef.current = null;
+      return;
+    }
+    const touch = e.touches[0];
+    const blocked =
+      isEditableElement(e.target) || hasHorizontalScrollAncestor(e.target);
+    swipeStartRef.current = {
+      x: touch.clientX,
+      y: touch.clientY,
+      ts: Date.now(),
+      blocked,
+    };
+  };
+
+  const handleMainTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
+    const start = swipeStartRef.current;
+    swipeStartRef.current = null;
+    if (!start || start.blocked || e.changedTouches.length !== 1) return;
+
+    const dt = Date.now() - start.ts;
+    if (dt > 650) return;
+
+    const touch = e.changedTouches[0];
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+
+    if (Math.abs(dx) < 58 || Math.abs(dx) < Math.abs(dy) * 1.45) return;
+
+    const currentIdx = TAB_SWIPE_ORDER.indexOf(activeTab);
+    if (currentIdx < 0) return;
+
+    // Physical left-to-right order: shop (left) | games (center) | friends (right)
+    // Swiping finger right (dx > 0) reveals the tab on the left; swiping left (dx < 0) reveals the tab on the right.
+    const nextIdx = dx > 0 ? currentIdx - 1 : currentIdx + 1;
+    if (nextIdx >= 0 && nextIdx < TAB_SWIPE_ORDER.length) {
+      handleSelectTab(TAB_SWIPE_ORDER[nextIdx]);
+    }
+  };
+
+  const profileDrawerNode = (
+    <ProfileDrawer
+      isOpen={isProfileOpen}
+      onClose={() => setIsProfileOpen(false)}
+      profile={profile}
+      onUpdateProfile={updateProfile}
+      authUser={authUser}
+      authLoading={authLoading}
+      onAuthChange={applyAuthenticatedUser}
+      pendingAuthAction={pendingAuthAction}
+      onClearPendingAuthAction={() => setPendingAuthAction(null)}
+      initialView={profileInitialView}
+      initialAuthMode={profileInitialAuthMode}
+      onOpenAuthModal={(mode) => openAuthModal(mode, null)}
+      onEquipItemById={handleEquipItemById}
+      onUnequipSlot={handleUnequipSlot}
+      onOpenBannerShop={() => {
+        pushHistoryGuard();
+        setIsProfileOpen(false);
+        setActiveGame(null);
+        setSelectedGameHub(null);
+        setShopInitialCategory('avatars_frames');
+        setActiveTab('shop');
+      }}
+      onOpenTopUpShop={() => {
+        pushHistoryGuard();
+        setIsProfileOpen(false);
+        setActiveGame(null);
+        setSelectedGameHub(null);
+        setHokmHubSubView('hub');
+        setShopInitialCategory('toman_topup');
+        setActiveTab('shop');
+      }}
+    />
+  );
 
   const publicProfileModalNode = (
     <PublicPlayerProfileModal
@@ -971,6 +1299,7 @@ export default function App() {
       isAuthenticated={Boolean(authUser)}
       onClose={() => setInspectedPlayerUserId(null)}
       onOpenGiftShop={() => {
+        pushHistoryGuard();
         setInspectedPlayerUserId(null);
         setActiveGame(null);
         setSelectedGameHub(null);
@@ -979,6 +1308,7 @@ export default function App() {
         setActiveTab('shop');
       }}
       onOpenDirectChat={(targetUid) => {
+        pushHistoryGuard();
         setInspectedPlayerUserId(null);
         setActiveGame(null);
         setSelectedGameHub(null);
@@ -1020,9 +1350,10 @@ export default function App() {
           autoJoinRoom={autoJoinInviteRoom}
           targetMatchScore={hokmTargetScore}
           initialLaunchAction={onlineLaunchAction}
-          soundEnabled={profile.appSettings.soundEnabled}
+          soundEnabled={effectiveSfxEnabled}
           reducedMotionPreference={profile.appSettings.reducedMotion}
           onInspectPlayer={handleInspectPlayer}
+          onInspectSelf={() => openProfileModal('overview', 'login')}
           onChangeUsername={(nextUsername) =>
             updateProfile((prev) => ({
               ...prev,
@@ -1057,6 +1388,7 @@ export default function App() {
             setHokmHubSubView('hub');
           }}
         />
+        {profileDrawerNode}
         {publicProfileModalNode}
       </>
     );
@@ -1064,41 +1396,53 @@ export default function App() {
 
   if (activeGame === 'hokm-offline') {
     return (
-      <HokmGame
-        playerName={profile.username}
-        tableSkinId={profile.equippedTableSkinId}
-        deckId={profile.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID}
-        cardBackId={profile.equippedCardBackId}
-        gameEffectId={profile.equippedGameEffectId}
-        targetMatchScore={hokmTargetScore}
-        soundEnabled={profile.appSettings.soundEnabled}
-        animationSpeed={profile.appSettings.animationSpeed}
-        reducedMotionPreference={profile.appSettings.reducedMotion}
-        onToggleSound={() =>
-          setProfile((prev) => ({
-            ...prev,
-            appSettings: {
-              ...prev.appSettings,
-              soundEnabled: !prev.appSettings.soundEnabled,
-            },
-          }))
-        }
-        onChangeAnimationSpeed={(speed) =>
-          setProfile((prev) => ({
-            ...prev,
-            appSettings: {
-              ...prev.appSettings,
-              animationSpeed: speed,
-            },
-          }))
-        }
-        onBackToGames={() => {
-          setActiveGame(null);
-          setActiveTab('games');
-          setSelectedGameHub('hokm');
-          setHokmHubSubView('hub');
-        }}
-      />
+      <>
+        <HokmGame
+          playerName={profile.username}
+          playerAvatarSrc={profile.customAvatarUrl ?? PLATFORM_ASSETS.userAvatar}
+          tableSkinId={profile.equippedTableSkinId}
+          deckId={profile.equippedDeckId ?? EYVAN_CLASSIC_DECK_ID}
+          cardBackId={profile.equippedCardBackId}
+          gameEffectId={profile.equippedGameEffectId}
+          targetMatchScore={hokmTargetScore}
+          soundEnabled={effectiveSfxEnabled}
+          animationSpeed="normal"
+          reducedMotionPreference={profile.appSettings.reducedMotion}
+          onInspectSelf={() => openProfileModal('overview', 'login')}
+          onToggleSound={() =>
+            setProfile((prev) => {
+              const nextSfx = !(
+                prev.appSettings.sfxEnabled ?? prev.appSettings.soundEnabled
+              );
+              return {
+                ...prev,
+                appSettings: {
+                  ...prev.appSettings,
+                  soundEnabled: nextSfx,
+                  sfxEnabled: nextSfx,
+                },
+              };
+            })
+          }
+          onChangeAnimationSpeed={(speed) =>
+            setProfile((prev) => ({
+              ...prev,
+              appSettings: {
+                ...prev.appSettings,
+                animationSpeed: speed,
+              },
+            }))
+          }
+          onBackToGames={() => {
+            setActiveGame(null);
+            setActiveTab('games');
+            setSelectedGameHub('hokm');
+            setHokmHubSubView('hub');
+          }}
+        />
+        {profileDrawerNode}
+        {publicProfileModalNode}
+      </>
     );
   }
 
@@ -1113,7 +1457,7 @@ export default function App() {
           gameId={selectedGameHub}
           themeMode={themeMode}
           subView={hokmHubSubView}
-          onSubViewChange={setHokmHubSubView}
+          onSubViewChange={handleChangeHokmSubView}
           currentUserId={authUser?.userId ?? null}
           userCoins={profile.coins}
           userGems={profile.gems}
@@ -1133,6 +1477,7 @@ export default function App() {
           onInventorySync={applyServerInventoryToProfile}
           onInspectPlayer={handleInspectPlayer}
           onOpenFriendGroups={() => {
+            pushHistoryGuard();
             setSelectedGameHub(null);
             setHokmHubSubView('hub');
             setFriendsInitialTab('groups');
@@ -1144,6 +1489,7 @@ export default function App() {
           }}
           onLaunchHokm={handleLaunchFromGameHub}
           onOpenFullShop={(category = 'all') => {
+            pushHistoryGuard();
             setSelectedGameHub(null);
             setHokmHubSubView('hub');
             setShopInitialCategory(category);
@@ -1178,7 +1524,11 @@ export default function App() {
   // =========================================================================
 
   return (
-    <div className="min-h-[100dvh] flex flex-col bg-[var(--eyvan-bg)] text-[var(--eyvan-text)] relative overflow-x-hidden transition-colors duration-200">
+    <div
+      onTouchStart={handleMainTouchStart}
+      onTouchEnd={handleMainTouchEnd}
+      className="min-h-[100dvh] flex flex-col bg-[var(--eyvan-bg)] text-[var(--eyvan-text)] relative overflow-x-hidden transition-colors duration-200"
+    >
       {/* GPU-stabilized Persian Iwan Architectural Backdrop */}
       <div
         className="fixed inset-0 z-0 pointer-events-none transform-gpu will-change-transform"
@@ -1208,6 +1558,37 @@ export default function App() {
           isAuthenticated={Boolean(authUser)}
           themeMode={themeMode}
           onToggleTheme={handleToggleTheme}
+          musicEnabled={effectiveMusicEnabled}
+          sfxEnabled={effectiveSfxEnabled}
+          onToggleMusic={() =>
+            setProfile((prev) => {
+              const nextMusic = !(
+                prev.appSettings.musicEnabled ?? prev.appSettings.soundEnabled
+              );
+              return {
+                ...prev,
+                appSettings: {
+                  ...prev.appSettings,
+                  musicEnabled: nextMusic,
+                },
+              };
+            })
+          }
+          onToggleSfx={() =>
+            setProfile((prev) => {
+              const nextSfx = !(
+                prev.appSettings.sfxEnabled ?? prev.appSettings.soundEnabled
+              );
+              return {
+                ...prev,
+                appSettings: {
+                  ...prev.appSettings,
+                  soundEnabled: nextSfx,
+                  sfxEnabled: nextSfx,
+                },
+              };
+            })
+          }
           isProfileOpen={isProfileOpen}
           onToggleProfile={() => {
             if (isProfileOpen) {
@@ -1264,10 +1645,18 @@ export default function App() {
               initialChatTargetUserId={pendingChatTargetUserId}
               onClearInitialChatTarget={() => setPendingChatTargetUserId(null)}
               refreshSignal={friendsRefreshSignal}
+              closeChatSignal={closeFriendsChatSignal}
+              onChatOpenChange={(open) => {
+                if (open && !isFriendsChatOpen) {
+                  pushHistoryGuard();
+                }
+                setIsFriendsChatOpen(open);
+              }}
               onOpenAccount={() => openAuthModal('login', null)}
               onInspectPlayer={handleInspectPlayer}
               onBack={() => handleSelectTab('games')}
               onJoinInvitedRoom={(roomCode) => {
+                pushHistoryGuard();
                 setIsProfileOpen(false);
                 setIsAuthModalOpen(false);
                 setSelectedGameHub(null);
@@ -1281,7 +1670,7 @@ export default function App() {
         </main>
 
         {/* Floating Frosted Pill Bottom Dock */}
-        {!isTyping && (
+        {!isTyping && !isFriendsChatOpen && (
           <BottomNav
             activeTab={activeTab}
             onSelectTab={handleSelectTab}
@@ -1301,34 +1690,11 @@ export default function App() {
           </div>
         )}
 
+        {/* PWA Entry Install Popup (only when NOT installed as PWA) */}
+        <PWAInstallModal disabled={activeGame !== null} />
+
         {/* Full-Screen Own Profile & Grouped Settings */}
-        <ProfileDrawer
-          isOpen={isProfileOpen}
-          onClose={() => setIsProfileOpen(false)}
-          profile={profile}
-          onUpdateProfile={updateProfile}
-          authUser={authUser}
-          authLoading={authLoading}
-          onAuthChange={applyAuthenticatedUser}
-          pendingAuthAction={pendingAuthAction}
-          onClearPendingAuthAction={() => setPendingAuthAction(null)}
-          initialView={profileInitialView}
-          initialAuthMode={profileInitialAuthMode}
-          onOpenAuthModal={(mode) => openAuthModal(mode, null)}
-          onOpenBannerShop={() => {
-            setIsProfileOpen(false);
-            setSelectedGameHub(null);
-            setShopInitialCategory('avatars_frames');
-            setActiveTab('shop');
-          }}
-          onOpenTopUpShop={() => {
-            setIsProfileOpen(false);
-            setSelectedGameHub(null);
-            setHokmHubSubView('hub');
-            setShopInitialCategory('toman_topup');
-            setActiveTab('shop');
-          }}
-        />
+        {profileDrawerNode}
 
         {/* Dedicated Standalone Auth-Only Modal (Unified Email-First Flow) */}
         <AuthModal

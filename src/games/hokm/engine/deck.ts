@@ -118,21 +118,32 @@ export function dealCardsBatch(
   };
 }
 
+const TRUMP_ALTERNATING_SUIT_ORDER: Record<Card['suit'], readonly Card['suit'][]> = {
+  hearts: ['spades', 'diamonds', 'clubs', 'hearts'],
+  spades: ['hearts', 'clubs', 'diamonds', 'spades'],
+  diamonds: ['clubs', 'hearts', 'spades', 'diamonds'],
+  clubs: ['diamonds', 'spades', 'hearts', 'clubs'],
+};
+
+const DEFAULT_ALTERNATING_SUIT_ORDER: readonly Card['suit'][] = [
+  'hearts',
+  'spades',
+  'diamonds',
+  'clubs',
+];
+
 /**
- * Sorts a player's hand strictly Left-to-Right by suit:
- * Hearts (دل) -> Spades (پیک) -> Diamonds (خشت) -> Clubs (گشنیز)
- * and ascending power (2 on left -> Ace on right) within each suit.
+ * Sorts a player's hand Left-to-Right with strictly alternating Red/Black suits
+ * (placing the chosen `trumpSuit` on the rightmost wing when set)
+ * and ascending rank power (2 on left -> Ace on right) within each suit.
  */
 export function sortHand(
   hand: readonly Card[],
-  _trumpSuit: Card['suit'] | null = null
+  trumpSuit: Card['suit'] | null = null
 ): Card[] {
-  const suitOrder: readonly Card['suit'][] = [
-    'hearts',
-    'spades',
-    'diamonds',
-    'clubs',
-  ];
+  const suitOrder = trumpSuit
+    ? TRUMP_ALTERNATING_SUIT_ORDER[trumpSuit]
+    : DEFAULT_ALTERNATING_SUIT_ORDER;
 
   return [...hand].sort((a, b) => {
     const suitDiff = suitOrder.indexOf(a.suit) - suitOrder.indexOf(b.suit);

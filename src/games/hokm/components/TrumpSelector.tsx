@@ -8,6 +8,8 @@ interface TrumpSelectorProps {
   reducedMotion?: boolean;
 }
 
+const TRUMP_PICKER_ORDER: readonly Suit[] = ['hearts', 'spades', 'clubs', 'diamonds'];
+
 /**
  * Large, unmistakable icon-only Trump suit picker — zero suit words or explanatory copy,
  * framed with a radiant golden halo so the Hakem notices immediately.
@@ -43,7 +45,7 @@ export const TrumpSelector: React.FC<TrumpSelectorProps> = ({
 
       <div className="relative w-max shrink-0 bg-gradient-to-b from-[#0E2E26]/96 to-[#061814]/97 backdrop-blur-xl rounded-[28px] border-[2.5px] border-[#F3D179] shadow-[0_28px_72px_rgba(0,0,0,0.72),0_0_38px_rgba(243,209,121,0.34)] p-4 sm:p-6">
         <div className="grid grid-cols-2 gap-3.5 sm:gap-5">
-          {SUITS.map((suit, idx) => {
+          {TRUMP_PICKER_ORDER.map((suit, idx) => {
             const meta = SUIT_META[suit];
             return (
               <motion.button

@@ -10,11 +10,21 @@ import {
   TeamId,
 } from '../engine/types';
 import { getLegalCards } from '../engine/rules';
-import { resolveNextHakem } from '../engine/gameEngine';
 import { PlayingCard, SuitIconSvg } from './PlayingCard';
 import { TrumpSelector } from './TrumpSelector';
 import { HandResultModal } from './HandResultModal';
-import { HandWinCelebration } from './HandWinCelebration';
+import { HandResetTableAnimation } from './HandResetTableAnimation';
+import {
+  InGameReactionMenu,
+  InGameReactionPayload,
+  SeatReactionBubble,
+} from './InGameReactionMenu';
+import {
+  BotProfileModal,
+  BotShowcaseProfile,
+  OFFLINE_BOT_PROFILES,
+} from './BotProfileModal';
+import { hokmSound } from '../audio/soundEffects';
 import { CardBackSvg } from './CardBackSvg';
 import { PersianCornerOrnament } from '../../../platform/theme/PersianPatterns';
 import { toPersianDigits } from '../../../platform/theme/tokens';
@@ -68,6 +78,7 @@ interface HokmTableProps {
   trickCollectPhase: TrickCollectPhase;
   collectingWinnerTeam: TeamId | null;
   playerName: string;
+  playerAvatarSrc?: string;
   tableSkinId?: string;
   deckId?: string;
   cardBackId?: string;
@@ -81,6 +92,7 @@ interface HokmTableProps {
   onlineHud?: OnlineTableHudInfo;
   canStartRematch?: boolean;
   onInspectPlayer?: (userId: string) => void;
+  onInspectSelf?: () => void;
   onPlayCard: (cardId: string) => void;
   onChooseTrump: (suit: Suit) => void;
   onRequestExit: () => void;
@@ -131,8 +143,13 @@ const SeatProfile: React.FC<{
   avatarSrc: string;
   userId?: string | null;
   onInspectPlayer?: (userId: string) => void;
+  onInspectSelf?: () => void;
+  onInspectSeat?: (seat: Seat) => void;
+  showOnlineDot?: boolean;
   isTurn: boolean;
   isHakem: boolean;
+  hakemKey?: string;
+  reducedMotion?: boolean;
   connected?: boolean;
   disconnectRemainingSec?: number | null;
   appearance?: SeatPublicAppearance;
@@ -142,8 +159,12 @@ const SeatProfile: React.FC<{
   avatarSrc,
   userId,
   onInspectPlayer,
+  onInspectSeat,
+  showOnlineDot = false,
   isTurn,
   isHakem,
+  hakemKey = '1',
+  reducedMotion = false,
   connected = true,
   disconnectRemainingSec = null,
   appearance,
@@ -152,56 +173,70 @@ const SeatProfile: React.FC<{
     ? getAvatarFrameVisual(appearance.avatarFrameId)
     : null;
   const badgeVisual = getProfileBadgeVisual(appearance?.badgeId);
-  const canInspect = Boolean(userId && onInspectPlayer && seat !== 'south');
+  // Mid-game tapping own profile ('south') does NOTHING; only other players open their profile card
+  const canInspect = Boolean(
+    seat !== 'south' && ((userId && onInspectPlayer) || onInspectSeat)
+  );
+
+  const handleOpenProfile = (e?: React.MouseEvent | React.KeyboardEvent) => {
+    e?.stopPropagation();
+    if (seat === 'south') return;
+    if (userId && onInspectPlayer) {
+      onInspectPlayer(userId);
+    } else if (onInspectSeat) {
+      onInspectSeat(seat);
+    }
+  };
 
   return (
     <div
       className={`relative inline-flex flex-col items-center select-none shrink-0 ${
         canInspect
-          ? 'cursor-pointer transition-transform hover:scale-[1.04] active:scale-[0.97]'
-          : ''
+          ? 'pointer-events-auto cursor-pointer active:opacity-90'
+          : 'pointer-events-none'
       }`}
       role={canInspect ? 'button' : undefined}
       tabIndex={canInspect ? 0 : undefined}
-      onClick={canInspect ? () => onInspectPlayer?.(userId!) : undefined}
+      onClick={canInspect ? (e) => handleOpenProfile(e) : undefined}
       onKeyDown={
         canInspect
           ? (e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
-                onInspectPlayer?.(userId!);
+                handleOpenProfile(e);
               }
             }
           : undefined
       }
       data-seat={seat}
+      data-testid={`seat-profile-${seat}`}
       data-active-turn={isTurn ? 'true' : 'false'}
       data-connected={connected ? 'true' : 'false'}
       data-seat-deck={appearance?.deckId ?? undefined}
       data-avatar-frame={appearance?.avatarFrameId ?? undefined}
       data-profile-badge={appearance?.badgeId ?? undefined}
     >
-      {/* Circular Avatar Medallion */}
-      <div className="relative">
+      {/* Enlarged Circular Avatar Medallion (zero layout-shift scale during dealing) */}
+      <div className="relative w-14 h-14 sm:w-16 sm:h-16 shrink-0">
         {isTurn && connected && (
           <span
-            className="absolute -inset-1.5 rounded-full bg-[#F3D179]/28 blur-[5px] animate-pulse pointer-events-none"
+            className="absolute -inset-2 rounded-full bg-[#F3D179]/34 blur-[7px] animate-pulse pointer-events-none"
             aria-hidden="true"
           />
         )}
         <div
-          className={`relative w-11 h-11 sm:w-12 sm:h-12 rounded-full overflow-hidden border-[2.5px] bg-[#0B1E1A] transition-all duration-200 ${
+          className={`relative w-14 h-14 sm:w-16 sm:h-16 rounded-full overflow-hidden border-[2.5px] bg-[#0B1E1A] transition-colors duration-200 ${
             !connected
               ? 'border-[#F59E0B] opacity-70 grayscale-[0.4]'
               : isTurn
-                ? 'border-[#F3D179] shadow-[0_0_20px_rgba(243,209,121,0.65)] scale-[1.04]'
-                : 'border-[#D4AE58]/60 shadow-[0_4px_12px_rgba(0,0,0,0.45)]'
+                ? 'border-[#F3D179] shadow-[0_0_24px_rgba(243,209,121,0.78)]'
+                : 'border-[#D4AE58]/65 shadow-[0_5px_14px_rgba(0,0,0,0.48)]'
           }`}
           style={
             connected && !isTurn && frameVisual
               ? {
                   borderColor: frameVisual.ringColor,
-                  boxShadow: `0 0 14px ${frameVisual.glowColor}`,
+                  boxShadow: `0 0 16px ${frameVisual.glowColor}`,
                 }
               : undefined
           }
@@ -216,30 +251,73 @@ const SeatProfile: React.FC<{
           />
         </div>
 
-        {/* Hakem Crown perched cleanly on top rim */}
-        {isHakem && (
+        {/* Live Online Green Dot (Online Hokm Only — vanishes immediately on disconnect) */}
+        {showOnlineDot && connected && (
           <span
-            className="absolute -top-2 left-1/2 -translate-x-1/2 w-5 h-5 rounded-full bg-gradient-to-b from-[#17362E] to-[#0B1F1A] border border-[#F3D179] flex items-center justify-center shadow-[0_2px_8px_rgba(0,0,0,0.65)]"
+            data-testid={`seat-online-dot-${seat}`}
+            aria-label="آنلاین"
+            className="absolute bottom-0.5 right-0.5 z-20 w-3.5 h-3.5 rounded-full bg-[#22C55E] border-[2.5px] border-[#061814] shadow-[0_0_9px_rgba(34,197,94,0.9)]"
+          />
+        )}
+
+        {/* Eye-Catching Gleaming Golden Hakem Crown perched cleanly on top rim */}
+        {isHakem && (
+          <motion.span
+            key={`hakem-crown-${seat}-${hakemKey}`}
+            data-testid={`hakem-crown-${seat}`}
+            initial={
+              reducedMotion
+                ? false
+                : { scale: 0.45, y: -12, rotate: -18, opacity: 0 }
+            }
+            animate={{ scale: 1, y: 0, rotate: 0, opacity: 1 }}
+            transition={{ type: 'spring', stiffness: 360, damping: 18 }}
+            className="absolute -top-4 left-1/2 -translate-x-1/2 z-20 w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-gradient-to-b from-[#295A4B] via-[#13332B] to-[#081A16] border-2 border-[#FEF08A] flex items-center justify-center shadow-[0_3px_16px_rgba(0,0,0,0.72),0_0_22px_rgba(253,224,71,0.82)]"
             aria-label="حاکم"
           >
-            <Crown className="w-3 h-3 text-[#F3D179] fill-[#F3D179]" />
-          </span>
+            {/* Entrance Golden Sunburst Flare so everyone immediately notices the Hakem */}
+            {!reducedMotion && (
+              <>
+                <motion.span
+                  aria-hidden="true"
+                  initial={{ scale: 0.6, opacity: 1 }}
+                  animate={{ scale: 2.9, opacity: 0 }}
+                  transition={{ duration: 0.95, ease: 'easeOut' }}
+                  className="pointer-events-none absolute inset-0 rounded-full border-2 border-[#FEF08A] shadow-[0_0_24px_rgba(253,224,71,0.95)]"
+                />
+                <motion.span
+                  aria-hidden="true"
+                  initial={{ scale: 0.5, opacity: 0.95 }}
+                  animate={{ scale: 2.3, opacity: 0 }}
+                  transition={{ duration: 0.72, ease: 'easeOut' }}
+                  className="pointer-events-none absolute inset-0 rounded-full bg-[radial-gradient(circle,rgba(255,255,255,0.95)_0%,rgba(254,240,138,0.75)_45%,transparent_75%)]"
+                />
+                <motion.span
+                  aria-hidden="true"
+                  animate={{ opacity: [0.32, 0.82, 0.32], scale: [1, 1.24, 1] }}
+                  transition={{ duration: 2.1, repeat: Infinity, ease: 'easeInOut' }}
+                  className="pointer-events-none absolute -inset-1 rounded-full bg-[#FEF08A]/35 blur-[5px]"
+                />
+              </>
+            )}
+            <Crown className="relative z-10 w-5 h-5 sm:w-[22px] sm:h-[22px] text-[#FEF08A] fill-[#F5C542] drop-shadow-[0_0_8px_rgba(253,224,71,0.9)]" />
+          </motion.span>
         )}
       </div>
 
-      {/* Uniform Centered Dark-Glass English Nameplate overlapping bottom edge of ring */}
+      {/* Uniform Centered Dark-Glass Username Plate overlapping bottom edge of ring */}
       <div
-        className={`relative z-10 -mt-2 px-2.5 py-[2px] rounded-full border backdrop-blur-md transition-colors duration-200 flex items-center gap-1 ${
+        className={`relative z-10 -mt-2 px-3 py-[3px] rounded-full border backdrop-blur-md transition-colors duration-200 flex items-center gap-1 ${
           !connected
             ? 'bg-[#3B1D0A]/95 border-[#F59E0B] shadow-[0_2px_8px_rgba(0,0,0,0.5)]'
             : isTurn
               ? 'bg-[#0E2B24]/95 border-[#F3D179] shadow-[0_3px_10px_rgba(0,0,0,0.5)]'
-              : 'bg-[#061814]/88 border-[#D4AE58]/40 shadow-[0_2px_8px_rgba(0,0,0,0.4)]'
+              : 'bg-[#061814]/88 border-[#D4AE58]/45 shadow-[0_2px_8px_rgba(0,0,0,0.42)]'
         }`}
       >
         <span
           dir="ltr"
-          className="block text-[10px] sm:text-xs font-extrabold tracking-tight text-[#FAF6EE] truncate max-w-[74px] sm:max-w-[108px] text-center leading-tight"
+          className="block text-[11px] sm:text-xs font-extrabold tracking-tight text-[#FAF6EE] truncate max-w-[92px] sm:max-w-[126px] text-center leading-tight"
         >
           {displayName}
         </span>
@@ -247,7 +325,7 @@ const SeatProfile: React.FC<{
           <span
             title={badgeVisual.label}
             style={{ color: badgeVisual.color }}
-            className="text-[9px] font-black shrink-0"
+            className="text-[10px] font-black shrink-0"
           >
             {badgeVisual.symbol}
           </span>
@@ -398,11 +476,94 @@ const HiddenHandFan: React.FC<{
  * - 7 glowing dots underneath = Tricks won in the current hand (out of 7!)
  * - Center Trump Medallion = clickable temporary Back trigger (opens exit/forfeit warning)
  */
+const TrickLedPip: React.FC<{
+  lit: boolean;
+  team: 'myTeam' | 'opponentTeam';
+  reducedMotion: boolean;
+  flashPulse?: boolean;
+  pipRef?: (el: HTMLSpanElement | null) => void;
+}> = ({ lit, team, reducedMotion, flashPulse = false, pipRef }) => {
+  const isMy = team === 'myTeam';
+  const ringBorder = isMy ? 'border-[#A7F3D0]' : 'border-[#FECDD3]';
+  const activeHex = isMy ? '#34D399' : '#FB7185';
+  const activeGlow = isMy
+    ? '0 0 11px 2px rgba(52,211,153,0.92)'
+    : '0 0 11px 2px rgba(251,113,133,0.92)';
+  const burstGlow = isMy
+    ? '0 0 24px 8px rgba(110,231,183,1)'
+    : '0 0 24px 8px rgba(253,164,175,1)';
+
+  return (
+    <span
+      ref={pipRef}
+      className="relative inline-flex items-center justify-center w-[9.5px] h-[9.5px] sm:w-3 sm:h-3"
+    >
+      {flashPulse && !reducedMotion && (
+        <>
+          <motion.span
+            initial={{ scale: 0.7, opacity: 1 }}
+            animate={{ scale: 4.6, opacity: 0 }}
+            transition={{ duration: 0.78, ease: 'easeOut' }}
+            className={`pointer-events-none absolute inset-0 rounded-full border-2 ${ringBorder}`}
+            aria-hidden="true"
+          />
+          <motion.span
+            initial={{ scale: 0.6, opacity: 1 }}
+            animate={{ scale: 3.4, opacity: 0 }}
+            transition={{ duration: 0.54, ease: 'easeOut' }}
+            className="pointer-events-none absolute inset-0 rounded-full bg-white blur-[2px]"
+            aria-hidden="true"
+          />
+        </>
+      )}
+      <motion.span
+        animate={
+          lit
+            ? {
+                scale: flashPulse && !reducedMotion ? [1.95, 1.1] : 1.08,
+                backgroundColor:
+                  flashPulse && !reducedMotion ? ['#FFFFFF', activeHex] : activeHex,
+                boxShadow:
+                  flashPulse && !reducedMotion ? [burstGlow, activeGlow] : activeGlow,
+              }
+            : {
+                scale: 1,
+                backgroundColor: 'rgba(255,255,255,0.16)',
+                boxShadow: '0 0 0px 0px rgba(0,0,0,0)',
+              }
+        }
+        transition={{ duration: reducedMotion ? 0.05 : 0.48, ease: [0.18, 1, 0.3, 1] }}
+        className="w-full h-full rounded-full"
+      />
+    </span>
+  );
+};
+
 const RoyalScoreboard: React.FC<{
   state: HokmState;
   reducedMotion: boolean;
+  trumpSlotRef: React.RefObject<HTMLDivElement | null>;
+  myScoreRef: React.RefObject<HTMLDivElement | null>;
+  oppScoreRef: React.RefObject<HTMLDivElement | null>;
+  registerPipRef: (team: TeamId, index: number, el: HTMLSpanElement | null) => void;
+  activePipFlash: { team: TeamId; index: number } | null;
+  pendingOrbPip: { team: TeamId; index: number } | null;
+  activeScoreFlashTeam: TeamId | null;
+  hideTrumpUntilLanded: boolean;
   onRequestExit: () => void;
-}> = ({ state, reducedMotion, onRequestExit }) => {
+}> = ({
+  state,
+  reducedMotion,
+  trumpSlotRef,
+  myScoreRef,
+  oppScoreRef,
+  registerPipRef,
+  activePipFlash,
+  pendingOrbPip,
+  activeScoreFlashTeam,
+  hideTrumpUntilLanded,
+  onRequestExit,
+}) => {
   return (
     <div
       className="w-full max-w-[440px] sm:max-w-[560px] flex items-center justify-between gap-2 sm:gap-5 rounded-2xl px-3.5 sm:px-6 py-2 sm:py-2.5 bg-gradient-to-b from-[#0D2E27]/96 to-[#071A16]/96 border-[1.5px] border-[#D4AE58]/65 shadow-[0_8px_28px_rgba(0,0,0,0.5),inset_0_1px_0_rgba(243,209,121,0.28)]"
@@ -414,31 +575,49 @@ const RoyalScoreboard: React.FC<{
           <span className="text-xs sm:text-sm font-extrabold text-[#6EE7B7] whitespace-nowrap">
             تیم ما
           </span>
-          {/* 7-Trick Pip Progress Bar (counts the 7 tricks in the current hand) */}
+          {/* 7-Trick Pip Progress Bar (newly won pip lights right as flying orb merges in) */}
           <div
             className="flex items-center gap-[4px] sm:gap-1.5 mt-1.5"
             data-testid="tricks-pips-myTeam"
             data-tricks={state.trickCounts.myTeam}
             aria-label={`دست‌های برده تیم ما: ${toPersianDigits(state.trickCounts.myTeam)} از ۷`}
           >
-            {Array.from({ length: 7 }).map((_, i) => (
-              <span
-                key={i}
-                className={`w-[7.5px] h-[7.5px] sm:w-2.5 sm:h-2.5 rounded-full transition-all duration-200 ${
-                  i < state.trickCounts.myTeam
-                    ? 'bg-[#34D399] shadow-[0_0_8px_rgba(52,211,153,0.9)] scale-110'
-                    : 'bg-white/15'
-                }`}
-              />
-            ))}
+            {Array.from({ length: 7 }).map((_, i) => {
+              const isHeldForOrb =
+                pendingOrbPip?.team === 'myTeam' && pendingOrbPip.index === i;
+              return (
+                <TrickLedPip
+                  key={i}
+                  lit={i < state.trickCounts.myTeam && !isHeldForOrb}
+                  team="myTeam"
+                  reducedMotion={reducedMotion}
+                  flashPulse={
+                    activePipFlash?.team === 'myTeam' &&
+                    activePipFlash.index === i
+                  }
+                  pipRef={(el) => registerPipRef('myTeam', i, el)}
+                />
+              );
+            })}
           </div>
         </div>
 
-        {/* Big Main Number = Match Rounds Won (out of 3) */}
+        {/* Big Main Number = Match Rounds Won (zero key-remount jitter) */}
         <motion.div
-          key={`my-rounds-${state.matchScores.myTeam}`}
-          initial={reducedMotion ? false : { scale: 1.38 }}
-          animate={{ scale: 1 }}
+          ref={myScoreRef}
+          animate={
+            activeScoreFlashTeam === 'myTeam' && !reducedMotion
+              ? {
+                  scale: [1, 1.38, 1],
+                  boxShadow: [
+                    '0 0 0px 0px rgba(110,231,183,0)',
+                    '0 0 32px 8px rgba(110,231,183,0.92)',
+                    '0 0 0px 0px rgba(110,231,183,0)',
+                  ],
+                }
+              : { scale: 1, boxShadow: '0 0 0px 0px rgba(0,0,0,0)' }
+          }
+          transition={{ duration: 0.62, ease: [0.18, 1, 0.3, 1] }}
           data-testid="match-score-myTeam"
           className="min-w-[38px] sm:min-w-[48px] h-10 sm:h-12 rounded-xl bg-[#0F382E] border border-[#34D399]/60 flex items-center justify-center text-xl sm:text-2xl font-black text-[#FFFFFF] tabular-nums shadow-inner"
         >
@@ -447,7 +626,10 @@ const RoyalScoreboard: React.FC<{
       </div>
 
       {/* CENTER ORNATE TRUMP MEDALLION (Pure Icon-Only + Temporary Back Trigger) */}
-      <div className="relative flex items-center justify-center px-1 sm:px-2 shrink-0">
+      <div
+        ref={trumpSlotRef}
+        className="relative flex items-center justify-center px-1 sm:px-2 shrink-0"
+      >
         <button
           type="button"
           onClick={onRequestExit}
@@ -455,14 +637,14 @@ const RoyalScoreboard: React.FC<{
           aria-label="خروج از بازی"
           className="rounded-full cursor-pointer transition-transform active:scale-92 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F3D179]"
         >
-          {state.trumpSuit ? (
+          {state.trumpSuit && !hideTrumpUntilLanded ? (
             <motion.div
               key={state.trumpSuit}
               data-testid="trump-indicator"
-              initial={reducedMotion ? false : { scale: 0.65 }}
+              initial={reducedMotion ? false : { scale: 1.24 }}
               animate={{ scale: 1 }}
-              transition={{ type: 'spring', stiffness: 360, damping: 24 }}
-              className="w-11 h-11 sm:w-14 sm:h-14 rounded-full bg-[#FFFFFF] border-[2.5px] border-[#F3D179] shadow-[0_0_22px_rgba(243,209,121,0.52)] hover:shadow-[0_0_28px_rgba(243,209,121,0.75)] flex items-center justify-center shrink-0"
+              transition={{ type: 'spring', stiffness: 360, damping: 22 }}
+              className="w-11 h-11 sm:w-14 sm:h-14 rounded-full bg-[#FFFFFF] border-[2.5px] border-[#F3D179] shadow-[0_0_24px_rgba(243,209,121,0.65)] hover:shadow-[0_0_28px_rgba(243,209,121,0.82)] flex items-center justify-center shrink-0"
             >
               <SuitIconSvg
                 suit={state.trumpSuit}
@@ -482,11 +664,22 @@ const RoyalScoreboard: React.FC<{
         className="flex items-center gap-2.5 sm:gap-4 flex-1 justify-start"
         data-testid="match-scoreboard"
       >
-        {/* Big Main Number = Match Rounds Won (out of 3) */}
+        {/* Big Main Number = Match Rounds Won (zero key-remount jitter) */}
         <motion.div
-          key={`opp-rounds-${state.matchScores.opponentTeam}`}
-          initial={reducedMotion ? false : { scale: 1.38 }}
-          animate={{ scale: 1 }}
+          ref={oppScoreRef}
+          animate={
+            activeScoreFlashTeam === 'opponentTeam' && !reducedMotion
+              ? {
+                  scale: [1, 1.38, 1],
+                  boxShadow: [
+                    '0 0 0px 0px rgba(251,113,133,0)',
+                    '0 0 32px 8px rgba(251,113,133,0.92)',
+                    '0 0 0px 0px rgba(251,113,133,0)',
+                  ],
+                }
+              : { scale: 1, boxShadow: '0 0 0px 0px rgba(0,0,0,0)' }
+          }
+          transition={{ duration: 0.62, ease: [0.18, 1, 0.3, 1] }}
           data-testid="match-score-opponentTeam"
           className="min-w-[38px] sm:min-w-[48px] h-10 sm:h-12 rounded-xl bg-[#3B161C] border border-[#FB7185]/60 flex items-center justify-center text-xl sm:text-2xl font-black text-[#FFFFFF] tabular-nums shadow-inner"
         >
@@ -497,23 +690,31 @@ const RoyalScoreboard: React.FC<{
           <span className="text-xs sm:text-sm font-extrabold text-[#FCA5A5] whitespace-nowrap">
             حریف
           </span>
-          {/* 7-Trick Pip Progress Bar (counts the 7 tricks in the current hand) */}
+          {/* 7-Trick Pip Progress Bar */}
           <div
             className="flex items-center gap-[4px] sm:gap-1.5 mt-1.5"
             data-testid="tricks-pips-opponentTeam"
             data-tricks={state.trickCounts.opponentTeam}
             aria-label={`دست‌های برده حریف: ${toPersianDigits(state.trickCounts.opponentTeam)} از ۷`}
           >
-            {Array.from({ length: 7 }).map((_, i) => (
-              <span
-                key={i}
-                className={`w-[7.5px] h-[7.5px] sm:w-2.5 sm:h-2.5 rounded-full transition-all duration-200 ${
-                  i < state.trickCounts.opponentTeam
-                    ? 'bg-[#FB7185] shadow-[0_0_8px_rgba(251,113,133,0.9)] scale-110'
-                    : 'bg-white/15'
-                }`}
-              />
-            ))}
+            {Array.from({ length: 7 }).map((_, i) => {
+              const isHeldForOrb =
+                pendingOrbPip?.team === 'opponentTeam' &&
+                pendingOrbPip.index === i;
+              return (
+                <TrickLedPip
+                  key={i}
+                  lit={i < state.trickCounts.opponentTeam && !isHeldForOrb}
+                  team="opponentTeam"
+                  reducedMotion={reducedMotion}
+                  flashPulse={
+                    activePipFlash?.team === 'opponentTeam' &&
+                    activePipFlash.index === i
+                  }
+                  pipRef={(el) => registerPipRef('opponentTeam', i, el)}
+                />
+              );
+            })}
           </div>
         </div>
       </div>
@@ -538,10 +739,12 @@ interface DraggableHandCardProps {
   cardWidthPx: number;
   deckId?: string;
   isLegal: boolean;
+  isSelected: boolean;
   canHumanPlay: boolean;
   handGathered: boolean;
   reducedMotion: boolean;
   dropRingRef: React.RefObject<HTMLDivElement | null>;
+  onSelectCard: (cardId: string | null) => void;
   onPlayCard: (cardId: string) => void;
 }
 
@@ -555,17 +758,18 @@ const DraggableHandCard: React.FC<DraggableHandCardProps> = React.memo(
     cardWidthPx,
     deckId,
     isLegal,
+    isSelected,
     canHumanPlay,
     handGathered,
     reducedMotion,
     dropRingRef,
+    onSelectCard,
     onPlayCard,
   }) => {
     const canPlayNow = canHumanPlay && isLegal && !handGathered;
-    // Out of turn: every card stays vivid & draggable (springs back without playing).
-    // On player's turn: ONLY legal cards stay vivid & draggable; illegal cards are dimmed & disabled!
     const isCardActive = !canHumanPlay || isLegal;
     const isDraggableNow = isCardActive && !handGathered;
+    const selectedActive = isSelected && canPlayNow;
 
     const slotRef = useRef<HTMLDivElement | null>(null);
     const innerRef = useRef<HTMLDivElement | null>(null);
@@ -608,9 +812,12 @@ const DraggableHandCard: React.FC<DraggableHandCardProps> = React.memo(
       dropOver: false,
     });
 
-    const restTransform = `translate3d(0px, ${fanArcY}px, 0px) rotate(${fanRotateDeg}deg) scale(${
-      handGathered ? 0.94 : 1
-    })`;
+    // Tap-to-Select elevates the card cleanly IN ITS OWN FAN SLOT (never jumping in front of neighbors!)
+    const restTransform = selectedActive
+      ? `translate3d(0px, ${fanArcY - 20}px, 0px) rotate(${fanRotateDeg}deg) scale(1.03)`
+      : `translate3d(0px, ${fanArcY}px, 0px) rotate(${fanRotateDeg}deg) scale(${
+          handGathered ? 0.94 : 1
+        })`;
 
     // Keep resting fan transform synced smoothly when NOT actively dragging
     useEffect(() => {
@@ -621,9 +828,10 @@ const DraggableHandCard: React.FC<DraggableHandCardProps> = React.memo(
         ? 'none'
         : handGathered
           ? 'transform 360ms cubic-bezier(0.22, 1, 0.36, 1)'
-          : 'transform 380ms cubic-bezier(0.16, 1, 0.3, 1)';
+          : 'transform 220ms cubic-bezier(0.16, 1, 0.3, 1)';
       el.style.transform = restTransform;
       if (slot) {
+        // Strictly preserve slot z-order when selected so neighboring cards stay naturally layered!
         slot.style.zIndex = String(idx + 1);
       }
     }, [restTransform, reducedMotion, idx, handGathered]);
@@ -810,16 +1018,27 @@ const DraggableHandCard: React.FC<DraggableHandCardProps> = React.memo(
 
         // Play ONLY if it is the player's turn AND the card is legal
         if (droppedOnTable && canPlayNow) {
+          onSelectCard(null);
           onPlayCard(card.id);
           return;
         }
+      } else if (!wasDrag && !cancelled && canPlayNow) {
+        // Tap-to-select + 2nd-tap-to-play alongside Drag-and-Drop!
+        if (selectedActive) {
+          onSelectCard(null);
+          onPlayCard(card.id);
+          return;
+        }
+        hokmSound.playCardSelect();
+        onSelectCard(card.id);
+        return;
       }
 
-      // Pure Drag-and-Drop ONLY: tapping or invalid/out-of-turn release springs smoothly back into the fan
+      // Snap smoothly back into resting/selected slot
       if (el) {
         el.style.transition = reducedMotion
           ? 'none'
-          : 'transform 260ms cubic-bezier(0.22, 1, 0.36, 1)';
+          : 'transform 240ms cubic-bezier(0.22, 1, 0.36, 1)';
         el.style.transform = restTransform;
       }
       if (slot) {
@@ -853,10 +1072,27 @@ const DraggableHandCard: React.FC<DraggableHandCardProps> = React.memo(
           onPointerMove={handlePointerMove}
           onPointerUp={(e) => finishPointer(e, false)}
           onPointerCancel={(e) => finishPointer(e, true)}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (!canPlayNow) return;
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.stopPropagation();
+              if (selectedActive) {
+                onSelectCard(null);
+                onPlayCard(card.id);
+              } else {
+                hokmSound.playCardSelect();
+                onSelectCard(card.id);
+              }
+            }
+          }}
           role="button"
           tabIndex={canPlayNow ? 0 : -1}
           aria-disabled={!isCardActive}
+          aria-pressed={selectedActive}
           data-playable={canPlayNow ? 'true' : 'false'}
+          data-selected={selectedActive ? 'true' : 'false'}
           data-visually-dimmed={!isCardActive ? 'true' : 'false'}
           data-card-slot={card.id}
           style={{
@@ -864,6 +1100,10 @@ const DraggableHandCard: React.FC<DraggableHandCardProps> = React.memo(
             transform: restTransform,
           }}
           className={`touch-none select-none will-change-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F3D179] rounded-[6px] sm:rounded-[8px] ${
+            selectedActive
+              ? 'ring-2 ring-[#FDE68A] shadow-[0_14px_30px_rgba(243,209,121,0.52)]'
+              : ''
+          } ${
             isCardActive
               ? 'cursor-grab active:cursor-grabbing'
               : 'cursor-not-allowed'
@@ -894,6 +1134,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
   trickCollectPhase,
   collectingWinnerTeam,
   playerName,
+  playerAvatarSrc,
   tableSkinId = 'tt-traditional',
   deckId = EYVAN_CLASSIC_DECK_ID,
   cardBackId,
@@ -907,6 +1148,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
   onlineHud,
   canStartRematch = true,
   onInspectPlayer,
+  onInspectSelf,
   onPlayCard,
   onChooseTrump,
   onRequestExit,
@@ -915,6 +1157,248 @@ export const HokmTable: React.FC<HokmTableProps> = ({
   onNewMatch,
 }) => {
   const dropRingRef = useRef<HTMLDivElement | null>(null);
+  const trumpSlotRef = useRef<HTMLDivElement | null>(null);
+  const myScoreRef = useRef<HTMLDivElement | null>(null);
+  const oppScoreRef = useRef<HTMLDivElement | null>(null);
+  const pipRefs = useRef<Record<string, HTMLSpanElement | null>>({});
+
+  const registerPipRef = (
+    team: TeamId,
+    index: number,
+    el: HTMLSpanElement | null
+  ) => {
+    pipRefs.current[`${team}-${index}`] = el;
+  };
+
+  // Selected card for Tap-to-Select + 2nd-Tap-to-Play (coexists with Drag-to-Play)
+  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!canHumanPlay || handGathered) {
+      setSelectedCardId(null);
+    }
+  }, [canHumanPlay, handGathered, state.hands.south.length]);
+
+  // Offline Bot Profile inspection modal (so tapping ANY player avatar mid-game always works!)
+  const [inspectedBot, setInspectedBot] = useState<BotShowcaseProfile | null>(
+    null
+  );
+  const handleInspectSeatFallback = (seat: Seat) => {
+    if (seat === 'south') return;
+    setInspectedBot(OFFLINE_BOT_PROFILES[seat]);
+  };
+
+  // In-game Quick Reactions (messages, emojis, Persian voice callouts)
+  const [southReaction, setSouthReaction] =
+    useState<InGameReactionPayload | null>(null);
+  const southReactionTimerRef = useRef<number | null>(null);
+  const handleSendReaction = (payload: InGameReactionPayload) => {
+    setSouthReaction(payload);
+    if (southReactionTimerRef.current !== null) {
+      window.clearTimeout(southReactionTimerRef.current);
+    }
+    southReactionTimerRef.current = window.setTimeout(() => {
+      setSouthReaction(null);
+      southReactionTimerRef.current = null;
+    }, 3200);
+  };
+  useEffect(() => {
+    return () => {
+      if (southReactionTimerRef.current !== null) {
+        window.clearTimeout(southReactionTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Flying Glowing Trick Light Orb from table center -> newly lit Scoreboard Pip
+  const prevTricksRef = useRef<{ myTeam: number; opponentTeam: number }>({
+    myTeam: state.trickCounts.myTeam,
+    opponentTeam: state.trickCounts.opponentTeam,
+  });
+  const [flyingTrickOrb, setFlyingTrickOrb] = useState<{
+    key: string;
+    team: TeamId;
+    pipIndex: number;
+    xs: number[];
+    ys: number[];
+  } | null>(null);
+  const [pendingOrbPip, setPendingOrbPip] = useState<{
+    team: TeamId;
+    index: number;
+  } | null>(null);
+  const [activePipFlash, setActivePipFlash] = useState<{
+    team: TeamId;
+    index: number;
+  } | null>(null);
+  const [activeScoreFlashTeam, setActiveScoreFlashTeam] =
+    useState<TeamId | null>(null);
+
+  useEffect(() => {
+    const prev = prevTricksRef.current;
+    const curMy = state.trickCounts.myTeam;
+    const curOpp = state.trickCounts.opponentTeam;
+    prevTricksRef.current = { myTeam: curMy, opponentTeam: curOpp };
+
+    let winnerTeam: TeamId | null = null;
+    let pipIdx = -1;
+    if (curMy > prev.myTeam) {
+      winnerTeam = 'myTeam';
+      pipIdx = Math.min(6, curMy - 1);
+    } else if (curOpp > prev.opponentTeam) {
+      winnerTeam = 'opponentTeam';
+      pipIdx = Math.min(6, curOpp - 1);
+    }
+
+    if (!winnerTeam || pipIdx < 0 || typeof window === 'undefined') {
+      if (curMy === 0 && curOpp === 0) {
+        setFlyingTrickOrb(null);
+        setPendingOrbPip(null);
+        setActivePipFlash(null);
+      }
+      return;
+    }
+
+    if (reducedMotion) {
+      setPendingOrbPip(null);
+      setActivePipFlash({ team: winnerTeam, index: pipIdx });
+      const tid = window.setTimeout(() => setActivePipFlash(null), 650);
+      return () => window.clearTimeout(tid);
+    }
+
+    const pipEl = pipRefs.current[`${winnerTeam}-${pipIdx}`];
+    const rect = pipEl?.getBoundingClientRect();
+    const startX = window.innerWidth / 2 - 16;
+    const startY = window.innerHeight * 0.46 - 16;
+    const targetX =
+      (rect
+        ? rect.left + rect.width / 2
+        : window.innerWidth * (winnerTeam === 'myTeam' ? 0.65 : 0.35)) - 16;
+    const targetY = (rect ? rect.top + rect.height / 2 : 34) - 16;
+
+    // Sample a smooth 12-point quadratic Bézier arc with eased progression so flight is silky & curved
+    const ctrlX =
+      (startX + targetX) * 0.5 + (winnerTeam === 'myTeam' ? 44 : -44);
+    const ctrlY = Math.min(startY, targetY) + Math.abs(startY - targetY) * 0.36;
+    const steps = 12;
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (let i = 0; i <= steps; i++) {
+      const u = i / steps;
+      const t = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+      const inv = 1 - t;
+      xs.push(inv * inv * startX + 2 * inv * t * ctrlX + t * t * targetX);
+      ys.push(inv * inv * startY + 2 * inv * t * ctrlY + t * t * targetY);
+    }
+
+    const orbKey = `${winnerTeam}-${pipIdx}-${Date.now()}`;
+    setPendingOrbPip({ team: winnerTeam, index: pipIdx });
+    setFlyingTrickOrb({
+      key: orbKey,
+      team: winnerTeam,
+      pipIndex: pipIdx,
+      xs,
+      ys,
+    });
+
+    const tLand = window.setTimeout(() => {
+      setPendingOrbPip(null);
+      setActivePipFlash({ team: winnerTeam!, index: pipIdx });
+      hokmSound.playScoreOrbLand(winnerTeam === 'myTeam');
+    }, 540);
+
+    const tClearOrb = window.setTimeout(() => {
+      setFlyingTrickOrb((cur) => (cur?.key === orbKey ? null : cur));
+    }, 610);
+
+    const tClearFlash = window.setTimeout(() => {
+      setActivePipFlash(null);
+    }, 1260);
+
+    return () => {
+      window.clearTimeout(tLand);
+      window.clearTimeout(tClearOrb);
+      window.clearTimeout(tClearFlash);
+    };
+  }, [reducedMotion, state.trickCounts.myTeam, state.trickCounts.opponentTeam]);
+
+  // Flying trump suit animation state (from table center -> scoreboard trump medallion)
+  const prevTrumpRef = useRef<Suit | null>(state.trumpSuit);
+  const [flyingTrump, setFlyingTrump] = useState<{
+    suit: Suit;
+    startX: number;
+    startY: number;
+    targetX: number;
+    targetY: number;
+  } | null>(null);
+
+  useEffect(() => {
+    const prev = prevTrumpRef.current;
+    prevTrumpRef.current = state.trumpSuit;
+    if (!prev && state.trumpSuit && !reducedMotion && typeof window !== 'undefined') {
+      const slotRect = trumpSlotRef.current?.getBoundingClientRect();
+      const targetX = slotRect
+        ? slotRect.left + slotRect.width / 2
+        : window.innerWidth / 2;
+      const targetY = slotRect ? slotRect.top + slotRect.height / 2 : 34;
+      const startX = window.innerWidth / 2;
+      const startY = window.innerHeight * 0.44;
+      setFlyingTrump({
+        suit: state.trumpSuit,
+        startX,
+        startY,
+        targetX,
+        targetY,
+      });
+      const tid = window.setTimeout(() => {
+        setFlyingTrump(null);
+      }, 640);
+      return () => window.clearTimeout(tid);
+    }
+    if (!state.trumpSuit) {
+      setFlyingTrump(null);
+    }
+  }, [reducedMotion, state.trumpSuit]);
+
+  // Exaggerated ZERO-TEXT Trump Cut ("بریدن") visual burst detector
+  const lastCutCardIdRef = useRef<string | null>(null);
+  const [trumpCutBurst, setTrumpCutBurst] = useState<{
+    id: string;
+    suit: Suit;
+    seat: Seat;
+  } | null>(null);
+
+  useEffect(() => {
+    if (
+      reducedMotion ||
+      !state.trumpSuit ||
+      state.currentTrick.length < 2
+    ) {
+      if (state.currentTrick.length === 0) {
+        lastCutCardIdRef.current = null;
+      }
+      return;
+    }
+    const leadSuit = state.currentTrick[0].card.suit;
+    const latestPlay = state.currentTrick[state.currentTrick.length - 1];
+    if (
+      leadSuit !== state.trumpSuit &&
+      latestPlay.card.suit === state.trumpSuit &&
+      lastCutCardIdRef.current !== latestPlay.card.id
+    ) {
+      lastCutCardIdRef.current = latestPlay.card.id;
+      setTrumpCutBurst({
+        id: latestPlay.card.id,
+        suit: state.trumpSuit,
+        seat: latestPlay.seat,
+      });
+      const tid = window.setTimeout(() => {
+        setTrumpCutBurst((cur) =>
+          cur?.id === latestPlay.card.id ? null : cur
+        );
+      }, 920);
+      return () => window.clearTimeout(tid);
+    }
+  }, [reducedMotion, state.currentTrick, state.trumpSuit]);
+
   // Owner-only visual: tableSkin ALWAYS comes strictly from local player's own equipped skin
   const tableSkin = getTableSkinVisual(tableSkinId);
   const effectAccent = getGameEffectAccent(gameEffectId);
@@ -998,8 +1482,13 @@ export const HokmTable: React.FC<HokmTableProps> = ({
     };
   }, []);
 
-  const southHand =
-    southHandOverride ?? state.hands.south.slice(0, visibleHandCounts.south);
+  const isHandResetThrowing = state.phase === 'HAND_COMPLETE';
+  const southHand = isHandResetThrowing
+    ? []
+    : southHandOverride ?? state.hands.south.slice(0, visibleHandCounts.south);
+  const effectiveVisibleCounts: Record<Seat, number> = isHandResetThrowing
+    ? { south: 0, east: 0, north: 0, west: 0 }
+    : visibleHandCounts;
   const legalIds = new Set(
     canHumanPlay
       ? getLegalCards(state.hands.south, state.currentTrick).map((c) => c.id)
@@ -1022,7 +1511,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
   const resolvedSeats: Record<Seat, OnlineSeatPlayerMeta> = {
     south: seatPlayers?.south ?? {
       name: playerName,
-      avatarSrc: SEAT_AVATARS.south,
+      avatarSrc: playerAvatarSrc || SEAT_AVATARS.south,
       connected: true,
     },
     east: seatPlayers?.east ?? {
@@ -1090,13 +1579,44 @@ export const HokmTable: React.FC<HokmTableProps> = ({
     !isShufflingAnim &&
     !handGathered;
 
-  const nextHakemSeat =
-    state.phase === 'HAND_COMPLETE' ? resolveNextHakem(state) : state.hakem;
-  const hakemChangedOnHand =
-    state.phase === 'HAND_COMPLETE' && nextHakemSeat !== state.hakem;
+  // Target screen coordinates for flying match score badge when a hand ends
+  const handResetTargetScoreRect = (() => {
+    if (state.phase !== 'HAND_COMPLETE' || !state.handOutcome) return null;
+    const el =
+      state.handOutcome.winningTeam === 'myTeam'
+        ? myScoreRef.current
+        : oppScoreRef.current;
+    const rect = el?.getBoundingClientRect();
+    if (!rect) return null;
+    return {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+    };
+  })();
+
+  // Keep unused prop referenced cleanly for TypeScript compatibility
+  void showGameStartBanner;
 
   return (
-    <div
+    <motion.div
+      animate={
+        trumpCutBurst && !reducedMotion
+          ? {
+              x: [0, -11, 10, -8, 6, -4, 2, 0],
+              y: [0, 8, -7, 5, -4, 2, -1, 0],
+              rotate: [0, -0.65, 0.55, -0.4, 0.25, -0.12, 0],
+            }
+          : { x: 0, y: 0, rotate: 0 }
+      }
+      transition={{ duration: 0.46, ease: 'easeOut' }}
+      onClick={(e) => {
+        if (
+          selectedCardId &&
+          !(e.target instanceof Element && e.target.closest('[data-card-slot]'))
+        ) {
+          setSelectedCardId(null);
+        }
+      }}
       className="min-h-[100dvh] w-full flex flex-col hokm-traditional-arena text-[#F6F3EC] relative overflow-clip select-none transform-gpu"
       data-testid="hokm-table"
       data-table-skin={tableSkinId}
@@ -1125,6 +1645,25 @@ export const HokmTable: React.FC<HokmTableProps> = ({
         />
       </div>
 
+      {/* Brief Dramatic Full-Screen Dark Shock Vignette on Heavy Trump Cut (ZERO TEXT) */}
+      <AnimatePresence>
+        {trumpCutBurst && !reducedMotion && (
+          <motion.div
+            key={`cut-vignette-${trumpCutBurst.id}`}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: [0, 0.78, 0] }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.66, ease: 'easeOut' }}
+            aria-hidden="true"
+            className="fixed inset-0 z-[34] pointer-events-none"
+            style={{
+              background:
+                'radial-gradient(circle at center, transparent 34%, rgba(0,0,0,0.68) 80%, rgba(120,53,15,0.42) 100%)',
+            }}
+          />
+        )}
+      </AnimatePresence>
+
       {/* Clean Top HUD Header: Enlarged Royal Persian Scoreboard Centered */}
       <header
         className="relative z-30 flex items-center justify-center px-3 sm:px-6 py-2 sm:py-2.5 backdrop-blur-md bg-[#061814]/82 border-b border-[#D4AE58]/35 text-[#FAF6EE]"
@@ -1133,9 +1672,114 @@ export const HokmTable: React.FC<HokmTableProps> = ({
         <RoyalScoreboard
           state={state}
           reducedMotion={reducedMotion}
+          trumpSlotRef={trumpSlotRef}
+          myScoreRef={myScoreRef}
+          oppScoreRef={oppScoreRef}
+          registerPipRef={registerPipRef}
+          activePipFlash={activePipFlash}
+          pendingOrbPip={pendingOrbPip}
+          activeScoreFlashTeam={activeScoreFlashTeam}
+          hideTrumpUntilLanded={Boolean(flyingTrump)}
           onRequestExit={onRequestExit}
         />
       </header>
+
+      {/* Silky Curved Flying Luminous Orb + Comet Trail morphing seamlessly into Scoreboard Pip */}
+      {flyingTrickOrb && (
+        <div className="fixed inset-0 z-[72] pointer-events-none" aria-hidden="true">
+          {/* Soft trailing comet motes */}
+          {[0.045, 0.09].map((trailDelay, tIdx) => (
+            <motion.div
+              key={`${flyingTrickOrb.key}-trail-${tIdx}`}
+              initial={{
+                x: flyingTrickOrb.xs[0],
+                y: flyingTrickOrb.ys[0],
+                scale: 0.85 - tIdx * 0.22,
+                opacity: 0.55 - tIdx * 0.18,
+              }}
+              animate={{
+                x: flyingTrickOrb.xs,
+                y: flyingTrickOrb.ys,
+                scale: [0.85 - tIdx * 0.22, 0.72 - tIdx * 0.18, 0.22],
+                opacity: [0.5 - tIdx * 0.16, 0.38 - tIdx * 0.12, 0],
+              }}
+              transition={{
+                duration: 0.56,
+                delay: trailDelay,
+                ease: 'linear',
+              }}
+              className="fixed top-0 left-0 w-8 h-8 flex items-center justify-center will-change-transform"
+            >
+              <span
+                className={`w-4 h-4 rounded-full blur-[4px] ${
+                  flyingTrickOrb.team === 'myTeam'
+                    ? 'bg-[#6EE7B7]'
+                    : 'bg-[#FDA4AF]'
+                }`}
+              />
+            </motion.div>
+          ))}
+
+          {/* Primary Luminous Orb smoothly morphing from center burst down to exact 10px pip */}
+          <motion.div
+            key={flyingTrickOrb.key}
+            data-testid="flying-trick-orb"
+            initial={{
+              x: flyingTrickOrb.xs[0],
+              y: flyingTrickOrb.ys[0],
+              scale: 1.35,
+              opacity: 1,
+            }}
+            animate={{
+              x: flyingTrickOrb.xs,
+              y: flyingTrickOrb.ys,
+              scale: [1.35, 1.28, 1.18, 1.06, 0.94, 0.82, 0.7, 0.58, 0.48, 0.4, 0.34, 0.3, 0.28],
+              opacity: [0.92, 1, 1, 1, 1, 1, 1, 1, 1, 0.98, 0.92, 0.6, 0],
+            }}
+            transition={{
+              duration: 0.58,
+              ease: 'linear',
+            }}
+            className="fixed top-0 left-0 w-8 h-8 flex items-center justify-center will-change-transform"
+          >
+            <span
+              className={`absolute inset-0 rounded-full blur-[7px] ${
+                flyingTrickOrb.team === 'myTeam'
+                  ? 'bg-[#34D399] shadow-[0_0_26px_8px_rgba(52,211,153,0.92)]'
+                  : 'bg-[#FB7185] shadow-[0_0_26px_8px_rgba(251,113,133,0.92)]'
+              }`}
+            />
+            <span className="relative w-3.5 h-3.5 rounded-full bg-white shadow-[0_0_14px_3px_#FFFFFF]" />
+          </motion.div>
+        </div>
+      )}
+
+      {/* Flying Chosen Trump Emblem -> Glides smoothly from Center into Scoreboard Slot */}
+      {flyingTrump && (
+        <motion.div
+          key={`flying-trump-${flyingTrump.suit}`}
+          initial={{
+            x: flyingTrump.startX - 36,
+            y: flyingTrump.startY - 36,
+            scale: 1.45,
+            rotate: -18,
+          }}
+          animate={{
+            x: flyingTrump.targetX - 36,
+            y: flyingTrump.targetY - 36,
+            scale: 0.78,
+            rotate: 0,
+          }}
+          transition={{
+            duration: 0.6,
+            ease: [0.22, 1, 0.36, 1],
+          }}
+          data-testid="flying-trump-emblem"
+          className="fixed top-0 left-0 z-[70] pointer-events-none w-[72px] h-[72px] rounded-full bg-white border-[3px] border-[#F3D179] shadow-[0_0_36px_rgba(243,209,121,0.95),0_12px_28px_rgba(0,0,0,0.55)] flex items-center justify-center"
+        >
+          <SuitIconSvg suit={flyingTrump.suit} className="w-10 h-10" />
+        </motion.div>
+      )}
 
       {/* Subtle Online Status Strip (Online Mode ONLY) */}
       {onlineHud && (
@@ -1196,14 +1840,14 @@ export const HokmTable: React.FC<HokmTableProps> = ({
           />
         </div>
 
-        {/* TOP SEAT: North (Partner — Full-size edge-bleeding fan behind SeatProfile) */}
+        {/* TOP SEAT: North (Partner — Fixed height so avatar NEVER jumps during dealing!) */}
         <section
-          className="relative z-10 flex flex-col items-center pt-1.5 sm:pt-2.5 min-h-[78px] sm:min-h-[96px]"
+          className="relative z-10 flex flex-col items-center justify-start pt-3 sm:pt-4 h-[98px] sm:h-[112px] shrink-0"
           aria-label={resolvedSeats.north.name}
         >
           <div className="pointer-events-none absolute -top-[82px] sm:-top-[108px] left-1/2 -translate-x-1/2 z-0">
             <HiddenHandFan
-              count={visibleHandCounts.north}
+              count={effectiveVisibleCounts.north}
               orientation="horizontal"
               isDesktop={handLayout.isDesktop}
               deckId={northDeckId}
@@ -1229,6 +1873,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               avatarSrc={resolvedSeats.north.avatarSrc}
               userId={resolvedSeats.north.userId}
               onInspectPlayer={onInspectPlayer}
+              onInspectSeat={handleInspectSeatFallback}
+              showOnlineDot={Boolean(onlineHud)}
               connected={resolvedSeats.north.connected}
               disconnectRemainingSec={resolvedSeats.north.disconnectRemainingSec}
               appearance={seatAppearances?.north}
@@ -1238,6 +1884,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                 state.currentTurn === 'north'
               }
               isHakem={state.hakem === 'north'}
+              hakemKey={`${state.handNumber}`}
+              reducedMotion={reducedMotion}
             />
           </div>
         </section>
@@ -1250,7 +1898,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
           {/* Full-size West Card Fan anchored flush off viewport LEFT edge */}
           <div className="pointer-events-none fixed left-[-92px] sm:left-[-118px] top-1/2 -translate-y-1/2 z-0">
             <HiddenHandFan
-              count={visibleHandCounts.west}
+              count={effectiveVisibleCounts.west}
               orientation="vertical"
               side="west"
               isDesktop={handLayout.isDesktop}
@@ -1274,7 +1922,7 @@ export const HokmTable: React.FC<HokmTableProps> = ({
           {/* Full-size East Card Fan anchored flush off viewport RIGHT edge */}
           <div className="pointer-events-none fixed right-[-92px] sm:right-[-118px] top-1/2 -translate-y-1/2 z-0">
             <HiddenHandFan
-              count={visibleHandCounts.east}
+              count={effectiveVisibleCounts.east}
               orientation="vertical"
               side="east"
               isDesktop={handLayout.isDesktop}
@@ -1307,6 +1955,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               avatarSrc={resolvedSeats.west.avatarSrc}
               userId={resolvedSeats.west.userId}
               onInspectPlayer={onInspectPlayer}
+              onInspectSeat={handleInspectSeatFallback}
+              showOnlineDot={Boolean(onlineHud)}
               connected={resolvedSeats.west.connected}
               disconnectRemainingSec={resolvedSeats.west.disconnectRemainingSec}
               appearance={seatAppearances?.west}
@@ -1316,6 +1966,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                 state.currentTurn === 'west'
               }
               isHakem={state.hakem === 'west'}
+              hakemKey={`${state.handNumber}`}
+              reducedMotion={reducedMotion}
             />
           </div>
 
@@ -1340,18 +1992,13 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               aria-hidden="true"
             />
 
-            {/* Solid Multi-Layer Center Deck Pile & Riffle Shuffle (Zero Opacity Fade) */}
-            <AnimatePresence>
-              {showDeckOnTable && deckStackLayers > 0 && (
-                <motion.div
-                  initial={reducedMotion ? false : { scale: 0.88 }}
-                  animate={{ scale: 1 }}
-                  exit={reducedMotion ? undefined : { scale: 0.72 }}
-                  transition={{ duration: reducedMotion ? 0.05 : 0.2 }}
-                  data-testid="center-deal-deck"
-                  data-deck-remaining={effectiveDeckCount}
-                  className="absolute inset-0 flex items-center justify-center pointer-events-none"
-                >
+            {/* Solid Multi-Layer Center Deck Pile & Riffle Shuffle (Last card launches directly off stack — zero fade/shrink!) */}
+            {showDeckOnTable && deckStackLayers > 0 && (
+              <div
+                data-testid="center-deal-deck"
+                data-deck-remaining={effectiveDeckCount}
+                className="absolute inset-0 flex items-center justify-center pointer-events-none"
+              >
                   <div className="relative w-[68px] h-[96px] sm:w-[84px] sm:h-[118px]">
                     {/* Table contact shadow beneath the deck stack */}
                     <div
@@ -1396,9 +2043,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                       </motion.div>
                     ))}
                   </div>
-                </motion.div>
+                </div>
               )}
-            </AnimatePresence>
 
             {/* Solid Dealer Wrist-Spin Flying Cards Launched Directly From Center Deck */}
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none overflow-visible z-20">
@@ -1436,8 +2082,9 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               })}
             </div>
 
-            {/* Active 4-Card Trick -> Stacks cleanly -> Slides Solidly Off Table */}
+            {/* Active 4-Card Trick -> Stacks cleanly -> Slides Solidly Off Table (Keyed per trick so ZERO 1-frame rebound!) */}
             <motion.div
+              key={`trick-packet-${state.handNumber}-${state.trickCounts.myTeam + state.trickCounts.opponentTeam}`}
               dir="ltr"
               animate={
                 trickCollectPhase === 'sliding'
@@ -1450,50 +2097,58 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                   : { x: 0, y: 0, scale: 1, rotate: 0 }
               }
               transition={{
-                duration: reducedMotion ? 0.08 : 0.36,
+                duration:
+                  reducedMotion || trickCollectPhase === 'idle' ? 0 : 0.34,
                 ease: [0.22, 1, 0.36, 1],
               }}
               className="absolute inset-0 flex items-center justify-center pointer-events-none"
               data-testid="trick-center-area"
             >
-              <AnimatePresence>
-                {state.currentTrick.map((play, idx) => {
-                  const origin = SEAT_FLY_OFFSETS[play.seat];
-                  const slot = TRICK_SLOT_OFFSETS[play.seat];
-                  const stackPose =
-                    STACK_CARD_JITTER[idx % STACK_CARD_JITTER.length];
-                  const isStacking =
-                    trickCollectPhase === 'stacking' ||
-                    trickCollectPhase === 'sliding';
-                  const shouldFlip3D = !reducedMotion && play.seat !== 'south';
+              {state.currentTrick.map((play, idx) => {
+                const origin = SEAT_FLY_OFFSETS[play.seat];
+                const slot = TRICK_SLOT_OFFSETS[play.seat];
+                const stackPose =
+                  STACK_CARD_JITTER[idx % STACK_CARD_JITTER.length];
+                const isStacking =
+                  trickCollectPhase === 'stacking' ||
+                  trickCollectPhase === 'sliding';
+                const shouldFlip3D = !reducedMotion && play.seat !== 'south';
+                const isActiveCutCard = trumpCutBurst?.id === play.card.id;
 
-                  return (
-                    <motion.div
-                      key={play.card.id}
-                      initial={
-                        reducedMotion
-                          ? { x: slot.x, y: slot.y, rotate: slot.rotate }
-                          : play.seat === 'south'
-                            ? {
-                                x: 0,
-                                y: 124,
-                                scale: 0.96,
-                                rotate: origin.playSpin,
-                              }
-                            : {
-                                x: origin.x * 0.82,
-                                y: origin.y * 0.82,
-                                scale: 0.88,
-                                rotate: origin.playSpin,
-                              }
-                      }
-                      animate={
-                        isStacking
+                return (
+                  <motion.div
+                    key={play.card.id}
+                    initial={
+                      reducedMotion
+                        ? { x: slot.x, y: slot.y, rotate: slot.rotate }
+                        : play.seat === 'south'
                           ? {
-                              x: stackPose.x,
-                              y: stackPose.y,
-                              rotate: stackPose.rotate,
-                              scale: 0.92,
+                              x: 0,
+                              y: 124,
+                              scale: 0.96,
+                              rotate: origin.playSpin,
+                            }
+                          : {
+                              x: origin.x * 0.82,
+                              y: origin.y * 0.82,
+                              scale: 0.88,
+                              rotate: origin.playSpin,
+                            }
+                    }
+                    animate={
+                      isStacking
+                        ? {
+                            x: stackPose.x,
+                            y: stackPose.y,
+                            rotate: stackPose.rotate,
+                            scale: 0.92,
+                          }
+                        : isActiveCutCard && !reducedMotion
+                          ? {
+                              x: slot.x,
+                              y: [slot.y - 38, slot.y + 8, slot.y - 2, slot.y],
+                              rotate: [slot.rotate - 16, slot.rotate + 9, slot.rotate - 3, slot.rotate],
+                              scale: [1.72, 0.88, 1.08, 1],
                             }
                           : {
                               x: slot.x,
@@ -1501,98 +2156,206 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                               rotate: slot.rotate,
                               scale: 1,
                             }
-                      }
-                      exit={reducedMotion ? undefined : { scale: 0.72 }}
-                      transition={{
-                        duration: reducedMotion ? 0.05 : 0.32,
-                        ease: [0.18, 1, 0.3, 1],
-                      }}
-                      style={{ zIndex: idx + 5, perspective: 960 }}
-                      className="absolute"
-                    >
-                      {shouldFlip3D ? (
-                        <motion.div
-                          initial={{ rotateY: 180 }}
-                          animate={{ rotateY: 0 }}
-                          transition={{
-                            duration: 0.36,
-                            ease: [0.18, 1, 0.3, 1],
+                    }
+                    transition={{
+                      duration: reducedMotion ? 0.05 : isActiveCutCard ? 0.46 : 0.3,
+                      ease: [0.16, 1, 0.3, 1],
+                    }}
+                    style={{ zIndex: idx + 5, perspective: 960 }}
+                    className="absolute"
+                  >
+                    {shouldFlip3D ? (
+                      <motion.div
+                        initial={{ rotateY: 180 }}
+                        animate={{ rotateY: 0 }}
+                        transition={{
+                          duration: 0.34,
+                          ease: [0.18, 1, 0.3, 1],
+                        }}
+                        style={{ transformStyle: 'preserve-3d' }}
+                        className="relative"
+                      >
+                        <div
+                          style={{
+                            backfaceVisibility: 'hidden',
+                            WebkitBackfaceVisibility: 'hidden',
                           }}
-                          style={{ transformStyle: 'preserve-3d' }}
-                          className="relative"
                         >
-                          <div
-                            style={{
-                              backfaceVisibility: 'hidden',
-                              WebkitBackfaceVisibility: 'hidden',
-                            }}
-                          >
-                            <PlayingCard
-                              card={play.card}
-                              deckId={seatDeckMap[play.seat]}
-                              cardBackId={seatCardBackMap[play.seat]}
-                              size="trick"
-                            />
-                          </div>
-                          <div
-                            className="absolute inset-0"
-                            style={{
-                              backfaceVisibility: 'hidden',
-                              WebkitBackfaceVisibility: 'hidden',
-                              transform: 'rotateY(180deg)',
-                            }}
-                            aria-hidden="true"
-                          >
-                            <PlayingCard
-                              faceDown
-                              deckId={seatDeckMap[play.seat]}
-                              cardBackId={seatCardBackMap[play.seat]}
-                              size="trick"
-                            />
-                          </div>
-                        </motion.div>
-                      ) : (
-                        <PlayingCard
-                          card={play.card}
-                          deckId={seatDeckMap[play.seat]}
-                          cardBackId={seatCardBackMap[play.seat]}
-                          size="trick"
-                        />
-                      )}
-                    </motion.div>
-                  );
-                })}
-              </AnimatePresence>
+                          <PlayingCard
+                            card={play.card}
+                            deckId={seatDeckMap[play.seat]}
+                            cardBackId={seatCardBackMap[play.seat]}
+                            size="trick"
+                          />
+                        </div>
+                        <div
+                          className="absolute inset-0"
+                          style={{
+                            backfaceVisibility: 'hidden',
+                            WebkitBackfaceVisibility: 'hidden',
+                            transform: 'rotateY(180deg)',
+                          }}
+                          aria-hidden="true"
+                        >
+                          <PlayingCard
+                            faceDown
+                            deckId={seatDeckMap[play.seat]}
+                            cardBackId={seatCardBackMap[play.seat]}
+                            size="trick"
+                          />
+                        </div>
+                      </motion.div>
+                    ) : (
+                      <PlayingCard
+                        card={play.card}
+                        deckId={seatDeckMap[play.seat]}
+                        cardBackId={seatCardBackMap[play.seat]}
+                        size="trick"
+                      />
+                    )}
+                  </motion.div>
+                );
+              })}
             </motion.div>
 
-            {/* Non-Blocking "Game Started!" Spring Banner right after dealing finishes */}
-            <AnimatePresence>
-              {showGameStartBanner && (
-                <motion.div
-                  initial={reducedMotion ? false : { scale: 0.72, y: -12 }}
-                  animate={{ scale: 1, y: 0 }}
-                  exit={reducedMotion ? undefined : { scale: 0.78, y: -14 }}
-                  transition={{
-                    type: 'spring',
-                    stiffness: 340,
-                    damping: 22,
+            {/* HEAVY TABLE-SHATTERING CRACK & DEBRIS VFX ON TRUMP CUT ("بریدن") — ZERO TEXT */}
+            {trumpCutBurst && !reducedMotion && (
+              <div
+                key={`cut-vfx-${trumpCutBurst.id}`}
+                data-testid="trump-cut-vfx"
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 z-[36] flex items-center justify-center overflow-visible"
+              >
+                <div
+                  className="relative flex items-center justify-center"
+                  style={{
+                    transform: `translate(${TRICK_SLOT_OFFSETS[trumpCutBurst.seat].x}px, ${TRICK_SLOT_OFFSETS[trumpCutBurst.seat].y}px)`,
                   }}
-                  className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center"
-                  data-testid="game-start-burst"
                 >
-                  <div className="relative flex items-center gap-2.5 px-6 py-3 rounded-full bg-gradient-to-b from-[#0E352B]/96 to-[#061914]/96 border-2 border-[#F3D179] shadow-[0_14px_40px_rgba(0,0,0,0.68),0_0_32px_rgba(243,209,121,0.45)] backdrop-blur-md">
-                    {state.trumpSuit && (
-                      <span className="w-8 h-8 rounded-full bg-white border border-[#F3D179] flex items-center justify-center shrink-0">
-                        <SuitIconSvg suit={state.trumpSuit} className="w-5 h-5" />
-                      </span>
-                    )}
-                    <span className="text-lg sm:text-2xl font-black bg-gradient-to-b from-[#FFF5D6] via-[#F3D179] to-[#D4A039] bg-clip-text text-transparent whitespace-nowrap">
-                      شروع بازی!
-                    </span>
-                  </div>
+                  {/* Dark impact crater & heavy dust shockwave */}
+                  <motion.div
+                    initial={{ scale: 0.25, opacity: 0.95 }}
+                    animate={{ scale: 2.8, opacity: 0 }}
+                    transition={{ duration: 0.72, ease: [0.16, 1, 0.3, 1] }}
+                    className="absolute w-36 h-36 rounded-full bg-[radial-gradient(circle,rgba(10,8,6,0.88)_0%,rgba(120,53,15,0.48)_45%,transparent_75%)]"
+                  />
+
+                  {/* Shattering Table Fissures SVG (deep abyssal wood cracks + amber impact seams) */}
+                  <motion.svg
+                    viewBox="-170 -170 340 340"
+                    initial={{ scale: 0.38, opacity: 0 }}
+                    animate={{ scale: [0.38, 1.06, 1.1], opacity: [0, 1, 0.95, 0] }}
+                    transition={{ duration: 0.9, times: [0, 0.14, 0.62, 1], ease: [0.16, 1, 0.3, 1] }}
+                    className="absolute w-[310px] h-[310px] sm:w-[400px] sm:h-[400px] overflow-visible"
+                    fill="none"
+                  >
+                    <defs>
+                      <filter id="crackGlow" x="-30%" y="-30%" width="160%" height="160%">
+                        <feGaussianBlur stdDeviation="2.4" result="blur" />
+                        <feMerge>
+                          <feMergeNode in="blur" />
+                          <feMergeNode in="SourceGraphic" />
+                        </feMerge>
+                      </filter>
+                    </defs>
+                    {/* Main deep dark shattered fissures radiating across the table */}
+                    <g stroke="#060807" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M0 0 L-22 -36 L-58 -52 L-108 -96 L-152 -118" strokeWidth="6.5" />
+                      <path d="M-58 -52 L-46 -98 L-66 -144" strokeWidth="4" />
+                      <path d="M0 0 L34 -24 L76 -38 L122 -78 L158 -92" strokeWidth="6" />
+                      <path d="M76 -38 L112 -18 L154 -8" strokeWidth="3.8" />
+                      <path d="M0 0 L28 36 L68 58 L104 108 L142 138" strokeWidth="6.5" />
+                      <path d="M68 58 L42 102 L48 148" strokeWidth="3.6" />
+                      <path d="M0 0 L-36 22 L-82 44 L-126 84 L-160 104" strokeWidth="6" />
+                      <path d="M-82 44 L-116 14 L-152 18" strokeWidth="3.8" />
+                      <path d="M0 0 L-8 46 L-16 96 L-8 146" strokeWidth="4.5" />
+                      <path d="M0 0 L10 -48 L4 -102 L18 -148" strokeWidth="4.5" />
+                      {/* Fractured concentric inner polygon breaks */}
+                      <path d="M-22 -36 L10 -48 L34 -24 L28 36 L-8 46 L-36 22 Z" strokeWidth="3.2" />
+                      <path d="M-58 -52 L4 -102 M76 -38 L68 58 M-82 44 L-16 96" strokeWidth="2.4" />
+                    </g>
+                    {/* Glowing molten amber crack edges inside the fractured seams */}
+                    <g
+                      stroke="#F59E0B"
+                      strokeOpacity="0.82"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      filter="url(#crackGlow)"
+                    >
+                      <path d="M0 0 L-22 -36 L-58 -52 L-108 -96" strokeWidth="2.1" />
+                      <path d="M0 0 L34 -24 L76 -38 L122 -78" strokeWidth="1.9" />
+                      <path d="M0 0 L28 36 L68 58 L104 108" strokeWidth="2.1" />
+                      <path d="M0 0 L-36 22 L-82 44 L-126 84" strokeWidth="1.9" />
+                      <path d="M0 0 L-8 46 L-16 96 M0 0 L10 -48 L4 -102" strokeWidth="1.5" />
+                      <path d="M-22 -36 L10 -48 L34 -24 L28 36 L-8 46 L-36 22 Z" strokeWidth="1.3" />
+                    </g>
+                  </motion.svg>
+
+                  {/* Flying broken table wood/felt shards & splinters */}
+                  {Array.from({ length: 16 }).map((_, sIdx) => {
+                    const deg = sIdx * 22.5 + (sIdx % 2 === 0 ? 7 : -6);
+                    const rad = (deg * Math.PI) / 180;
+                    const dist = 85 + (sIdx % 4) * 32;
+                    const tx = Math.cos(rad) * dist;
+                    const ty = Math.sin(rad) * dist + 14;
+                    const isSplinter = sIdx % 2 === 0;
+                    return (
+                      <motion.span
+                        key={sIdx}
+                        initial={{ x: 0, y: 0, scale: 1.15, rotate: deg, opacity: 1 }}
+                        animate={{
+                          x: tx,
+                          y: ty,
+                          scale: 0.35,
+                          rotate: deg + (sIdx % 2 === 0 ? 150 : -140),
+                          opacity: 0,
+                        }}
+                        transition={{
+                          duration: 0.64 + (sIdx % 3) * 0.08,
+                          ease: [0.16, 1, 0.3, 1],
+                        }}
+                        className={
+                          isSplinter
+                            ? 'absolute w-4 h-1.5 rounded-[1px] bg-gradient-to-r from-[#2E1A0F] via-[#78350F] to-[#D97706] shadow-[0_2px_6px_rgba(0,0,0,0.7)]'
+                            : 'absolute w-2.5 h-2.5 rounded-[2px] bg-[#0B2E24] border border-[#F59E0B]/60 shadow-[0_2px_6px_rgba(0,0,0,0.65)]'
+                        }
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Pure Floating Frameless Soft "نوبت شماست" Prompt (NO background, NO border, higher up) */}
+            {canHumanPlay &&
+              state.phase === 'PLAYING_TRICK' &&
+              !showTrumpModal && (
+                <motion.div
+                  data-testid="your-turn-prompt"
+                  initial={reducedMotion ? false : { opacity: 0 }}
+                  animate={
+                    reducedMotion
+                      ? { opacity: 0.72 }
+                      : {
+                          opacity: [0.34, 0.76, 0.34],
+                        }
+                  }
+                  transition={
+                    reducedMotion
+                      ? { duration: 0.1 }
+                      : {
+                          duration: 2.1,
+                          repeat: Infinity,
+                          ease: 'easeInOut',
+                        }
+                  }
+                  className="pointer-events-none select-none absolute inset-x-0 -top-10 sm:-top-8 z-25 flex justify-center"
+                >
+                  <span className="text-xl sm:text-3xl font-extrabold tracking-wide text-[#F6E3B4]/80 drop-shadow-[0_2px_10px_rgba(0,0,0,0.68)]">
+                    نوبت شماست
+                  </span>
                 </motion.div>
               )}
-            </AnimatePresence>
 
             {/* TrumpSelector is rendered above the dimmed backdrop at z-50 below */}
           </div>
@@ -1609,6 +2372,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
               avatarSrc={resolvedSeats.east.avatarSrc}
               userId={resolvedSeats.east.userId}
               onInspectPlayer={onInspectPlayer}
+              onInspectSeat={handleInspectSeatFallback}
+              showOnlineDot={Boolean(onlineHud)}
               connected={resolvedSeats.east.connected}
               disconnectRemainingSec={resolvedSeats.east.disconnectRemainingSec}
               appearance={seatAppearances?.east}
@@ -1618,6 +2383,8 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                 state.currentTurn === 'east'
               }
               isHakem={state.hakem === 'east'}
+              hakemKey={`${state.handNumber}`}
+              reducedMotion={reducedMotion}
             />
           </div>
         </section>
@@ -1691,24 +2458,33 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                   cardWidthPx={cardWidthPx}
                   deckId={southDeckId}
                   isLegal={legalIds.has(card.id)}
+                  isSelected={selectedCardId === card.id}
                   canHumanPlay={canHumanPlay}
                   handGathered={handGathered}
                   reducedMotion={reducedMotion}
                   dropRingRef={dropRingRef}
+                  onSelectCard={setSelectedCardId}
                   onPlayCard={onPlayCard}
                 />
               );
             })}
 
-            {/* South SeatProfile overlaid neatly at lower-center base of the fan (exactly like Screenshot 1) */}
+            {/* South SeatProfile overlaid neatly at lower-center base of the fan */}
             <div
               dir="rtl"
               className="pointer-events-none absolute bottom-1 sm:bottom-2 left-1/2 -translate-x-1/2 z-40"
             >
+              <SeatReactionBubble
+                reaction={southReaction}
+                positionClassName="absolute bottom-[calc(100%+10px)] left-1/2 -translate-x-1/2"
+                reducedMotion={reducedMotion}
+              />
               <SeatProfile
                 seat="south"
                 displayName={resolvedSeats.south.name}
                 avatarSrc={resolvedSeats.south.avatarSrc}
+                userId={resolvedSeats.south.userId}
+                showOnlineDot={Boolean(onlineHud)}
                 connected={resolvedSeats.south.connected}
                 disconnectRemainingSec={
                   resolvedSeats.south.disconnectRemainingSec
@@ -1720,11 +2496,25 @@ export const HokmTable: React.FC<HokmTableProps> = ({
                   state.currentTurn === 'south'
                 }
                 isHakem={state.hakem === 'south'}
+                hakemKey={`${state.handNumber}`}
+                reducedMotion={reducedMotion}
               />
             </div>
           </div>
         </section>
       </main>
+
+      {/* Non-Blocking Right-Edge Quick Reaction Menu (Messages, Emojis, Persian Voice Callouts) */}
+      <InGameReactionMenu
+        onSendReaction={handleSendReaction}
+        reducedMotion={reducedMotion}
+      />
+
+      {/* Offline Bot Profile Inspection Modal */}
+      <BotProfileModal
+        bot={inspectedBot}
+        onClose={() => setInspectedBot(null)}
+      />
 
       {/* Exit / Forfeit Confirmation Modal (Triggered by Phone/Browser Back or Escape) */}
       <AnimatePresence>
@@ -1791,15 +2581,24 @@ export const HokmTable: React.FC<HokmTableProps> = ({
         )}
       </AnimatePresence>
 
-      {/* Exciting Hand-Win Celebration Animation (between hands when 7 tricks reached) */}
+      {/* Real-World End-of-Hand Card Throw (all remaining cards from 4 seats) -> Flying Score -> Sweep & Shuffle */}
       <AnimatePresence>
         {state.phase === 'HAND_COMPLETE' && state.handOutcome && (
-          <HandWinCelebration
+          <HandResetTableAnimation
             outcome={state.handOutcome}
-            matchScores={state.matchScores}
-            nextHakemName={resolvedSeats[nextHakemSeat].name}
-            hakemChanged={hakemChangedOnHand}
+            remainingHands={state.hands}
+            seatDeckMap={seatDeckMap}
+            seatCardBackMap={seatCardBackMap}
+            targetScoreRect={handResetTargetScoreRect}
             reducedMotion={reducedMotion}
+            onScoreLanded={(winnerTeam) => {
+              setActiveScoreFlashTeam(winnerTeam);
+              window.setTimeout(() => {
+                setActiveScoreFlashTeam((cur) =>
+                  cur === winnerTeam ? null : cur
+                );
+              }, 850);
+            }}
           />
         )}
       </AnimatePresence>
@@ -1821,6 +2620,6 @@ export const HokmTable: React.FC<HokmTableProps> = ({
             />
           )}
       </AnimatePresence>
-    </div>
+    </motion.div>
   );
 };

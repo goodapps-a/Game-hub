@@ -455,7 +455,7 @@ test('resolveNextHakem keeps Hakem on win and rotates counter-clockwise on Hakem
   assert.equal(resolveNextHakem(lostByWest), 'south');
 });
 
-test('sortHand orders suits Left-to-Right (hearts -> spades -> diamonds -> clubs) and weakest (2) to strongest (A) left-to-right', () => {
+test('sortHand alternates Red/Black suits with trump on rightmost wing and weakest (2) to strongest (A) left-to-right', () => {
   const unsorted: Card[] = [
     makeCard('clubs', 'A'),
     makeCard('clubs', '2'),
@@ -467,9 +467,9 @@ test('sortHand orders suits Left-to-Right (hearts -> spades -> diamonds -> clubs
     makeCard('spades', 'Q'),
     makeCard('spades', '2'),
   ];
-  const sorted = sortHand(unsorted);
+  const sortedNoTrump = sortHand(unsorted, null);
   assert.deepEqual(
-    sorted.map((c) => c.id),
+    sortedNoTrump.map((c) => c.id),
     [
       'hearts-3',
       'hearts-9',
@@ -482,6 +482,39 @@ test('sortHand orders suits Left-to-Right (hearts -> spades -> diamonds -> clubs
       'clubs-A',
     ]
   );
+
+  const sortedHeartsTrump = sortHand(unsorted, 'hearts');
+  assert.deepEqual(
+    sortedHeartsTrump.map((c) => c.id),
+    [
+      'spades-2',
+      'spades-Q',
+      'diamonds-4',
+      'diamonds-K',
+      'clubs-2',
+      'clubs-A',
+      'hearts-3',
+      'hearts-9',
+      'hearts-A',
+    ]
+  );
+
+  const sortedSpadesTrump = sortHand(unsorted, 'spades');
+  assert.deepEqual(
+    sortedSpadesTrump.map((c) => c.id),
+    [
+      'hearts-3',
+      'hearts-9',
+      'hearts-A',
+      'clubs-2',
+      'clubs-A',
+      'diamonds-4',
+      'diamonds-K',
+      'spades-2',
+      'spades-Q',
+    ]
+  );
 });
+
 
 

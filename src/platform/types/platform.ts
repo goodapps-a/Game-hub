@@ -64,6 +64,8 @@ export interface UserProfile {
   };
   appSettings: {
     soundEnabled: boolean;
+    musicEnabled?: boolean;
+    sfxEnabled?: boolean;
     animationSpeed: AnimationSpeed;
     reducedMotion: boolean;
     themeMode: ThemeMode;

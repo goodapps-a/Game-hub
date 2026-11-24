@@ -260,27 +260,418 @@ class HokmSoundEngine {
     this.trigger('trump', 0.76, 0);
   }
 
+  /**
+   * Deep, heavy, bassy cinematic Trump Cut ("بریدن") table-shatter impact:
+   * - Massive sub-bass seismic boom (120Hz -> 26Hz)
+   * - Heavy low wooden table crack & splintering crunch
+   * - Zero high cheesy brass/bell synths
+   */
+  public playTrumpCut(): void {
+    if (!this.enabled || !this.hasUserGesture) return;
+
+    // Layer 1: Low-pitched double card slam onto heavy wood
+    const key1 = PLAY_KEYS[this.playCursor % PLAY_KEYS.length];
+    const key2 = PLAY_KEYS[(this.playCursor + 1) % PLAY_KEYS.length];
+    this.playCursor += 2;
+    this.trigger(key1, 0.95, 0.01, 0.62, 0);
+    this.trigger(key2, 0.85, 0.01, 0.5, 0.032);
+
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    try {
+      const now = ctx.currentTime;
+
+      // Warm soft-clipping saturator for visceral sub punch
+      const curve = new Float32Array(256);
+      for (let i = 0; i < 256; i++) {
+        const x = (i * 2) / 256 - 1;
+        curve[i] = Math.tanh(x * 3.2);
+      }
+      const shaper = ctx.createWaveShaper();
+      shaper.curve = curve;
+      shaper.oversample = '2x';
+      const masterPunch = ctx.createGain();
+      masterPunch.gain.value = 0.78;
+      shaper.connect(masterPunch);
+      masterPunch.connect(ctx.destination);
+
+      // Layer 2: Deep chest-thumping sub-bass drop (118Hz -> 24Hz)
+      const subOsc = ctx.createOscillator();
+      const subGain = ctx.createGain();
+      subOsc.type = 'sine';
+      subOsc.frequency.setValueAtTime(118, now);
+      subOsc.frequency.exponentialRampToValueAtTime(44, now + 0.09);
+      subOsc.frequency.exponentialRampToValueAtTime(24, now + 0.58);
+      subGain.gain.setValueAtTime(0.001, now);
+      subGain.gain.linearRampToValueAtTime(0.76, now + 0.008);
+      subGain.gain.exponentialRampToValueAtTime(0.24, now + 0.24);
+      subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.66);
+      subOsc.connect(subGain);
+      subGain.connect(shaper);
+      subOsc.start(now);
+      subOsc.stop(now + 0.68);
+
+      // Layer 3: Hollow mahogany table body thud (155Hz -> 42Hz)
+      const bodyOsc = ctx.createOscillator();
+      const bodyGain = ctx.createGain();
+      bodyOsc.type = 'triangle';
+      bodyOsc.frequency.setValueAtTime(155, now);
+      bodyOsc.frequency.exponentialRampToValueAtTime(42, now + 0.22);
+      bodyGain.gain.setValueAtTime(0.001, now);
+      bodyGain.gain.linearRampToValueAtTime(0.54, now + 0.007);
+      bodyGain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+      bodyOsc.connect(bodyGain);
+      bodyGain.connect(shaper);
+      bodyOsc.start(now);
+      bodyOsc.stop(now + 0.3);
+
+      // Layer 4: Wood/table cracking & splintering burst (crackle bursts filtered low-mid)
+      const crackLen = Math.floor(ctx.sampleRate * 0.44);
+      const crackBuf = ctx.createBuffer(1, crackLen, ctx.sampleRate);
+      const data = crackBuf.getChannelData(0);
+      for (let i = 0; i < crackLen; i++) {
+        const t = i / ctx.sampleRate;
+        const mainEnv = Math.pow(1 - i / crackLen, 1.85);
+        // Simulate 3 rapid wood-fracture snaps at 0ms, 45ms, 105ms
+        const snap1 = t < 0.03 ? 1.5 : 1;
+        const snap2 = t > 0.042 && t < 0.078 ? 1.45 : 1;
+        const snap3 = t > 0.098 && t < 0.145 ? 1.25 : 1;
+        data[i] = (Math.random() * 2 - 1) * mainEnv * snap1 * snap2 * snap3;
+      }
+      const crackSrc = ctx.createBufferSource();
+      crackSrc.buffer = crackBuf;
+
+      const lowpass = ctx.createBiquadFilter();
+      lowpass.type = 'lowpass';
+      lowpass.Q.value = 1.8;
+      lowpass.frequency.setValueAtTime(1450, now);
+      lowpass.frequency.exponentialRampToValueAtTime(220, now + 0.4);
+
+      const crackGain = ctx.createGain();
+      crackGain.gain.setValueAtTime(0.001, now);
+      crackGain.gain.linearRampToValueAtTime(0.52, now + 0.008);
+      crackGain.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+
+      crackSrc.connect(lowpass);
+      lowpass.connect(crackGain);
+      crackGain.connect(shaper);
+      crackSrc.start(now);
+      crackSrc.stop(now + 0.44);
+
+      // Layer 5: Dark low rumble tail (55Hz + 82.4Hz deep bass fifth)
+      const rumbleFilter = ctx.createBiquadFilter();
+      rumbleFilter.type = 'lowpass';
+      rumbleFilter.frequency.setValueAtTime(260, now + 0.015);
+      rumbleFilter.frequency.exponentialRampToValueAtTime(95, now + 0.65);
+      rumbleFilter.connect(ctx.destination);
+
+      [55.0, 82.41].forEach((freq, idx) => {
+        const osc = ctx.createOscillator();
+        const g = ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(freq, now + 0.015);
+        osc.frequency.linearRampToValueAtTime(freq * 0.94, now + 0.64);
+        g.gain.setValueAtTime(0.0001, now + 0.015);
+        g.gain.linearRampToValueAtTime(idx === 0 ? 0.19 : 0.12, now + 0.04);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + 0.66);
+        osc.connect(g);
+        g.connect(rumbleFilter);
+        osc.start(now + 0.015);
+        osc.stop(now + 0.68);
+      });
+    } catch {
+      // Ignore Web Audio synthesis fallback edge cases
+    }
+  }
+
+  /**
+   * Bright ascending crystal chime when the flying glowing light orb merges into the scoreboard pip.
+   */
+  public playScoreOrbLand(isMyTeam = true): void {
+    if (!this.enabled || !this.hasUserGesture) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    try {
+      const now = ctx.currentTime;
+      const notes = isMyTeam ? [659.25, 880, 1318.51] : [392, 329.63];
+      notes.forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const g = ctx.createGain();
+        osc.type = 'sine';
+        const t0 = now + i * 0.048;
+        osc.frequency.setValueAtTime(freq, t0);
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.linearRampToValueAtTime(isMyTeam ? 0.14 : 0.075, t0 + 0.012);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.3);
+        osc.connect(g);
+        g.connect(ctx.destination);
+        osc.start(t0);
+        osc.stop(t0 + 0.32);
+      });
+    } catch {
+      // Ignore Web Audio error
+    }
+  }
+
+  /**
+   * Realistic staggered card toss/slide flurry when all 4 players throw remaining cards onto the felt.
+   */
+  public playCardScatter(): void {
+    if (!this.enabled || !this.hasUserGesture) return;
+    const offsets = [0, 0.065, 0.135, 0.21, 0.295, 0.38, 0.47];
+    offsets.forEach((delay, idx) => {
+      const key = DEAL_KEYS[(this.dealCursor + idx) % DEAL_KEYS.length];
+      this.trigger(key, 0.44 + (idx % 2) * 0.12, 0.06, 0.92 + idx * 0.025, delay);
+    });
+    this.dealCursor += offsets.length;
+  }
+
+  private ttsBufferCache = new Map<string, AudioBuffer>();
+  private ttsLoading = new Map<string, Promise<AudioBuffer | null>>();
+  private activeVoiceSource: AudioBufferSourceNode | null = null;
+
+  private async fetchTtsBuffer(calloutId: string): Promise<AudioBuffer | null> {
+    const cached = this.ttsBufferCache.get(calloutId);
+    if (cached) return cached;
+
+    const inflight = this.ttsLoading.get(calloutId);
+    if (inflight) return inflight;
+
+    const ctx = this.ensureContext();
+    if (!ctx) return null;
+
+    const promise = fetch(`/api/tts/callout/${encodeURIComponent(calloutId)}`, {
+      method: 'GET',
+      credentials: 'same-origin',
+    })
+      .then((res) => (res.ok ? res.arrayBuffer() : null))
+      .then((arr) => (arr && arr.byteLength > 64 ? ctx.decodeAudioData(arr.slice(0)) : null))
+      .then((decoded) => {
+        if (decoded) {
+          this.ttsBufferCache.set(calloutId, decoded);
+        }
+        this.ttsLoading.delete(calloutId);
+        return decoded;
+      })
+      .catch(() => {
+        this.ttsLoading.delete(calloutId);
+        return null;
+      });
+
+    this.ttsLoading.set(calloutId, promise);
+    return promise;
+  }
+
+  /**
+   * Expressive deep masculine Persian voice callout via server-side Gemini 3.8 TTS.
+   * ZERO synthetic click/fanfare SFX — plays ONLY the natural spoken voice clip!
+   */
+  public playVoiceCallout(calloutId: string, spokenText: string): void {
+    if (!this.enabled || !this.hasUserGesture) return;
+
+    const playSpokenFallback = () => {
+      if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+      try {
+        const synth = window.speechSynthesis;
+        synth.cancel();
+        const utter = new SpeechSynthesisUtterance(spokenText);
+        const voices = synth.getVoices();
+        const faVoice =
+          voices.find((v) => v.lang.toLowerCase().startsWith('fa')) ??
+          voices.find((v) => v.lang.toLowerCase().startsWith('ar'));
+        if (faVoice) {
+          utter.voice = faVoice;
+          utter.lang = faVoice.lang;
+        } else {
+          utter.lang = 'fa-IR';
+        }
+        utter.rate = 0.96;
+        utter.pitch = 0.72; // Deep masculine register fallback
+        utter.volume = 0.95;
+        synth.speak(utter);
+      } catch {
+        // Ignore SpeechSynthesis errors in restricted WebViews
+      }
+    };
+
+    const ctx = this.ensureContext();
+    if (!ctx) {
+      playSpokenFallback();
+      return;
+    }
+
+    const playDecodedVoice = (buffer: AudioBuffer) => {
+      try {
+        if (this.activeVoiceSource) {
+          try {
+            this.activeVoiceSource.stop();
+          } catch {
+            // Already stopped
+          }
+          this.activeVoiceSource = null;
+        }
+        const source = ctx.createBufferSource();
+        const gain = ctx.createGain();
+        source.buffer = buffer;
+        gain.gain.value = 0.92;
+        source.connect(gain);
+        gain.connect(ctx.destination);
+        this.activeVoiceSource = source;
+        source.onended = () => {
+          if (this.activeVoiceSource === source) {
+            this.activeVoiceSource = null;
+          }
+        };
+        source.start(0);
+      } catch {
+        playSpokenFallback();
+      }
+    };
+
+    const cached = this.ttsBufferCache.get(calloutId);
+    if (cached) {
+      playDecodedVoice(cached);
+      return;
+    }
+
+    void this.fetchTtsBuffer(calloutId).then((decoded) => {
+      if (!this.enabled) return;
+      if (decoded) {
+        playDecodedVoice(decoded);
+      } else {
+        playSpokenFallback();
+      }
+    });
+  }
+
   public playGameStart(): void {
-    this.trigger('trickWin', 0.68, 0, 1.08, 0);
-    this.trigger('trump', 0.52, 0, 1.15, 0.14);
+    this.trigger('trump', 0.56, 0, 1.08, 0);
   }
 
+  /**
+   * Unmistakably cheerful, bright, uplifting ascending major chord when OUR team wins a trick,
+   * vs a soft, subtle low muted tone when opponents take a trick.
+   */
   public playTrickWin(isMyTeam: boolean): void {
-    this.trigger(isMyTeam ? 'trickWin' : 'trickLoss', isMyTeam ? 0.68 : 0.5, 0);
+    if (!this.enabled || !this.hasUserGesture) return;
+    const ctx = this.ensureContext();
+    if (!ctx) {
+      this.trigger(isMyTeam ? 'trump' : 'trickLoss', isMyTeam ? 0.55 : 0.36, 0);
+      return;
+    }
+    try {
+      const now = ctx.currentTime;
+      if (isMyTeam) {
+        // Bright, triumphant ascending C-major sparkle arpeggio (C5 -> E5 -> G5 -> C6)
+        const chord = [523.25, 659.25, 783.99, 1046.5];
+        chord.forEach((freq, i) => {
+          const osc = ctx.createOscillator();
+          const overtone = ctx.createOscillator();
+          const gain = ctx.createGain();
+          const t0 = now + i * 0.052;
+          osc.type = 'triangle';
+          overtone.type = 'sine';
+          osc.frequency.setValueAtTime(freq, t0);
+          overtone.frequency.setValueAtTime(freq * 2, t0);
+          gain.gain.setValueAtTime(0.0001, t0);
+          gain.gain.linearRampToValueAtTime(i === chord.length - 1 ? 0.14 : 0.11, t0 + 0.012);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t0 + (i === chord.length - 1 ? 0.42 : 0.28));
+
+          const ovGain = ctx.createGain();
+          ovGain.gain.value = 0.28;
+          osc.connect(gain);
+          overtone.connect(ovGain);
+          ovGain.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(t0);
+          overtone.start(t0);
+          osc.stop(t0 + 0.46);
+          overtone.stop(t0 + 0.46);
+        });
+      } else {
+        // Soft, brief subdued low two-note descent for opponent trick win
+        const notes = [329.63, 277.18];
+        notes.forEach((freq, i) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          const t0 = now + i * 0.075;
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, t0);
+          gain.gain.setValueAtTime(0.0001, t0);
+          gain.gain.linearRampToValueAtTime(0.075, t0 + 0.015);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.24);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(t0);
+          osc.stop(t0 + 0.26);
+        });
+      }
+    } catch {
+      this.trigger(isMyTeam ? 'trump' : 'trickLoss', 0.5, 0);
+    }
   }
 
-  public playHandFinish(isSpecialKot: boolean): void {
-    this.trigger('handWin', isSpecialKot ? 0.88 : 0.72, 0);
+  /**
+   * Joyful celebratory fanfare when our team wins a hand (with extra sparkle on Kot),
+   * or a somber muted cadence if the opponent team takes the hand.
+   */
+  public playHandFinish(isMyTeamWin: boolean, isSpecialKot = false): void {
+    if (!this.enabled || !this.hasUserGesture) return;
+    const ctx = this.ensureContext();
+    if (!ctx) {
+      this.trigger(isMyTeamWin ? 'handWin' : 'trickLoss', isSpecialKot ? 0.85 : 0.65, 0);
+      return;
+    }
+    try {
+      const now = ctx.currentTime;
+      if (isMyTeamWin) {
+        const notes = isSpecialKot
+          ? [523.25, 659.25, 783.99, 1046.5, 1318.51, 1567.98]
+          : [523.25, 659.25, 783.99, 1046.5];
+        notes.forEach((freq, i) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          const t0 = now + i * 0.068;
+          osc.type = 'triangle';
+          osc.frequency.setValueAtTime(freq, t0);
+          gain.gain.setValueAtTime(0.0001, t0);
+          gain.gain.linearRampToValueAtTime(0.15, t0 + 0.016);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t0 + (i === notes.length - 1 ? 0.62 : 0.34));
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(t0);
+          osc.stop(t0 + 0.65);
+        });
+      } else {
+        const notes = [392.0, 349.23, 293.66];
+        notes.forEach((freq, i) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          const t0 = now + i * 0.095;
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, t0);
+          gain.gain.setValueAtTime(0.0001, t0);
+          gain.gain.linearRampToValueAtTime(0.095, t0 + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.35);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(t0);
+          osc.stop(t0 + 0.38);
+        });
+      }
+    } catch {
+      this.trigger(isMyTeamWin ? 'handWin' : 'trickLoss', 0.65, 0);
+    }
   }
 
   public playMatchVictory(): void {
-    this.trigger('handWin', 0.92, 0, 1.0, 0);
-    this.trigger('trump', 0.62, 0, 1.12, 0.28);
-    this.trigger('trickWin', 0.66, 0, 1.22, 0.52);
+    this.playHandFinish(true, true);
+    this.trigger('handWin', 0.62, 0, 1.06, 0.22);
   }
 
   public playMatchDefeat(): void {
-    this.trigger('trickLoss', 0.65, 0, 0.88, 0);
+    this.trigger('trickLoss', 0.62, 0, 0.88, 0);
   }
 }
 
