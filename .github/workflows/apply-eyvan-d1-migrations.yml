@@ -83,7 +83,7 @@ jobs:
           set -euo pipefail
           npx --yes wrangler@4 d1 migrations apply eyvan-hokm-db --remote
 
-      - name: Verify applied migrations count (must be 15) and created tables
+      - name: Verify applied migrations count (must be 15), exact filenames, and created tables
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -110,6 +110,63 @@ jobs:
             echo "::error::Expected exactly 15 applied migrations in d1_migrations, but found ${applied_count}."
             exit 1
           fi
+
+          echo "=== Verify exact 15 migration filenames against cloudflare/migrations ==="
+          names_json="$(npx --yes wrangler@4 d1 execute eyvan-hokm-db --remote --json --command "SELECT name FROM d1_migrations;")"
+          node -e '
+            const fs = require("node:fs");
+            const raw = process.argv[1];
+            const parsed = JSON.parse(raw);
+            const first = Array.isArray(parsed) ? parsed[0] : parsed;
+            if (!first || !Array.isArray(first.results)) {
+              console.error("::error::Failed to parse d1_migrations rows from wrangler JSON output.");
+              process.exit(1);
+            }
+
+            const expectedFiles = fs
+              .readdirSync("migrations", { withFileTypes: true })
+              .filter((entry) => entry.isFile() && entry.name.endsWith(".sql"))
+              .map((entry) => entry.name)
+              .sort();
+
+            if (expectedFiles.length !== 15) {
+              console.error(`::error::Expected exactly 15 SQL files in cloudflare/migrations, found ${expectedFiles.length}.`);
+              process.exit(1);
+            }
+
+            const appliedNames = first.results.map((r) => (r && typeof r.name === "string" ? r.name : ""));
+            if (appliedNames.length !== 15 || appliedNames.some((n) => !n)) {
+              console.error(`::error::Expected 15 valid migration names in d1_migrations, found ${appliedNames.length}.`);
+              process.exit(1);
+            }
+
+            const seen = new Set();
+            const duplicates = [];
+            for (const name of appliedNames) {
+              if (seen.has(name)) duplicates.push(name);
+              seen.add(name);
+            }
+
+            const expectedSet = new Set(expectedFiles);
+            const missing = expectedFiles.filter((name) => !seen.has(name));
+            const extra = Array.from(seen).filter((name) => !expectedSet.has(name));
+
+            if (duplicates.length > 0 || missing.length > 0 || extra.length > 0) {
+              if (duplicates.length > 0) {
+                console.error(`::error::Duplicate migration names in d1_migrations: ${duplicates.join(", ")}`);
+              }
+              if (missing.length > 0) {
+                console.error(`::error::Missing migrations in d1_migrations: ${missing.join(", ")}`);
+              }
+              if (extra.length > 0) {
+                console.error(`::error::Unexpected/extra migrations in d1_migrations: ${extra.join(", ")}`);
+              }
+              process.exit(1);
+            }
+
+            console.log("All 15 migrations verified successfully");
+          ' "${names_json}"
+
           echo "=== Applied migration records in d1_migrations ==="
           npx --yes wrangler@4 d1 execute eyvan-hokm-db --remote --command "SELECT id, name, applied_at FROM d1_migrations ORDER BY id ASC;"
           echo "=== Remote D1 created tables ==="
