@@ -43,8 +43,7 @@ new_sqlite_classes = ["ChatConversationDO"]
 [[d1_databases]]
 binding = "EYVAN_DB"
 database_name = "eyvan-hokm-db"
-# MANUAL SETUP REQUIRED: Run `wrangler d1 create eyvan-hokm-db` and paste the real UUID below
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "aceb2de4-d98a-4739-9f62-786dcbb023d9"
 migrations_dir = "migrations"
 
 [[r2_buckets]]
