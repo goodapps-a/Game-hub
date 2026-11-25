@@ -28,21 +28,21 @@ jobs:
         shell: bash
         working-directory: cloudflare
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Verify manual confirmation
         if: ${{ inputs.confirm_apply != 'yes' }}
         run: |
           echo "::error::Migration aborted: confirm_apply must be explicitly set to 'yes'."
           exit 1
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: Validate required Cloudflare secrets and migration files
+      - name: Validate required Cloudflare secrets and 15 migration files
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -64,6 +64,15 @@ jobs:
             echo "::error::cloudflare/migrations directory not found"
             exit 1
           fi
+          shopt -s nullglob
+          migration_files=(migrations/*.sql)
+          file_count="${#migration_files[@]}"
+          echo "Found ${file_count} migration file(s) in cloudflare/migrations:"
+          printf ' - %s\n' "${migration_files[@]}"
+          if [[ "${file_count}" -ne 15 ]]; then
+            echo "::error::Expected exactly 15 migration files in cloudflare/migrations, but found ${file_count}."
+            exit 1
+          fi
 
       - name: Apply remote D1 migrations
         env:
@@ -74,7 +83,7 @@ jobs:
           set -euo pipefail
           npx --yes wrangler@4 d1 migrations apply eyvan-hokm-db --remote
 
-      - name: Verify applied migrations count and created tables
+      - name: Verify applied migrations count (must be 15) and created tables
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -82,6 +91,26 @@ jobs:
         run: |
           set -euo pipefail
           echo "=== d1_migrations record count ==="
-          npx --yes wrangler@4 d1 execute eyvan-hokm-db --remote --command "SELECT COUNT(*) AS applied_migrations_count FROM d1_migrations;"
+          count_json="$(npx --yes wrangler@4 d1 execute eyvan-hokm-db --remote --json --command "SELECT COUNT(*) AS applied_migrations_count FROM d1_migrations;")"
+          echo "${count_json}"
+          applied_count="$(node -e '
+            const raw = process.argv[1];
+            const parsed = JSON.parse(raw);
+            const first = Array.isArray(parsed) ? parsed[0] : parsed;
+            const row = first && Array.isArray(first.results) ? first.results[0] : null;
+            const val = row ? Number(row.applied_migrations_count) : NaN;
+            if (!Number.isInteger(val)) {
+              console.error("Failed to parse applied_migrations_count from wrangler output");
+              process.exit(1);
+            }
+            process.stdout.write(String(val));
+          ' "${count_json}")"
+          echo "Verified d1_migrations count: ${applied_count}"
+          if [[ "${applied_count}" -ne 15 ]]; then
+            echo "::error::Expected exactly 15 applied migrations in d1_migrations, but found ${applied_count}."
+            exit 1
+          fi
+          echo "=== Applied migration records in d1_migrations ==="
+          npx --yes wrangler@4 d1 execute eyvan-hokm-db --remote --command "SELECT id, name, applied_at FROM d1_migrations ORDER BY id ASC;"
           echo "=== Remote D1 created tables ==="
           npx --yes wrangler@4 d1 execute eyvan-hokm-db --remote --command "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name ASC;"
