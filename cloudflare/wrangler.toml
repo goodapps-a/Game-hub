@@ -46,10 +46,6 @@ database_name = "eyvan-hokm-db"
 database_id = "aceb2de4-d98a-4739-9f62-786dcbb023d9"
 migrations_dir = "migrations"
 
-[[r2_buckets]]
-binding = "EYVAN_ASSETS"
-bucket_name = "eyvan-assets"
-
 # Periodic low-cost cleanup for expired, unblocked `auth_rate_limits` rows (runs every 6 hours, bounded batches)
 [triggers]
 crons = ["0 */6 * * *"]
