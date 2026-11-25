@@ -2046,6 +2046,241 @@ describe('Cloudflare HokmRoomDO + Worker + D1 Reliability Suite', () => {
       cluster.close();
     }
   });
+
+  it('Scenario 13 (Universal Items Trust Boundary): Worker + HokmRoomDO enforces DB appearance for auth users, safe default on D1 failure, restricted guest appearance, and zero owner_only leakage', async () => {
+    const cluster = new CloudflareClusterHarness({ seed: 2027 });
+    try {
+      const now = Date.now();
+
+      // Seed two verified central users + active auth sessions directly in D1
+      const seedAuthUser = async (
+        userId: string,
+        username: string,
+        rawToken: string
+      ) => {
+        const tokenBuf = await crypto.subtle.digest(
+          'SHA-256',
+          new TextEncoder().encode(rawToken)
+        );
+        const tokenHash = Array.from(new Uint8Array(tokenBuf))
+          .map((b) => b.toString(16).padStart(2, '0'))
+          .join('');
+        cluster.d1.sqlite
+          .prepare(
+            `INSERT INTO users (
+               user_id, username, username_key, display_name, email, email_key,
+               email_verified, avatar_code, auth_provider, account_status,
+               created_at, last_seen_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, 1, 'portrait', 'password', 'active', ?, ?, ?)`
+          )
+          .run(
+            userId,
+            username,
+            username.toLowerCase(),
+            username,
+            `${username.toLowerCase()}@example.com`,
+            `${username.toLowerCase()}@example.com`,
+            now,
+            now,
+            now
+          );
+        cluster.d1.sqlite
+          .prepare(
+            `INSERT INTO auth_sessions (
+               session_id, user_id, token_hash, created_at, last_seen_at, expires_at
+             ) VALUES (?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            `sess_${userId}`,
+            userId,
+            tokenHash,
+            now,
+            now,
+            now + 86_400_000
+          );
+      };
+
+      const tokenA = 'auth_token_user_alpha_000000000001';
+      const tokenB = 'auth_token_user_beta_0000000000002';
+      await seedAuthUser('u_cf_alpha', 'cf_alpha', tokenA);
+      await seedAuthUser('u_cf_beta', 'cf_beta', tokenB);
+
+      // Give cf_alpha ownership + equip of deck-public-domain-cc0, cb-royal-peacock, and owner_only tt-tabriz
+      for (const [slot, itemId] of [
+        ['card_deck', 'deck-public-domain-cc0'],
+        ['card_back', 'cb-royal-peacock'],
+        ['table_skin', 'tt-tabriz'],
+      ] as const) {
+        cluster.d1.sqlite
+          .prepare(
+            `INSERT OR IGNORE INTO user_inventory (user_id, item_id, source, acquired_at)
+             VALUES ('u_cf_alpha', ?, 'shop_claim', ?)`
+          )
+          .run(itemId, now);
+        cluster.d1.sqlite
+          .prepare(
+            `INSERT INTO user_equipped_items (user_id, slot, item_id, updated_at)
+             VALUES ('u_cf_alpha', ?, ?, ?)
+             ON CONFLICT(user_id, slot) DO UPDATE SET item_id = excluded.item_id`
+          )
+          .run(slot, itemId, now);
+      }
+
+      // 1) Authenticated cf_alpha creates room with forged body.appearance
+      const createRes = await cluster.fetch('/api/rooms', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: `eyvan_auth_sess=${encodeURIComponent(tokenA)}`,
+        },
+        origin: 'https://eyvan.example',
+        body: JSON.stringify({
+          username: 'spoofed_name',
+          appearance: {
+            deckId: 'forged-legendary-deck',
+            avatarFrameId: 'af-crown-frame',
+            badgeId: 'af-hakem-seal',
+            bannerItemId: 'af-banner-ruby',
+            bannerCode: 'ruby',
+            tableSkinId: 'tt-tabriz',
+            table_skin: 'tt-tabriz',
+          },
+        }),
+      });
+      assert.equal(createRes.status, 201);
+      const created = (await createRes.json()) as { roomCode: string };
+      const alphaRoomCookie = createRes.headers.get('Set-Cookie')!.split(';')[0];
+
+      // 2) Authenticated cf_beta joins while D1 fails on getPublicAppearanceForUser ->
+      //    HokmRoomDO receives X-Eyvan-Auth-Type: authenticated WITHOUT X-Eyvan-Verified-Appearance
+      //    and MUST fall back strictly to safe defaults (NEVER client-supplied forged JSON)!
+      const origPrepare = cluster.d1.prepare.bind(cluster.d1);
+      cluster.d1.prepare = (query: string) => {
+        if (query.includes('FROM user_equipped_items')) {
+          const failStmt: D1PreparedStatementLike = {
+            bind() {
+              return failStmt;
+            },
+            async run() {
+              throw new Error('Simulated D1 appearance outage');
+            },
+            async all() {
+              throw new Error('Simulated D1 appearance outage');
+            },
+            async first() {
+              throw new Error('Simulated D1 appearance outage');
+            },
+          };
+          return failStmt;
+        }
+        return origPrepare(query);
+      };
+
+      let betaJoinRes: Response;
+      try {
+        betaJoinRes = await cluster.fetch(`/api/rooms/${created.roomCode}/join`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Cookie: `eyvan_auth_sess=${encodeURIComponent(tokenB)}`,
+          },
+          origin: 'https://eyvan.example',
+          body: JSON.stringify({
+            appearance: {
+              deckId: 'public-domain-cc0',
+              cardBackId: 'cb-royal-peacock',
+              avatarFrameId: 'af-crown-frame',
+              badgeId: 'af-hakem-seal',
+              bannerItemId: 'af-banner-ruby',
+              bannerCode: 'ruby',
+            },
+          }),
+        });
+      } finally {
+        cluster.d1.prepare = origPrepare;
+      }
+      assert.equal(betaJoinRes.status, 200);
+
+      // 3) Guest user joins with forged legendary items -> must succeed & be restricted to default-owned guest items
+      const guestJoinRes = await cluster.fetch(`/api/rooms/${created.roomCode}/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        origin: 'https://eyvan.example',
+        body: JSON.stringify({
+          username: 'cf_guest1',
+          appearance: {
+            deckId: 'public-domain-cc0',
+            cardBackId: 'cb-royal-peacock',
+            avatarFrameId: 'af-crown-frame',
+            badgeId: 'af-hakem-seal',
+            bannerItemId: 'af-banner-ruby',
+            bannerCode: 'ruby',
+            gameEffectId: 've-turquoise-trump',
+            tableSkinId: 'tt-tabriz',
+          },
+        }),
+      });
+      assert.equal(guestJoinRes.status, 200);
+      const guestSetCookie = guestJoinRes.headers.get('Set-Cookie')!;
+      const guestRoomCookie = guestSetCookie
+        .split(/,\s*(?=eyvan_)/)
+        .find((c) => c.startsWith('eyvan_hokm_sess='))!
+        .split(';')[0];
+
+      // Connect WS for cf_alpha AND cf_guest1 and verify exact snapshots & guest resume
+      const alphaConn = await cluster.connectWebSocket(
+        created.roomCode,
+        'https://eyvan.example',
+        alphaRoomCookie
+      );
+      assert.equal(alphaConn.response.status, 101);
+      const alphaAuth = alphaConn.client.drainMessages()[0];
+      assert.equal(alphaAuth?.type, 'auth_ok');
+      if (alphaAuth?.type === 'auth_ok') {
+        const rawSnap = JSON.stringify(alphaAuth.snapshot);
+        assert.equal(rawSnap.includes('tt-tabriz'), false);
+        assert.equal(rawSnap.includes('tableSkin'), false);
+        assert.equal(rawSnap.includes('table_skin'), false);
+
+        const byName = new Map(
+          alphaAuth.snapshot.seats.map((s) => [s.username, s.appearance])
+        );
+        // cf_alpha: DB-verified deck & card back, forged frame/banner rejected
+        assert.equal(byName.get('cf_alpha')?.deckId, 'public-domain-cc0');
+        assert.equal(byName.get('cf_alpha')?.cardBackId, 'cb-royal-peacock');
+        assert.equal(byName.get('cf_alpha')?.avatarFrameId, null);
+        assert.equal(byName.get('cf_alpha')?.bannerCode, 'royal');
+
+        // cf_beta (D1 failure): safe default appearance, forged body.appearance rejected!
+        assert.equal(byName.get('cf_beta')?.deckId, 'eyvan-classic');
+        assert.equal(byName.get('cf_beta')?.cardBackId, 'cb-shamsa');
+        assert.equal(byName.get('cf_beta')?.avatarFrameId, null);
+        assert.equal(byName.get('cf_beta')?.badgeId, null);
+        assert.equal(byName.get('cf_beta')?.bannerCode, 'royal');
+
+        // cf_guest1: restricted to default-owned guest appearance!
+        assert.equal(byName.get('cf_guest1')?.deckId, 'eyvan-classic');
+        assert.equal(byName.get('cf_guest1')?.cardBackId, 'cb-shamsa');
+        assert.equal(byName.get('cf_guest1')?.avatarFrameId, null);
+        assert.equal(byName.get('cf_guest1')?.badgeId, null);
+        assert.equal(byName.get('cf_guest1')?.bannerCode, 'royal');
+        assert.equal(byName.get('cf_guest1')?.gameEffectId, null);
+      }
+
+      // Verify guest reconnect / resume works seamlessly
+      const guestResume = await cluster.fetch('/api/session/resume', {
+        method: 'POST',
+        headers: {
+          Cookie: guestRoomCookie,
+          'X-Requested-With': 'eyvan-client',
+        },
+        origin: 'https://eyvan.example',
+      });
+      assert.equal(guestResume.status, 200);
+    } finally {
+      cluster.close();
+    }
+  });
 });
 
 

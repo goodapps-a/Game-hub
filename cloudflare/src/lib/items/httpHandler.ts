@@ -230,33 +230,45 @@ export async function handleItemsHttpRequest(
     const body = await parseJsonObjectBody(request, env);
     if (body instanceof Response) return body;
 
-    const result = await claimShopItemForUser(env.db, auth.userId, {
-      itemId: body.itemId,
-      requestId: body.requestId,
-      shopTestMode: testModeEnabled,
-      now: env.now,
-    });
-    if (result.ok === false) {
+    try {
+      const result = await claimShopItemForUser(env.db, auth.userId, {
+        itemId: body.itemId,
+        requestId: body.requestId,
+        shopTestMode: testModeEnabled,
+        now: env.now,
+      });
+      if (result.ok === false) {
+        return buildJson(
+          { ok: false, code: result.code, message: result.message },
+          result.status,
+          env.corsHeaders
+        );
+      }
       return buildJson(
-        { ok: false, code: result.code, message: result.message },
+        {
+          ok: true,
+          item: result.item,
+          effectivePrice: result.effectivePrice,
+          deduplicated: result.deduplicated,
+          alreadyOwned: result.alreadyOwned,
+          grantedCoins: result.grantedCoins,
+          grantedGems: result.grantedGems,
+          inventory: result.state,
+        },
         result.status,
         env.corsHeaders
       );
+    } catch {
+      return buildJson(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'ثبت تراکنش فروشگاه با خطا مواجه شد.',
+        },
+        503,
+        env.corsHeaders
+      );
     }
-    return buildJson(
-      {
-        ok: true,
-        item: result.item,
-        effectivePrice: result.effectivePrice,
-        deduplicated: result.deduplicated,
-        alreadyOwned: result.alreadyOwned,
-        grantedCoins: result.grantedCoins,
-        grantedGems: result.grantedGems,
-        inventory: result.state,
-      },
-      result.status,
-      env.corsHeaders
-    );
   }
 
   // 4b) Shop Gift to Friend (`POST /api/shop/gift`)
@@ -268,33 +280,45 @@ export async function handleItemsHttpRequest(
     const body = await parseJsonObjectBody(request, env);
     if (body instanceof Response) return body;
 
-    const result = await giftShopItemForUser(env.db, auth.userId, {
-      itemId: body.itemId,
-      recipientUserId: body.recipientUserId,
-      requestId: body.requestId,
-      shopTestMode: testModeEnabled,
-      now: env.now,
-    });
-    if (result.ok === false) {
+    try {
+      const result = await giftShopItemForUser(env.db, auth.userId, {
+        itemId: body.itemId,
+        recipientUserId: body.recipientUserId,
+        requestId: body.requestId,
+        shopTestMode: testModeEnabled,
+        now: env.now,
+      });
+      if (result.ok === false) {
+        return buildJson(
+          { ok: false, code: result.code, message: result.message },
+          result.status,
+          env.corsHeaders
+        );
+      }
       return buildJson(
-        { ok: false, code: result.code, message: result.message },
+        {
+          ok: true,
+          giftId: result.giftId,
+          item: result.item,
+          effectivePrice: result.effectivePrice,
+          deduplicated: result.deduplicated,
+          recipient: result.recipient,
+          inventory: result.state,
+        },
         result.status,
         env.corsHeaders
       );
+    } catch {
+      return buildJson(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'ثبت هدیه با خطا مواجه شد.',
+        },
+        503,
+        env.corsHeaders
+      );
     }
-    return buildJson(
-      {
-        ok: true,
-        giftId: result.giftId,
-        item: result.item,
-        effectivePrice: result.effectivePrice,
-        deduplicated: result.deduplicated,
-        recipient: result.recipient,
-        inventory: result.state,
-      },
-      result.status,
-      env.corsHeaders
-    );
   }
 
   // 5) Equip Owned Item (`POST /api/inventory/equip`)
@@ -306,24 +330,36 @@ export async function handleItemsHttpRequest(
     const body = await parseJsonObjectBody(request, env);
     if (body instanceof Response) return body;
 
-    const result = await equipItemForUser(env.db, auth.userId, {
-      itemId: body.itemId,
-      slot: body.slot,
-      shopTestMode: testModeEnabled,
-      now: env.now,
-    });
-    if (result.ok === false) {
+    try {
+      const result = await equipItemForUser(env.db, auth.userId, {
+        itemId: body.itemId,
+        slot: body.slot,
+        shopTestMode: testModeEnabled,
+        now: env.now,
+      });
+      if (result.ok === false) {
+        return buildJson(
+          { ok: false, code: result.code, message: result.message },
+          result.status,
+          env.corsHeaders
+        );
+      }
       return buildJson(
-        { ok: false, code: result.code, message: result.message },
+        { ok: true, inventory: result.state },
         result.status,
         env.corsHeaders
       );
+    } catch {
+      return buildJson(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'ذخیره‌سازی انتخاب آیتم با خطا مواجه شد.',
+        },
+        503,
+        env.corsHeaders
+      );
     }
-    return buildJson(
-      { ok: true, inventory: result.state },
-      result.status,
-      env.corsHeaders
-    );
   }
 
   // 6) Unequip Slot (`POST /api/inventory/unequip`)
@@ -335,23 +371,35 @@ export async function handleItemsHttpRequest(
     const body = await parseJsonObjectBody(request, env);
     if (body instanceof Response) return body;
 
-    const result = await unequipSlotForUser(env.db, auth.userId, {
-      slot: body.slot,
-      shopTestMode: testModeEnabled,
-      now: env.now,
-    });
-    if (result.ok === false) {
+    try {
+      const result = await unequipSlotForUser(env.db, auth.userId, {
+        slot: body.slot,
+        shopTestMode: testModeEnabled,
+        now: env.now,
+      });
+      if (result.ok === false) {
+        return buildJson(
+          { ok: false, code: result.code, message: result.message },
+          result.status,
+          env.corsHeaders
+        );
+      }
       return buildJson(
-        { ok: false, code: result.code, message: result.message },
+        { ok: true, inventory: result.state },
         result.status,
         env.corsHeaders
       );
+    } catch {
+      return buildJson(
+        {
+          ok: false,
+          code: 'DATABASE_ERROR',
+          message: 'به‌روزرسانی وضعیت اسلات با خطا مواجه شد.',
+        },
+        503,
+        env.corsHeaders
+      );
     }
-    return buildJson(
-      { ok: true, inventory: result.state },
-      result.status,
-      env.corsHeaders
-    );
   }
 
   return null;

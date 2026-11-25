@@ -64,10 +64,15 @@ import {
 import { persistCompletedMatchToD1 } from './lib/d1Persistence';
 import { getPayloadUtf8Bytes, readBoundedUtf8Body } from './lib/httpBounds';
 import { parseSessionCookieFromHeader } from './lib/sessionCookie';
+import {
+  getDefaultPublicAppearance,
+  sanitizeGuestSeatAppearance,
+} from '../../src/platform/items/catalogData';
 
 export type { CfWorkerEnv };
 export const INTERNAL_SESSION_TOKEN_HEADER = 'X-Eyvan-Internal-Session-Token';
 export const INTERNAL_VERIFIED_APPEARANCE_HEADER = 'X-Eyvan-Verified-Appearance';
+export const INTERNAL_AUTH_TYPE_HEADER = 'X-Eyvan-Auth-Type';
 
 const ROOM_STATE_STORAGE_KEY = 'room:state';
 const MAX_HTTP_BODY_BYTES = 16 * 1024;
@@ -439,21 +444,33 @@ export class HokmRoomDO {
       const avatarCode = rawVerifiedAvatar
         ? sanitizeAvatarCode(rawVerifiedAvatar)
         : sanitizeAvatarCode(bodyRes.data.avatarCode);
+      const authTypeHeader = request.headers.get(INTERNAL_AUTH_TYPE_HEADER)?.trim();
+      const isAuthenticatedUser =
+        authTypeHeader === 'authenticated' ||
+        Boolean(verifiedUsername) ||
+        Boolean(verifiedUserId && !verifiedUserId.startsWith('guest_'));
+
       let verifiedAppearance: SeatPublicAppearance | undefined;
-      const rawVerifiedAppearance = verifiedUserId
-        ? request.headers.get(INTERNAL_VERIFIED_APPEARANCE_HEADER)
-        : null;
-      if (rawVerifiedAppearance) {
-        try {
-          verifiedAppearance = sanitizeSeatAppearance(
-            JSON.parse(rawVerifiedAppearance)
-          );
-        } catch {
-          verifiedAppearance = undefined;
+      if (isAuthenticatedUser) {
+        const rawVerifiedAppearance = request.headers.get(
+          INTERNAL_VERIFIED_APPEARANCE_HEADER
+        );
+        if (rawVerifiedAppearance) {
+          try {
+            verifiedAppearance = sanitizeSeatAppearance(
+              JSON.parse(rawVerifiedAppearance)
+            );
+          } catch {
+            verifiedAppearance = undefined;
+          }
         }
       }
-      const appearance =
-        verifiedAppearance ?? sanitizeSeatAppearance(bodyRes.data.appearance);
+      // Strict trust boundary:
+      // - Authenticated user: ONLY server-verified DB appearance, or safe default on DB failure/missing header (NEVER client JSON)
+      // - Guest user: strictly restricted to default-owned public items via sanitizeGuestSeatAppearance
+      const appearance = isAuthenticatedUser
+        ? (verifiedAppearance ?? getDefaultPublicAppearance())
+        : sanitizeGuestSeatAppearance(bodyRes.data.appearance);
       const rawTarget = bodyRes.data.targetMatchScore;
       const targetMatchScore =
         typeof rawTarget === 'number' &&
@@ -551,21 +568,33 @@ export class HokmRoomDO {
       const avatarCode = rawVerifiedAvatar
         ? sanitizeAvatarCode(rawVerifiedAvatar)
         : sanitizeAvatarCode(bodyRes.data.avatarCode);
+      const authTypeHeader = request.headers.get(INTERNAL_AUTH_TYPE_HEADER)?.trim();
+      const isAuthenticatedUser =
+        authTypeHeader === 'authenticated' ||
+        Boolean(verifiedUsername) ||
+        Boolean(verifiedUserId && !verifiedUserId.startsWith('guest_'));
+
       let verifiedAppearance: SeatPublicAppearance | undefined;
-      const rawVerifiedAppearance = verifiedUserId
-        ? request.headers.get(INTERNAL_VERIFIED_APPEARANCE_HEADER)
-        : null;
-      if (rawVerifiedAppearance) {
-        try {
-          verifiedAppearance = sanitizeSeatAppearance(
-            JSON.parse(rawVerifiedAppearance)
-          );
-        } catch {
-          verifiedAppearance = undefined;
+      if (isAuthenticatedUser) {
+        const rawVerifiedAppearance = request.headers.get(
+          INTERNAL_VERIFIED_APPEARANCE_HEADER
+        );
+        if (rawVerifiedAppearance) {
+          try {
+            verifiedAppearance = sanitizeSeatAppearance(
+              JSON.parse(rawVerifiedAppearance)
+            );
+          } catch {
+            verifiedAppearance = undefined;
+          }
         }
       }
-      const appearance =
-        verifiedAppearance ?? sanitizeSeatAppearance(bodyRes.data.appearance);
+      // Strict trust boundary:
+      // - Authenticated user: ONLY server-verified DB appearance, or safe default on DB failure/missing header (NEVER client JSON)
+      // - Guest user: strictly restricted to default-owned public items via sanitizeGuestSeatAppearance
+      const appearance = isAuthenticatedUser
+        ? (verifiedAppearance ?? getDefaultPublicAppearance())
+        : sanitizeGuestSeatAppearance(bodyRes.data.appearance);
       const preferredSeat = isValidSeat(bodyRes.data.preferredSeat)
         ? bodyRes.data.preferredSeat
         : undefined;

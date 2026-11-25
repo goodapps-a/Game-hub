@@ -1403,10 +1403,17 @@ export const HokmTable: React.FC<HokmTableProps> = ({
   const tableSkin = getTableSkinVisual(tableSkinId);
   const effectAccent = getGameEffectAccent(gameEffectId);
 
+  const hasOnlineSeatAppearances = Boolean(seatAppearances);
   const southDeckId = seatAppearances?.south?.deckId ?? deckId;
-  const northDeckId = seatAppearances?.north?.deckId ?? deckId;
-  const eastDeckId = seatAppearances?.east?.deckId ?? deckId;
-  const westDeckId = seatAppearances?.west?.deckId ?? deckId;
+  const northDeckId =
+    seatAppearances?.north?.deckId ??
+    (hasOnlineSeatAppearances ? 'eyvan-classic' : deckId);
+  const eastDeckId =
+    seatAppearances?.east?.deckId ??
+    (hasOnlineSeatAppearances ? 'eyvan-classic' : deckId);
+  const westDeckId =
+    seatAppearances?.west?.deckId ??
+    (hasOnlineSeatAppearances ? 'eyvan-classic' : deckId);
 
   const southCardBackId = seatAppearances?.south?.cardBackId ?? cardBackId;
   const northCardBackId = seatAppearances?.north?.cardBackId ?? undefined;

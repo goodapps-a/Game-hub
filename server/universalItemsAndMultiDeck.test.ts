@@ -13,8 +13,15 @@ import { HokmRoomManager } from './roomManager';
 import {
   BASE_UNIVERSAL_ITEMS,
   buildPublicAppearanceFromSlots,
+  getDefaultPublicAppearance,
 } from '../src/platform/items/catalogData';
 import type { UniversalItemDefinition } from '../src/platform/items/itemTypes';
+import { claimShopItemForUser } from '../cloudflare/src/lib/items/inventoryService';
+import type {
+  D1DatabaseLike,
+  D1PreparedStatementLike,
+  D1RunResult,
+} from '../cloudflare/src/lib/types';
 import {
   filterCatalogItems,
   paginateCatalogItems,
@@ -28,7 +35,10 @@ import {
   DeckSystemError,
   EYVAN_CLASSIC_DECK_ID,
   InMemoryDeckBlobStore,
+  IndexedDBDeckBlobStore,
+  StoredDeckAsset,
   computeSha256Hex,
+  makeAssetCompositeKey,
   validateDeckManifest,
 } from '../src/platform/decks';
 import { createInitialGuestProfile } from '../src/platform/data/guestDefaults';
@@ -151,7 +161,7 @@ async function createItemsTestHarness(prefix: string, shopTestMode: boolean) {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   };
 
-  return { db, baseUrl, registerAndVerify, cleanup };
+  return { db, roomManager, baseUrl, registerAndVerify, cleanup };
 }
 
 describe('Universal Items, Ownership, Multi-Deck Concurrency, Test Mode & PWA', () => {
@@ -767,5 +777,673 @@ describe('Universal Items, Ownership, Multi-Deck Concurrency, Test Mode & PWA', 
     assert.deepEqual(messages[0], { type: 'SKIP_WAITING' });
 
     assert.equal(EYVAN_CLASSIC_DECK_ID, 'eyvan-classic');
+  });
+
+  it('5. Atomic Claim Rollback: mid-batch failure at any stage leaves ZERO partial DB mutations (wallets, claims, inventory)', async () => {
+    const h = await createItemsTestHarness('eyvan-items-atomic-', false);
+    try {
+      const buyer = await h.registerAndVerify('AtomicBuyer', 'atomic.buyer@example.com');
+      const rawAdapter = h.db.getD1Adapter();
+
+      // Seed exact starting wallet: 2500 coins, 200 gems
+      await rawAdapter
+        .prepare(
+          `INSERT INTO user_wallets (user_id, coins, gems, updated_at)
+           VALUES (?, 2500, 200, ?)
+           ON CONFLICT(user_id) DO UPDATE SET coins = 2500, gems = 200`
+        )
+        .bind(buyer.userId, Date.now())
+        .run();
+
+      // Fault-injecting D1 wrapper that runs statements inside a REAL SQLite transaction
+      // and throws at a configurable statement index inside batch() to prove full rollback!
+      const makeFaultyBatchDb = (failAtStatementIndex: number): D1DatabaseLike => {
+        const sqlite = (
+          rawAdapter as unknown as {
+            sqlite: {
+              prepare: (sql: string) => { run: (...p: unknown[]) => { changes: number; lastInsertRowid: number | bigint } };
+              transaction: <T>(fn: () => T) => () => T;
+            };
+          }
+        ).sqlite;
+
+        const wrapStmt = (
+          query: string,
+          params: unknown[]
+        ): D1PreparedStatementLike & { __q: string; __p: unknown[] } => ({
+          __q: query,
+          __p: params,
+          bind(...values: unknown[]) {
+            return wrapStmt(query, values);
+          },
+          run: () => rawAdapter.prepare(query).bind(...params).run(),
+          all: <T = unknown>() => rawAdapter.prepare(query).bind(...params).all<T>(),
+          first: <T = unknown>() => rawAdapter.prepare(query).bind(...params).first<T>(),
+        });
+
+        return {
+          prepare(query: string) {
+            return wrapStmt(query, []);
+          },
+          async batch(statements: D1PreparedStatementLike[]): Promise<D1RunResult[]> {
+            const isClaimBatch = statements.some((st) =>
+              ((st as D1PreparedStatementLike & { __q?: string }).__q ?? '').includes(
+                'user_wallet_claims'
+              )
+            );
+            const tx = sqlite.transaction(() => {
+              const out: D1RunResult[] = [];
+              for (let i = 0; i < statements.length; i++) {
+                if (isClaimBatch && i === failAtStatementIndex) {
+                  throw new Error(`Simulated DB fault at batch statement #${i}`);
+                }
+                const s = statements[i] as D1PreparedStatementLike & {
+                  __q: string;
+                  __p: unknown[];
+                };
+                const info = sqlite.prepare(s.__q).run(...s.__p);
+                out.push({
+                  success: true,
+                  meta: {
+                    changes: info.changes,
+                    last_row_id: Number(info.lastInsertRowid ?? 0),
+                  },
+                });
+              }
+              return out;
+            });
+            return tx();
+          },
+        };
+      };
+
+      const readSnapshot = async () => {
+        const wallet = await rawAdapter
+          .prepare(`SELECT coins, gems FROM user_wallets WHERE user_id = ?`)
+          .bind(buyer.userId)
+          .first<{ coins: number; gems: number }>();
+        const claims = await rawAdapter
+          .prepare(`SELECT request_id, item_id FROM user_wallet_claims WHERE user_id = ?`)
+          .bind(buyer.userId)
+          .all<{ request_id: string; item_id: string }>();
+        const owned = await rawAdapter
+          .prepare(`SELECT item_id FROM user_inventory WHERE user_id = ?`)
+          .bind(buyer.userId)
+          .all<{ item_id: string }>();
+        return {
+          coins: Number(wallet?.coins ?? 0),
+          gems: Number(wallet?.gems ?? 0),
+          claims: claims.results ?? [],
+          ownedIds: (owned.results ?? []).map((r) => r.item_id),
+        };
+      };
+
+      // A) Permanent item purchase (`tt-lapis`, 1800 coins -> 3 statements: deduct, claim, inventory)
+      // Fail at statement 0 (deduct), 1 (claim insert), and 2 (inventory insert)
+      for (const failIdx of [0, 1, 2]) {
+        const res = await claimShopItemForUser(makeFaultyBatchDb(failIdx), buyer.userId, {
+          itemId: 'tt-lapis',
+          requestId: `req_atomic_perm_${failIdx}`,
+          shopTestMode: false,
+        });
+        assert.equal(res.ok, false);
+        if (res.ok === false) {
+          assert.equal(res.status, 503);
+          assert.equal(res.code, 'DATABASE_ERROR');
+        }
+        const snap = await readSnapshot();
+        assert.equal(snap.coins, 2500, `Coins must stay untouched on failure at stmt ${failIdx}`);
+        assert.equal(snap.gems, 200);
+        assert.equal(snap.claims.length, 0, `No orphan claim row allowed on failure at stmt ${failIdx}`);
+        assert.equal(snap.ownedIds.includes('tt-lapis'), false);
+      }
+
+      // B) Chest purchase (`dd-gold-chest`, 120 gems -> 5000 coins -> 3 statements: deduct gems, claim, credit coins)
+      for (const failIdx of [0, 1, 2]) {
+        const res = await claimShopItemForUser(makeFaultyBatchDb(failIdx), buyer.userId, {
+          itemId: 'dd-gold-chest',
+          requestId: `req_atomic_chest_${failIdx}`,
+          shopTestMode: false,
+        });
+        assert.equal(res.ok, false);
+        if (res.ok === false) {
+          assert.equal(res.status, 503);
+          assert.equal(res.code, 'DATABASE_ERROR');
+        }
+        const snap = await readSnapshot();
+        assert.equal(snap.coins, 2500);
+        assert.equal(snap.gems, 200);
+        assert.equal(snap.claims.length, 0);
+      }
+
+      // C) Retry with the SAME requestId once DB recovers -> commits cleanly once!
+      const okChest = await claimShopItemForUser(rawAdapter, buyer.userId, {
+        itemId: 'dd-gold-chest',
+        requestId: 'req_atomic_chest_2',
+        shopTestMode: false,
+      });
+      assert.equal(okChest.ok, true);
+      if (okChest.ok) {
+        assert.equal(okChest.deduplicated, false);
+        assert.equal(okChest.effectivePrice, 120);
+        assert.equal(okChest.grantedCoins, 5000);
+      }
+      const afterSnap = await readSnapshot();
+      assert.equal(afterSnap.gems, 80);
+      assert.equal(afterSnap.coins, 7500);
+      assert.equal(afterSnap.claims.length, 1);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it('6. Idempotency Conflict & Concurrency: rejects requestId reuse for different itemId, prevents double-charge and double chest rewards under concurrent requests', async () => {
+    const h = await createItemsTestHarness('eyvan-items-idem-', false);
+    try {
+      const user = await h.registerAndVerify('RaceBuyer', 'race.buyer@example.com');
+      const d1 = h.db.getD1Adapter();
+
+      await d1
+        .prepare(
+          `INSERT INTO user_wallets (user_id, coins, gems, updated_at)
+           VALUES (?, 5000, 500, ?)
+           ON CONFLICT(user_id) DO UPDATE SET coins = 5000, gems = 500`
+        )
+        .bind(user.userId, Date.now())
+        .run();
+
+      // 6A) Concurrent duplicate purchase of permanent item with SAME requestId (5x parallel)
+      const sameReqResults = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          claimShopItemForUser(d1, user.userId, {
+            itemId: 'tt-lapis', // 1800 coins
+            requestId: 'req_concurrent_same_01',
+            shopTestMode: false,
+          })
+        )
+      );
+      assert.equal(sameReqResults.every((r) => r.ok), true);
+      const nonDedupCount = sameReqResults.filter((r) => r.ok && !r.deduplicated).length;
+      assert.equal(nonDedupCount, 1, 'Exactly one request must execute the primary charge');
+
+      const walletAfterSame = await d1
+        .prepare(`SELECT coins, gems FROM user_wallets WHERE user_id = ?`)
+        .bind(user.userId)
+        .first<{ coins: number; gems: number }>();
+      assert.equal(walletAfterSame?.coins, 3200, 'Must deduct 1800 coins strictly once');
+
+      // 6B) Reusing the SAME requestId for a DIFFERENT itemId MUST be rejected (409 IDEMPOTENCY_CONFLICT)
+      const conflictRes = await claimShopItemForUser(d1, user.userId, {
+        itemId: 'af-gold-arch', // different item!
+        requestId: 'req_concurrent_same_01',
+        shopTestMode: false,
+      });
+      assert.equal(conflictRes.ok, false);
+      if (conflictRes.ok === false) {
+        assert.equal(conflictRes.status, 409);
+        assert.equal(conflictRes.code, 'IDEMPOTENCY_CONFLICT');
+      }
+      const ownedConflict = await d1
+        .prepare(`SELECT 1 FROM user_inventory WHERE user_id = ? AND item_id = 'af-gold-arch'`)
+        .bind(user.userId)
+        .first();
+      assert.equal(ownedConflict, null, 'Conflicting item must NOT be granted');
+      const walletAfterConflict = await d1
+        .prepare(`SELECT coins FROM user_wallets WHERE user_id = ?`)
+        .bind(user.userId)
+        .first<{ coins: number }>();
+      assert.equal(walletAfterConflict?.coins, 3200, 'Conflicting reuse must NOT charge wallet');
+
+      // 6C) Concurrent purchase of the SAME permanent item with DIFFERENT requestIds (5x parallel)
+      //     Must charge strictly once and never double-deduct!
+      const diffReqResults = await Promise.all(
+        Array.from({ length: 5 }, (_, idx) =>
+          claimShopItemForUser(d1, user.userId, {
+            itemId: 'af-gold-arch', // 750 coins
+            requestId: `req_concurrent_diff_${idx}`,
+            shopTestMode: false,
+          })
+        )
+      );
+      assert.equal(diffReqResults.every((r) => r.ok), true);
+      const walletAfterDiff = await d1
+        .prepare(`SELECT coins FROM user_wallets WHERE user_id = ?`)
+        .bind(user.userId)
+        .first<{ coins: number }>();
+      assert.equal(
+        walletAfterDiff?.coins,
+        3200 - 750,
+        'Concurrent purchases with different requestIds must deduct 750 coins strictly once'
+      );
+
+      // 6D) Concurrent duplicate chest reward claim (5x parallel with same requestId) -> strictly 1 charge & 1 reward!
+      const chestResults = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          claimShopItemForUser(d1, user.userId, {
+            itemId: 'dd-gold-chest', // costs 120 gems, grants 5000 coins
+            requestId: 'req_chest_race_99',
+            shopTestMode: false,
+          })
+        )
+      );
+      assert.equal(chestResults.every((r) => r.ok), true);
+      const walletAfterChest = await d1
+        .prepare(`SELECT coins, gems FROM user_wallets WHERE user_id = ?`)
+        .bind(user.userId)
+        .first<{ coins: number; gems: number }>();
+      assert.equal(walletAfterChest?.gems, 500 - 120, 'Chest cost must be deducted strictly once');
+      assert.equal(
+        walletAfterChest?.coins,
+        3200 - 750 + 5000,
+        'Chest reward (+5000 coins) must be granted strictly once'
+      );
+
+      // Reusing chest requestId for a different chest/item must also fail with 409 IDEMPOTENCY_CONFLICT
+      const chestReuseErr = await claimShopItemForUser(d1, user.userId, {
+        itemId: 'dd-gem-coffer',
+        requestId: 'req_chest_race_99',
+        shopTestMode: false,
+      });
+      assert.equal(chestReuseErr.ok, false);
+      if (chestReuseErr.ok === false) {
+        assert.equal(chestReuseErr.status, 409);
+        assert.equal(chestReuseErr.code, 'IDEMPOTENCY_CONFLICT');
+      }
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it('7. Online Room Appearance Trust Boundaries: blocks authenticated/guest spoofing, falls back to safe default on DB error, strips owner_only table_skin, and preserves independent decks', async () => {
+    const h = await createItemsTestHarness('eyvan-room-trust-', true);
+    try {
+      const alice = await h.registerAndVerify('AliceTrust', 'alice.trust@example.com');
+      const carol = await h.registerAndVerify('CarolTrust', 'carol.trust@example.com');
+
+      // Alice legitimately owns & equips deck-public-domain-cc0, cb-royal-peacock, and owner_only tt-tabriz
+      for (const [itemId, slot] of [
+        ['deck-public-domain-cc0', 'card_deck'],
+        ['cb-royal-peacock', 'card_back'],
+        ['tt-tabriz', 'table_skin'],
+      ] as const) {
+        const cr = await fetch(`${h.baseUrl}/api/shop/claim`, {
+          method: 'POST',
+          headers: {
+            Cookie: alice.cookie,
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'eyvan-client',
+          },
+          body: JSON.stringify({ itemId, requestId: `req_trust_${itemId}` }),
+        });
+        assert.equal(cr.status, 200);
+        const er = await fetch(`${h.baseUrl}/api/inventory/equip`, {
+          method: 'POST',
+          headers: {
+            Cookie: alice.cookie,
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'eyvan-client',
+          },
+          body: JSON.stringify({ itemId, slot }),
+        });
+        assert.equal(er.status, 200);
+      }
+
+      // 7A) Authenticated Alice attempts to spoof unowned legendary items + inject owner_only tableSkinId on room creation
+      const createRes = await fetch(`${h.baseUrl}/api/rooms`, {
+        method: 'POST',
+        headers: {
+          Cookie: alice.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          username: 'FakeNameIgnored',
+          appearance: {
+            deckId: 'spoofed-vip-deck',
+            cardBackId: 'cb-isfahan-gold',
+            avatarFrameId: 'af-crown-frame',
+            badgeId: 'af-hakem-seal',
+            bannerItemId: 'af-banner-ruby',
+            bannerCode: 'ruby',
+            gameEffectId: 've-turquoise-trump',
+            tableSkinId: 'tt-tabriz',
+            table_skin: 'tt-tabriz',
+          },
+        }),
+      });
+      assert.equal(createRes.status, 201);
+      const created = (await createRes.json()) as {
+        roomCode: string;
+        playerId: string;
+      };
+
+      // 7B) Guest user Bob attempts to spoof unowned premium items on join -> must be restricted to default-owned guest items
+      const guestJoinRes = await fetch(`${h.baseUrl}/api/rooms/${created.roomCode}/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: 'GuestBob',
+          appearance: {
+            deckId: 'public-domain-cc0',
+            cardBackId: 'cb-royal-peacock',
+            avatarFrameId: 'af-crown-frame',
+            badgeId: 'af-hakem-seal',
+            bannerItemId: 'af-banner-ruby',
+            bannerCode: 'ruby',
+            gameEffectId: 've-turquoise-trump',
+            tableSkinId: 'tt-tabriz',
+          },
+        }),
+      });
+      assert.equal(guestJoinRes.status, 200);
+      const guestJoined = (await guestJoinRes.json()) as { playerId: string };
+
+      // 7C) Authenticated Carol joins while DB lookup for user_equipped_items fails ->
+      //     MUST fall back to safe default public appearance (NEVER client-supplied forged JSON)!
+      const origGetD1Adapter = h.db.getD1Adapter.bind(h.db);
+      (h.db as unknown as { getD1Adapter: typeof h.db.getD1Adapter }).getD1Adapter = () => {
+        const real = origGetD1Adapter();
+        return {
+          prepare(query: string) {
+            if (query.includes('FROM user_equipped_items')) {
+              const failingStmt: D1PreparedStatementLike = {
+                bind() {
+                  return failingStmt;
+                },
+                async run() {
+                  throw new Error('Simulated DB appearance lookup outage');
+                },
+                async all() {
+                  throw new Error('Simulated DB appearance lookup outage');
+                },
+                async first() {
+                  throw new Error('Simulated DB appearance lookup outage');
+                },
+              };
+              return failingStmt;
+            }
+            return real.prepare(query);
+          },
+          batch: (stmts) => real.batch(stmts),
+        };
+      };
+
+      let carolJoined: { playerId: string };
+      try {
+        const carolJoinRes = await fetch(
+          `${h.baseUrl}/api/rooms/${created.roomCode}/join`,
+          {
+            method: 'POST',
+            headers: {
+              Cookie: carol.cookie,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              appearance: {
+                deckId: 'public-domain-cc0',
+                cardBackId: 'cb-royal-peacock',
+                avatarFrameId: 'af-crown-frame',
+                badgeId: 'af-hakem-seal',
+                bannerCode: 'ruby',
+              },
+            }),
+          }
+        );
+        assert.equal(carolJoinRes.status, 200);
+        carolJoined = (await carolJoinRes.json()) as { playerId: string };
+      } finally {
+        (h.db as unknown as { getD1Adapter: typeof h.db.getD1Adapter }).getD1Adapter =
+          origGetD1Adapter;
+      }
+
+      // Inspect authoritative snapshots sent to EVERY client in the room
+      const roomEntry = (
+        h.roomManager as unknown as {
+          rooms: Map<string, { controller: HokmRoomController }>;
+        }
+      ).rooms.get(created.roomCode);
+      assert.ok(roomEntry);
+      const room = roomEntry.controller;
+      const defaults = getDefaultPublicAppearance();
+
+      for (const viewerId of [created.playerId, guestJoined.playerId, carolJoined.playerId]) {
+        const snap = room.getSnapshotForPlayer(viewerId);
+        assert.ok(snap);
+
+        // Zero owner_only leakage anywhere in room snapshot
+        const rawJson = JSON.stringify(snap);
+        assert.equal(rawJson.includes('tt-tabriz'), false);
+        assert.equal(rawJson.includes('tableSkin'), false);
+        assert.equal(rawJson.includes('table_skin'), false);
+
+        const byUser = new Map(snap.seats.map((s) => [s.username, s.appearance]));
+
+        // Alice: strictly DB-verified deck & card back, ZERO spoofed items
+        const aliceApp = byUser.get('AliceTrust');
+        assert.equal(aliceApp?.deckId, 'public-domain-cc0');
+        assert.equal(aliceApp?.cardBackId, 'cb-royal-peacock');
+        assert.equal(aliceApp?.avatarFrameId, null);
+        assert.equal(aliceApp?.badgeId, null);
+        assert.equal(aliceApp?.bannerCode, 'royal');
+        assert.equal(aliceApp?.gameEffectId, null);
+
+        // GuestBob: strictly default-owned guest appearance, ZERO spoofed paid items
+        const bobApp = byUser.get('GuestBob');
+        assert.equal(bobApp?.deckId, defaults.deckId);
+        assert.equal(bobApp?.cardBackId, defaults.cardBackId);
+        assert.equal(bobApp?.avatarFrameId, null);
+        assert.equal(bobApp?.badgeId, null);
+        assert.equal(bobApp?.bannerCode, 'royal');
+        assert.equal(bobApp?.gameEffectId, null);
+
+        // Carol (DB lookup failed): strictly safe default appearance, ZERO spoofed JSON fallback
+        const carolApp = byUser.get('CarolTrust');
+        assert.equal(carolApp?.deckId, defaults.deckId);
+        assert.equal(carolApp?.cardBackId, defaults.cardBackId);
+        assert.equal(carolApp?.avatarFrameId, null);
+        assert.equal(carolApp?.badgeId, null);
+        assert.equal(carolApp?.bannerCode, 'royal');
+      }
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it('8. IndexedDBDeckBlobStore Transaction Safety: waits strictly for tx.oncomplete and rejects cleanly on tx.onabort / tx.onerror without hanging', async () => {
+    type FakeTxBehavior = 'complete' | 'abort_after_req_success' | 'tx_error' | 'req_error';
+    let nextBehavior: FakeTxBehavior = 'complete';
+    let holdCompleteQueue: Array<() => void> = [];
+    const manifestRows = new Map<string, unknown>();
+    const assetRows = new Map<string, StoredDeckAsset>();
+
+    const createFakeDb = () => ({
+      objectStoreNames: { contains: () => true },
+      onversionchange: null as null | (() => void),
+      close() {},
+      transaction(_storeNames: string | string[], _mode: IDBTransactionMode) {
+        const behavior = nextBehavior;
+        const tx: {
+          oncomplete: null | (() => void);
+          onerror: null | (() => void);
+          onabort: null | (() => void);
+          error: Error | null;
+          objectStore: (name: string) => unknown;
+        } = {
+          oncomplete: null,
+          onerror: null,
+          onabort: null,
+          error: null,
+          objectStore(name: string) {
+            const makeReq = <T>(exec: () => T) => {
+              const req: {
+                result?: T;
+                onsuccess: null | (() => void);
+                onerror: null | (() => void);
+              } = {
+                onsuccess: null,
+                onerror: null,
+              };
+              queueMicrotask(() => {
+                if (behavior === 'req_error') {
+                  req.onerror?.();
+                  return;
+                }
+                req.result = exec();
+                req.onsuccess?.();
+              });
+              return req;
+            };
+            return {
+              get: (k: string) => makeReq(() => (name === 'manifests' ? manifestRows.get(k) : assetRows.get(k))),
+              getAll: () => makeReq(() => Array.from((name === 'manifests' ? manifestRows : assetRows).values())),
+              put: (val: Record<string, unknown>) =>
+                makeReq(() => {
+                  if (name === 'manifests') manifestRows.set(String(val.deckId), val);
+                  else assetRows.set(String(val.key), val as unknown as StoredDeckAsset);
+                  return undefined;
+                }),
+              delete: (k: string) =>
+                makeReq(() => {
+                  if (name === 'manifests') manifestRows.delete(k);
+                  else assetRows.delete(k);
+                  return undefined;
+                }),
+              clear: () =>
+                makeReq(() => {
+                  if (name === 'manifests') manifestRows.clear();
+                  else assetRows.clear();
+                  return undefined;
+                }),
+              index: () => ({
+                getAll: (deckId: string) =>
+                  makeReq(() =>
+                    Array.from(assetRows.values()).filter((a) => a.deckId === deckId)
+                  ),
+              }),
+            };
+          },
+        };
+
+        // Schedule transaction completion/error/abort strictly AFTER request callbacks
+        const triggerTxFinish = () => {
+          if (behavior === 'abort_after_req_success') {
+            tx.onabort?.();
+          } else if (behavior === 'tx_error') {
+            tx.error = new Error('Simulated IDB tx error');
+            tx.onerror?.();
+          } else if (behavior === 'complete') {
+            tx.oncomplete?.();
+          }
+        };
+        holdCompleteQueue.push(triggerTxFinish);
+        return tx;
+      },
+    });
+
+    const flushTx = async () => {
+      // Allow request microtasks to run first
+      await Promise.resolve();
+      await Promise.resolve();
+      const pending = holdCompleteQueue;
+      holdCompleteQueue = [];
+      for (const fn of pending) fn();
+    };
+
+    const origIndexedDb = (globalThis as unknown as { indexedDB?: unknown }).indexedDB;
+    (globalThis as unknown as { indexedDB: unknown }).indexedDB = {
+      open() {
+        const req: {
+          result?: unknown;
+          onsuccess: null | (() => void);
+          onerror: null | (() => void);
+          onupgradeneeded: null | (() => void);
+        } = {
+          onsuccess: null,
+          onerror: null,
+          onupgradeneeded: null,
+        };
+        queueMicrotask(() => {
+          req.result = createFakeDb();
+          req.onsuccess?.();
+        });
+        return req;
+      },
+    };
+
+    try {
+      const idbStore = new IndexedDBDeckBlobStore();
+      const sampleAsset: StoredDeckAsset = {
+        key: makeAssetCompositeKey('idb-test-deck', 'back'),
+        deckId: 'idb-test-deck',
+        assetKey: 'back',
+        hash: 'a'.repeat(64),
+        bytes: 4,
+        mimeType: 'image/svg+xml',
+        blob: new Blob(['test'], { type: 'image/svg+xml' }),
+        updatedAt: Date.now(),
+      };
+
+      // 8A) putAssetsBatch & getAllAssetsForDeck must NOT resolve before tx.oncomplete!
+      nextBehavior = 'complete';
+      let putDone = false;
+      const putP = idbStore.putAssetsBatch([sampleAsset]).then(() => {
+        putDone = true;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      assert.equal(putDone, false, 'putAssetsBatch must wait for tx.oncomplete');
+      await flushTx();
+      await putP;
+      assert.equal(putDone, true);
+
+      let getAllDone = false;
+      const getAllP = idbStore.getAllAssetsForDeck('idb-test-deck').then((rows) => {
+        getAllDone = true;
+        return rows;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      assert.equal(
+        getAllDone,
+        false,
+        'getAllAssetsForDeck must NOT resolve on req.onsuccess before tx.oncomplete'
+      );
+      await flushTx();
+      const fetched = await getAllP;
+      assert.equal(fetched.length, 1);
+      assert.equal(fetched[0].assetKey, 'back');
+
+      // 8B) If tx.onabort fires AFTER req.onsuccess, getAllAssetsForDeck MUST reject cleanly (no hang / no false resolve)
+      nextBehavior = 'abort_after_req_success';
+      const abortedRead = idbStore.getAllAssetsForDeck('idb-test-deck');
+      await flushTx();
+      await assert.rejects(
+        () => abortedRead,
+        (err: unknown) => err instanceof DeckSystemError && err.code === 'STORAGE_UNAVAILABLE'
+      );
+
+      // 8C) clearAll rejects cleanly on tx.onabort instead of hanging forever
+      nextBehavior = 'abort_after_req_success';
+      const abortedClear = idbStore.clearAll();
+      await flushTx();
+      await assert.rejects(
+        () => abortedClear,
+        (err: unknown) => err instanceof DeckSystemError && err.code === 'STORAGE_UNAVAILABLE'
+      );
+
+      // 8D) deleteAssetsForDeck rejects cleanly on req.onerror
+      nextBehavior = 'req_error';
+      const erroredDelete = idbStore.deleteAssetsForDeck('idb-test-deck', ['back']);
+      await flushTx();
+      await assert.rejects(
+        () => erroredDelete,
+        (err: unknown) => err instanceof DeckSystemError && err.code === 'STORAGE_UNAVAILABLE'
+      );
+    } finally {
+      if (origIndexedDb === undefined) {
+        delete (globalThis as unknown as { indexedDB?: unknown }).indexedDB;
+      } else {
+        (globalThis as unknown as { indexedDB: unknown }).indexedDB = origIndexedDb;
+      }
+    }
   });
 });

@@ -5,9 +5,12 @@ import {
   PublicRoomSummary,
   isValidSeat,
   sanitizeRoomCode,
-  sanitizeSeatAppearance,
   sanitizeUsername,
 } from '../src/games/hokm/online/protocol';
+import {
+  getDefaultPublicAppearance,
+  sanitizeGuestSeatAppearance,
+} from '../src/platform/items/catalogData';
 import {
   CookieHeaderOptions,
   buildClearSessionCookieHeader,
@@ -697,6 +700,23 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
     }
   };
 
+  const resolveRoomSeatAppearance = async (
+    verifiedUser: { userId: string } | null,
+    rawClientAppearance: unknown
+  ) => {
+    if (verifiedUser) {
+      try {
+        return await getPublicAppearanceForUser(
+          db.getD1Adapter(),
+          verifiedUser.userId
+        );
+      } catch {
+        return getDefaultPublicAppearance();
+      }
+    }
+    return sanitizeGuestSeatAppearance(rawClientAppearance);
+  };
+
   app.post('/api/rooms', async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const verifiedUser = await resolveOptionalVerifiedAuthUser(req);
@@ -715,9 +735,10 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
       }
     }
 
-    const appearance = verifiedUser
-      ? await getPublicAppearanceForUser(db.getD1Adapter(), verifiedUser.userId)
-      : sanitizeSeatAppearance(body.appearance);
+    const appearance = await resolveRoomSeatAppearance(
+      verifiedUser,
+      body.appearance
+    );
 
     const result = roomManager.createRoom({
       username: verifiedUser ? verifiedUser.username : body.username,
@@ -783,9 +804,10 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
       }
     }
 
-    const appearance = verifiedUser
-      ? await getPublicAppearanceForUser(db.getD1Adapter(), verifiedUser.userId)
-      : sanitizeSeatAppearance(body.appearance);
+    const appearance = await resolveRoomSeatAppearance(
+      verifiedUser,
+      body.appearance
+    );
 
     const result = roomManager.quickMatchRoom({
       username: verifiedUser ? verifiedUser.username : body.username,
@@ -869,9 +891,10 @@ export function createEyvanExpressApp(deps: CreateEyvanExpressAppDeps): EyvanExp
       }
     }
 
-    const appearance = verifiedUser
-      ? await getPublicAppearanceForUser(db.getD1Adapter(), verifiedUser.userId)
-      : sanitizeSeatAppearance(body.appearance);
+    const appearance = await resolveRoomSeatAppearance(
+      verifiedUser,
+      body.appearance
+    );
 
     const result = roomManager.joinRoom(String(req.params.code ?? ''), {
       username: verifiedUser ? verifiedUser.username : body.username,

@@ -1,0 +1,87 @@
+name: Apply Eyvan D1 Remote Migrations
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_apply:
+        description: 'Select "yes" to apply Cloudflare D1 migrations to remote eyvan-hokm-db'
+        required: true
+        type: choice
+        default: 'no'
+        options:
+          - 'no'
+          - 'yes'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eyvan-d1-remote-migrations
+  cancel-in-progress: false
+
+jobs:
+  apply-d1-migrations:
+    name: Apply Remote D1 Migrations (eyvan-hokm-db)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: cloudflare
+    steps:
+      - name: Verify manual confirmation
+        if: ${{ inputs.confirm_apply != 'yes' }}
+        run: |
+          echo "::error::Migration aborted: confirm_apply must be explicitly set to 'yes'."
+          exit 1
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Validate required Cloudflare secrets and migration files
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+            echo "::error::Missing required GitHub Secret: CLOUDFLARE_API_TOKEN"
+            exit 1
+          fi
+          if [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
+            echo "::error::Missing required GitHub Secret: CLOUDFLARE_ACCOUNT_ID"
+            exit 1
+          fi
+          if [[ ! -f "wrangler.toml" ]]; then
+            echo "::error::cloudflare/wrangler.toml not found"
+            exit 1
+          fi
+          if [[ ! -d "migrations" ]]; then
+            echo "::error::cloudflare/migrations directory not found"
+            exit 1
+          fi
+
+      - name: Apply remote D1 migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CI: 'true'
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@4 d1 migrations apply eyvan-hokm-db --remote
+
+      - name: Verify applied migrations count and created tables
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CI: 'true'
+        run: |
+          set -euo pipefail
+          echo "=== d1_migrations record count ==="
+          npx --yes wrangler@4 d1 execute eyvan-hokm-db --remote --command "SELECT COUNT(*) AS applied_migrations_count FROM d1_migrations;"
+          echo "=== Remote D1 created tables ==="
+          npx --yes wrangler@4 d1 execute eyvan-hokm-db --remote --command "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name ASC;"

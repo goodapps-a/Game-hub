@@ -25,6 +25,7 @@ import {
 } from './lib/types';
 import {
   HokmRoomDO,
+  INTERNAL_AUTH_TYPE_HEADER,
   INTERNAL_SESSION_TOKEN_HEADER,
   INTERNAL_VERIFIED_APPEARANCE_HEADER,
 } from './HokmRoomDO';
@@ -922,6 +923,7 @@ export default {
           'Content-Type': 'application/json',
         };
         if (verifiedUser) {
+          forwardHeaders[INTERNAL_AUTH_TYPE_HEADER] = 'authenticated';
           forwardHeaders['X-Eyvan-Verified-User-Id'] = verifiedUser.userId;
           forwardHeaders['X-Eyvan-Verified-Username'] = verifiedUser.username;
           forwardHeaders['X-Eyvan-Verified-Avatar'] = verifiedUser.avatarCode;
@@ -929,8 +931,11 @@ export default {
             forwardHeaders[INTERNAL_VERIFIED_APPEARANCE_HEADER] =
               verifiedAppearanceHeader;
           }
-        } else if (guestUserId) {
-          forwardHeaders['X-Eyvan-Verified-User-Id'] = guestUserId;
+        } else {
+          forwardHeaders[INTERNAL_AUTH_TYPE_HEADER] = 'guest';
+          if (guestUserId) {
+            forwardHeaders['X-Eyvan-Verified-User-Id'] = guestUserId;
+          }
         }
         const res = await stub.fetch(
           new Request(`https://room.internal/create?code=${code}`, {
@@ -1096,6 +1101,7 @@ export default {
           'Content-Type': 'application/json',
         };
         if (verifiedUser) {
+          forwardHeaders[INTERNAL_AUTH_TYPE_HEADER] = 'authenticated';
           forwardHeaders['X-Eyvan-Verified-User-Id'] = verifiedUser.userId;
           forwardHeaders['X-Eyvan-Verified-Username'] = verifiedUser.username;
           forwardHeaders['X-Eyvan-Verified-Avatar'] = verifiedUser.avatarCode;
@@ -1103,8 +1109,11 @@ export default {
             forwardHeaders[INTERNAL_VERIFIED_APPEARANCE_HEADER] =
               verifiedAppearanceHeader;
           }
-        } else if (guestUserId) {
-          forwardHeaders['X-Eyvan-Verified-User-Id'] = guestUserId;
+        } else {
+          forwardHeaders[INTERNAL_AUTH_TYPE_HEADER] = 'guest';
+          if (guestUserId) {
+            forwardHeaders['X-Eyvan-Verified-User-Id'] = guestUserId;
+          }
         }
         const res = await stub.fetch(
           new Request(`https://room.internal/join?code=${code}`, {

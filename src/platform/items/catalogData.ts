@@ -867,24 +867,130 @@ export function buildPublicAppearanceFromSlots(
   equippedSlots: EquippedSlotsMap,
   customBannerNone = false
 ): PublicAppearanceSnapshot {
-  const bannerItemId = customBannerNone ? null : equippedSlots.banner ?? 'af-banner-royal';
-  const bannerDef = bannerItemId ? BASE_ITEM_BY_ID.get(bannerItemId) : undefined;
+  const resolveVerifiedSlotItem = (
+    slot: ItemSlot,
+    rawItemId: string | undefined
+  ): UniversalItemDefinition | undefined => {
+    if (!rawItemId) return undefined;
+    const def = resolveCatalogItemDefinition(rawItemId);
+    if (!def || def.visibilityScope === 'owner_only' || def.slot !== slot) {
+      return undefined;
+    }
+    return def;
+  };
+
+  const bannerDef = customBannerNone
+    ? undefined
+    : resolveVerifiedSlotItem('banner', equippedSlots.banner) ??
+      BASE_ITEM_BY_ID.get('af-banner-royal');
+  const bannerItemId = customBannerNone ? null : bannerDef?.id ?? 'af-banner-royal';
   const bannerCode = customBannerNone
     ? 'none'
     : bannerDef?.visualMeta?.bannerCode ?? 'royal';
 
-  const deckItemId = equippedSlots.card_deck ?? 'deck-eyvan-classic';
-  const deckId = extractDeckIdFromItemId(deckItemId);
+  const deckDef =
+    resolveVerifiedSlotItem('card_deck', equippedSlots.card_deck) ??
+    BASE_ITEM_BY_ID.get('deck-eyvan-classic');
+  const deckItemId = deckDef?.id ?? 'deck-eyvan-classic';
+  const deckId = deckDef?.deckId ?? extractDeckIdFromItemId(deckItemId);
+
+  const cardBackDef =
+    resolveVerifiedSlotItem('card_back', equippedSlots.card_back) ??
+    BASE_ITEM_BY_ID.get('cb-shamsa');
+
+  const avatarDef = resolveVerifiedSlotItem('avatar', equippedSlots.avatar);
+  const frameDef = resolveVerifiedSlotItem('avatar_frame', equippedSlots.avatar_frame);
+  const badgeDef = resolveVerifiedSlotItem('profile_badge', equippedSlots.profile_badge);
+  const nameplateDef = resolveVerifiedSlotItem('nameplate', equippedSlots.nameplate);
+  const effectDef = resolveVerifiedSlotItem('game_effect', equippedSlots.game_effect);
 
   return {
     bannerItemId,
     bannerCode,
-    avatarItemId: equippedSlots.avatar ?? null,
-    avatarFrameId: equippedSlots.avatar_frame ?? null,
-    badgeId: equippedSlots.profile_badge ?? null,
-    nameplateId: equippedSlots.nameplate ?? null,
+    avatarItemId: avatarDef?.id ?? null,
+    avatarFrameId: frameDef?.id ?? null,
+    badgeId: badgeDef?.id ?? null,
+    nameplateId: nameplateDef?.id ?? null,
     deckId: deckId || 'eyvan-classic',
-    cardBackId: equippedSlots.card_back ?? 'cb-shamsa',
-    gameEffectId: equippedSlots.game_effect ?? null,
+    cardBackId: cardBackDef?.id ?? 'cb-shamsa',
+    gameEffectId: effectDef?.id ?? null,
+  };
+}
+
+/**
+ * Returns the canonical safe default public appearance (zero paid or owner_only items).
+ * Used whenever an authenticated user's DB lookup fails or is unavailable.
+ */
+export function getDefaultPublicAppearance(): PublicAppearanceSnapshot {
+  return buildPublicAppearanceFromSlots({});
+}
+
+/**
+ * Sanitizes client-supplied appearance JSON for unauthenticated Guest players.
+ * Strictly restricts guests to default-owned public items only — preventing spoofing
+ * of unowned, paid, legendary, or owner_only items via raw HTTP payloads.
+ */
+export function sanitizeGuestSeatAppearance(
+  raw: unknown
+): PublicAppearanceSnapshot {
+  const defaults = getDefaultPublicAppearance();
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return defaults;
+  }
+  const obj = raw as Record<string, unknown>;
+
+  const allowDefaultOwnedSlotItem = (
+    slot: ItemSlot,
+    candidateId: unknown
+  ): UniversalItemDefinition | undefined => {
+    if (typeof candidateId !== 'string') return undefined;
+    const trimmed = candidateId.trim();
+    if (!trimmed) return undefined;
+    const def = resolveCatalogItemDefinition(trimmed);
+    if (
+      !def ||
+      !def.isDefaultOwned ||
+      def.visibilityScope === 'owner_only' ||
+      def.slot !== slot
+    ) {
+      return undefined;
+    }
+    return def;
+  };
+
+  let bannerItemId: string | null = defaults.bannerItemId;
+  let bannerCode: PublicAppearanceSnapshot['bannerCode'] = defaults.bannerCode;
+  if (obj.bannerCode === 'none' || obj.bannerItemId === null) {
+    bannerItemId = null;
+    bannerCode = 'none';
+  } else {
+    const allowedBanner = allowDefaultOwnedSlotItem('banner', obj.bannerItemId);
+    if (allowedBanner) {
+      bannerItemId = allowedBanner.id;
+      bannerCode = allowedBanner.visualMeta?.bannerCode ?? defaults.bannerCode;
+    }
+  }
+
+  const allowedDeck = allowDefaultOwnedSlotItem(
+    'card_deck',
+    typeof obj.deckId === 'string' ? toDeckItemId(obj.deckId) : undefined
+  );
+  const allowedCardBack = allowDefaultOwnedSlotItem('card_back', obj.cardBackId);
+  const allowedAvatar = allowDefaultOwnedSlotItem('avatar', obj.avatarItemId);
+  const allowedFrame = allowDefaultOwnedSlotItem('avatar_frame', obj.avatarFrameId);
+  const allowedBadge = allowDefaultOwnedSlotItem('profile_badge', obj.badgeId);
+  const allowedNameplate = allowDefaultOwnedSlotItem('nameplate', obj.nameplateId);
+  const allowedEffect = allowDefaultOwnedSlotItem('game_effect', obj.gameEffectId);
+
+  return {
+    bannerItemId,
+    bannerCode,
+    avatarItemId: allowedAvatar?.id ?? null,
+    avatarFrameId: allowedFrame?.id ?? null,
+    badgeId: allowedBadge?.id ?? null,
+    nameplateId: allowedNameplate?.id ?? null,
+    deckId: allowedDeck?.deckId ?? defaults.deckId,
+    cardBackId: allowedCardBack?.id ?? defaults.cardBackId,
+    gameEffectId: allowedEffect?.id ?? null,
   };
 }

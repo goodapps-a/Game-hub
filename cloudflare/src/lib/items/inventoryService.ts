@@ -32,6 +32,7 @@ export type ItemsServiceErrorCode =
   | 'SELF_ACTION_FORBIDDEN'
   | 'USER_BLOCKED'
   | 'INSUFFICIENT_FUNDS'
+  | 'IDEMPOTENCY_CONFLICT'
   | 'USER_NOT_FOUND'
   | 'DATABASE_ERROR';
 
@@ -338,22 +339,31 @@ export async function claimShopItemForUser(
 
   await ensureUserInventoryInitialized(db, userId, now);
 
-  // 1) Idempotency check by (user_id, request_id)
+  // 1) Idempotency check by (user_id, request_id) with strict item_id verification
   const existingClaim = await db
     .prepare(
-      `SELECT effective_price, reward_coins, reward_gems
+      `SELECT item_id, effective_price, reward_coins, reward_gems
        FROM user_wallet_claims
        WHERE user_id = ? AND request_id = ?
        LIMIT 1`
     )
     .bind(userId, requestId)
     .first<{
+      item_id: string;
       effective_price: number;
       reward_coins: number;
       reward_gems: number;
     }>();
 
   if (existingClaim) {
+    if (existingClaim.item_id !== def.id) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'IDEMPOTENCY_CONFLICT',
+        message: 'این شناسه پیگیری قبلاً برای آیتم دیگری استفاده شده است.',
+      };
+    }
     const state = await readUserInventoryState(db, userId, { shopTestMode, now });
     return {
       ok: true,
@@ -400,38 +410,30 @@ export async function claimShopItemForUser(
   const rewardCoins = Math.max(0, Math.floor(def.rewardPayload?.coins ?? 0));
   const rewardGems = Math.max(0, Math.floor(def.rewardPayload?.gems ?? 0));
 
-  // 4) Deduct cost atomically when effectivePrice > 0
+  // 4) Execute ALL claim mutations in ONE atomic D1/SQLite batch transaction:
+  //    - Wallet deduction (CHECK coins >= 0 / gems >= 0 aborts & rolls back whole batch if insufficient)
+  //    - Idempotent claim insert (UNIQUE(user_id, request_id) aborts & rolls back whole batch on duplicate)
+  //    - Permanent ownership insert (PRIMARY KEY(user_id, item_id) aborts & rolls back on concurrent purchase)
+  //    - Chest/bundle coin & gem rewards credit
+  const claimId = generateId('clm');
+  const atomicStatements = [];
+
   if (effectivePrice > 0) {
     const deductSql =
       def.currency === 'gems'
         ? `UPDATE user_wallets
            SET gems = gems - ?, updated_at = ?
-           WHERE user_id = ? AND gems >= ?`
+           WHERE user_id = ?`
         : `UPDATE user_wallets
            SET coins = coins - ?, updated_at = ?
-           WHERE user_id = ? AND coins >= ?`;
-    const deductRes = await db
-      .prepare(deductSql)
-      .bind(effectivePrice, now, userId, effectivePrice)
-      .run();
-
-    if ((deductRes.meta?.changes ?? 0) !== 1) {
-      return {
-        ok: false,
-        status: 402,
-        code: 'INSUFFICIENT_FUNDS',
-        message:
-          def.currency === 'gems'
-            ? 'موجودی الماس شما برای دریافت این آیتم کافی نیست.'
-            : 'موجودی سکه شما برای دریافت این آیتم کافی نیست.',
-      };
-    }
+           WHERE user_id = ?`;
+    atomicStatements.push(
+      db.prepare(deductSql).bind(effectivePrice, now, userId)
+    );
   }
 
-  // 5) Insert idempotent claim record FIRST so concurrent duplicate requestIds fail the UNIQUE key
-  const claimId = generateId('clm');
-  try {
-    await db
+  atomicStatements.push(
+    db
       .prepare(
         `INSERT INTO user_wallet_claims (
            claim_id, user_id, request_id, item_id, currency,
@@ -450,38 +452,21 @@ export async function claimShopItemForUser(
         shopTestMode ? 1 : 0,
         now
       )
-      .run();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : '';
-    if (msg.includes('UNIQUE') || msg.includes('constraint')) {
-      // Refund any optimistic deduction from the racing duplicate request
-      if (effectivePrice > 0) {
-        const refundSql =
-          def.currency === 'gems'
-            ? `UPDATE user_wallets SET gems = gems + ?, updated_at = ? WHERE user_id = ?`
-            : `UPDATE user_wallets SET coins = coins + ?, updated_at = ? WHERE user_id = ?`;
-        await db.prepare(refundSql).bind(effectivePrice, now, userId).run();
-      }
-      const state = await readUserInventoryState(db, userId, { shopTestMode, now });
-      return {
-        ok: true,
-        status: 200,
-        item: def,
-        effectivePrice,
-        deduplicated: true,
-        alreadyOwned: !isConsumableReward,
-        grantedCoins: rewardCoins,
-        grantedGems: rewardGems,
-        state,
-      };
-    }
-    throw err;
+  );
+
+  if (!isConsumableReward) {
+    atomicStatements.push(
+      db
+        .prepare(
+          `INSERT INTO user_inventory (user_id, item_id, source, acquired_at)
+           VALUES (?, ?, ?, ?)`
+        )
+        .bind(userId, def.id, shopTestMode ? 'test_mode' : 'shop_claim', now)
+    );
   }
 
-  // 6) Apply wallet rewards & grant permanent ownership atomically
-  const postStatements = [];
   if (rewardCoins > 0 || rewardGems > 0) {
-    postStatements.push(
+    atomicStatements.push(
       db
         .prepare(
           `UPDATE user_wallets
@@ -491,18 +476,104 @@ export async function claimShopItemForUser(
         .bind(rewardCoins, rewardGems, now, userId)
     );
   }
-  if (!isConsumableReward) {
-    postStatements.push(
-      db
+
+  try {
+    await db.batch(atomicStatements);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : '';
+
+    // Inspect whether a concurrent duplicate requestId committed first
+    try {
+      const racedClaim = await db
         .prepare(
-          `INSERT OR IGNORE INTO user_inventory (user_id, item_id, source, acquired_at)
-           VALUES (?, ?, ?, ?)`
+          `SELECT item_id, effective_price, reward_coins, reward_gems
+           FROM user_wallet_claims
+           WHERE user_id = ? AND request_id = ?
+           LIMIT 1`
         )
-        .bind(userId, def.id, shopTestMode ? 'test_mode' : 'shop_claim', now)
-    );
-  }
-  if (postStatements.length > 0) {
-    await db.batch(postStatements);
+        .bind(userId, requestId)
+        .first<{
+          item_id: string;
+          effective_price: number;
+          reward_coins: number;
+          reward_gems: number;
+        }>();
+
+      if (racedClaim) {
+        if (racedClaim.item_id !== def.id) {
+          return {
+            ok: false,
+            status: 409,
+            code: 'IDEMPOTENCY_CONFLICT',
+            message: 'این شناسه پیگیری قبلاً برای آیتم دیگری استفاده شده است.',
+          };
+        }
+        const state = await readUserInventoryState(db, userId, {
+          shopTestMode,
+          now,
+        });
+        return {
+          ok: true,
+          status: 200,
+          item: def,
+          effectivePrice: Number(racedClaim.effective_price),
+          deduplicated: true,
+          alreadyOwned: !isConsumableReward,
+          grantedCoins: Number(racedClaim.reward_coins),
+          grantedGems: Number(racedClaim.reward_gems),
+          state,
+        };
+      }
+
+      // Inspect whether a concurrent request with a DIFFERENT requestId already granted permanent ownership
+      if (!isConsumableReward) {
+        const racedOwned = await db
+          .prepare(
+            `SELECT 1 FROM user_inventory WHERE user_id = ? AND item_id = ? LIMIT 1`
+          )
+          .bind(userId, def.id)
+          .first();
+
+        if (racedOwned) {
+          const state = await readUserInventoryState(db, userId, {
+            shopTestMode,
+            now,
+          });
+          return {
+            ok: true,
+            status: 200,
+            item: def,
+            effectivePrice: 0,
+            deduplicated: true,
+            alreadyOwned: true,
+            grantedCoins: 0,
+            grantedGems: 0,
+            state,
+          };
+        }
+      }
+    } catch {
+      // Recovery read failed — fall through to constraint classification / DATABASE_ERROR
+    }
+
+    if (/check\s+constraint|coins\s*>=\s*0|gems\s*>=\s*0/i.test(msg)) {
+      return {
+        ok: false,
+        status: 402,
+        code: 'INSUFFICIENT_FUNDS',
+        message:
+          def.currency === 'gems'
+            ? 'موجودی الماس شما برای دریافت این آیتم کافی نیست.'
+            : 'موجودی سکه شما برای دریافت این آیتم کافی نیست.',
+      };
+    }
+
+    return {
+      ok: false,
+      status: 503,
+      code: 'DATABASE_ERROR',
+      message: 'ثبت تراکنش فروشگاه با خطا مواجه شد؛ هیچ تغییری در موجودی شما اعمال نشد.',
+    };
   }
 
   const state = await readUserInventoryState(db, userId, { shopTestMode, now });
@@ -825,7 +896,13 @@ export async function getPublicUserProfileById(
   const collection: PublicCollectionItemSummary[] = [];
   for (const invRow of invRows.results ?? []) {
     const def = resolveCatalogItemDefinition(invRow.item_id);
-    if (!def || !PUBLIC_COLLECTION_KINDS.has(def.kind)) continue;
+    if (
+      !def ||
+      def.visibilityScope === 'owner_only' ||
+      !PUBLIC_COLLECTION_KINDS.has(def.kind)
+    ) {
+      continue;
+    }
     collection.push({
       itemId: def.id,
       kind: def.kind,
@@ -1249,18 +1326,34 @@ export async function giftShopItemForUser(
     appearance: recipientAppearance,
   };
 
-  // Idempotency fast-path
+  // Idempotency fast-path with strict item_id + recipient_user_id check
   const existingGift = await db
     .prepare(
-      `SELECT gift_id, price_paid
+      `SELECT gift_id, item_id, recipient_user_id, price_paid
        FROM gift_transactions
        WHERE sender_user_id = ? AND request_id = ?
        LIMIT 1`
     )
     .bind(senderUserId, requestId)
-    .first<{ gift_id: string; price_paid: number }>();
+    .first<{
+      gift_id: string;
+      item_id: string;
+      recipient_user_id: string;
+      price_paid: number;
+    }>();
 
   if (existingGift) {
+    if (
+      existingGift.item_id !== def.id ||
+      existingGift.recipient_user_id !== recipientUserId
+    ) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'IDEMPOTENCY_CONFLICT',
+        message: 'این شناسه پیگیری هدیه قبلاً برای آیتم یا گیرنده دیگری استفاده شده است.',
+      };
+    }
     const state = await readUserInventoryState(db, senderUserId, { shopTestMode, now });
     return {
       ok: true,
@@ -1292,82 +1385,84 @@ export async function giftShopItemForUser(
   }
 
   const effectivePrice = getEffectiveItemPrice(def.price, shopTestMode);
+  const giftId = generateId('gft');
+  const giftBatch = [];
 
   if (effectivePrice > 0) {
     const deductSql =
       def.currency === 'gems'
         ? `UPDATE user_wallets
            SET gems = gems - ?, updated_at = ?
-           WHERE user_id = ? AND gems >= ?`
+           WHERE user_id = ?`
         : `UPDATE user_wallets
            SET coins = coins - ?, updated_at = ?
-           WHERE user_id = ? AND coins >= ?`;
-    const deductRes = await db
-      .prepare(deductSql)
-      .bind(effectivePrice, now, senderUserId, effectivePrice)
-      .run();
-
-    if ((deductRes.meta?.changes ?? 0) !== 1) {
-      return {
-        ok: false,
-        status: 402,
-        code: 'INSUFFICIENT_FUNDS',
-        message:
-          def.currency === 'gems'
-            ? 'موجودی الماس شما برای ارسال این هدیه کافی نیست.'
-            : 'موجودی سکه شما برای ارسال این هدیه کافی نیست.',
-      };
-    }
+           WHERE user_id = ?`;
+    giftBatch.push(
+      db.prepare(deductSql).bind(effectivePrice, now, senderUserId)
+    );
   }
 
-  const giftId = generateId('gft');
+  giftBatch.push(
+    db
+      .prepare(
+        `INSERT INTO gift_transactions (
+           gift_id, sender_user_id, recipient_user_id, item_id,
+           currency, price_paid, request_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        giftId,
+        senderUserId,
+        recipientUserId,
+        def.id,
+        def.currency,
+        effectivePrice,
+        requestId,
+        now
+      ),
+    db
+      .prepare(
+        `INSERT INTO user_inventory (user_id, item_id, source, acquired_at)
+         VALUES (?, ?, 'reward', ?)`
+      )
+      .bind(recipientUserId, def.id, now)
+  );
+
   try {
-    await db.batch([
-      db
-        .prepare(
-          `INSERT INTO gift_transactions (
-             gift_id, sender_user_id, recipient_user_id, item_id,
-             currency, price_paid, request_id, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-        .bind(
-          giftId,
-          senderUserId,
-          recipientUserId,
-          def.id,
-          def.currency,
-          effectivePrice,
-          requestId,
-          now
-        ),
-      db
-        .prepare(
-          `INSERT OR IGNORE INTO user_inventory (user_id, item_id, source, acquired_at)
-           VALUES (?, ?, 'reward', ?)`
-        )
-        .bind(recipientUserId, def.id, now),
-    ]);
+    await db.batch(giftBatch);
   } catch (err) {
     const msg = err instanceof Error ? err.message : '';
-    if (msg.includes('UNIQUE') || msg.includes('constraint')) {
-      if (effectivePrice > 0) {
-        const refundSql =
-          def.currency === 'gems'
-            ? `UPDATE user_wallets SET gems = gems + ?, updated_at = ? WHERE user_id = ?`
-            : `UPDATE user_wallets SET coins = coins + ?, updated_at = ? WHERE user_id = ?`;
-        await db.prepare(refundSql).bind(effectivePrice, now, senderUserId).run();
-      }
+    try {
       const dup = await db
         .prepare(
-          `SELECT gift_id, price_paid
+          `SELECT gift_id, item_id, recipient_user_id, price_paid
            FROM gift_transactions
            WHERE sender_user_id = ? AND request_id = ?
            LIMIT 1`
         )
         .bind(senderUserId, requestId)
-        .first<{ gift_id: string; price_paid: number }>();
+        .first<{
+          gift_id: string;
+          item_id: string;
+          recipient_user_id: string;
+          price_paid: number;
+        }>();
       if (dup) {
-        const state = await readUserInventoryState(db, senderUserId, { shopTestMode, now });
+        if (
+          dup.item_id !== def.id ||
+          dup.recipient_user_id !== recipientUserId
+        ) {
+          return {
+            ok: false,
+            status: 409,
+            code: 'IDEMPOTENCY_CONFLICT',
+            message: 'این شناسه پیگیری هدیه قبلاً برای آیتم یا گیرنده دیگری استفاده شده است.',
+          };
+        }
+        const state = await readUserInventoryState(db, senderUserId, {
+          shopTestMode,
+          now,
+        });
         return {
           ok: true,
           status: 200,
@@ -1379,8 +1474,43 @@ export async function giftShopItemForUser(
           state,
         };
       }
+
+      const recipientNowOwns = await db
+        .prepare(
+          `SELECT 1 FROM user_inventory WHERE user_id = ? AND item_id = ? LIMIT 1`
+        )
+        .bind(recipientUserId, def.id)
+        .first();
+      if (recipientNowOwns) {
+        return {
+          ok: false,
+          status: 409,
+          code: 'ITEM_ALREADY_OWNED',
+          message: 'این بازیکن از قبل مالک این آیتم است و نیازی به خرید مجدد ندارد.',
+        };
+      }
+    } catch {
+      // Recovery read failed — fall through
     }
-    throw err;
+
+    if (/check\s+constraint|coins\s*>=\s*0|gems\s*>=\s*0/i.test(msg)) {
+      return {
+        ok: false,
+        status: 402,
+        code: 'INSUFFICIENT_FUNDS',
+        message:
+          def.currency === 'gems'
+            ? 'موجودی الماس شما برای ارسال این هدیه کافی نیست.'
+            : 'موجودی سکه شما برای ارسال این هدیه کافی نیست.',
+      };
+    }
+
+    return {
+      ok: false,
+      status: 503,
+      code: 'DATABASE_ERROR',
+      message: 'ثبت هدیه با خطا مواجه شد؛ هیچ مبلغی از حساب شما کسر نشد.',
+    };
   }
 
   const state = await readUserInventoryState(db, senderUserId, { shopTestMode, now });

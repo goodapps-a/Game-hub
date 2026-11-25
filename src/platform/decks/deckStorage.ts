@@ -105,13 +105,7 @@ export class IndexedDBDeckBlobStore implements DeckBlobStore {
   ): Promise<T> {
     const db = await this.openDb();
     return new Promise<T>((resolve, reject) => {
-      const tx = db.transaction(storeName, mode);
-      const store = tx.objectStore(storeName);
-      const req = fn(store);
       let settled = false;
-      let reqResult: T | undefined;
-      let hasResult = false;
-
       const fail = () => {
         if (settled) return;
         settled = true;
@@ -122,6 +116,20 @@ export class IndexedDBDeckBlobStore implements DeckBlobStore {
           )
         );
       };
+
+      let tx: IDBTransaction;
+      let req: IDBRequest<T>;
+      try {
+        tx = db.transaction(storeName, mode);
+        const store = tx.objectStore(storeName);
+        req = fn(store);
+      } catch {
+        fail();
+        return;
+      }
+
+      let reqResult: T | undefined;
+      let hasResult = false;
 
       req.onsuccess = () => {
         reqResult = req.result;
@@ -179,20 +187,42 @@ export class IndexedDBDeckBlobStore implements DeckBlobStore {
   async getAllAssetsForDeck(deckId: string): Promise<StoredDeckAsset[]> {
     const db = await this.openDb();
     return new Promise<StoredDeckAsset[]>((resolve, reject) => {
-      const tx = db.transaction(STORE_ASSETS, 'readonly');
-      const store = tx.objectStore(STORE_ASSETS);
-      const index = store.index('byDeck');
-      const req = index.getAll(deckId);
-      req.onsuccess = () => {
-        resolve((req.result as StoredDeckAsset[] | undefined) ?? []);
-      };
-      req.onerror = () =>
+      let settled = false;
+      const fail = () => {
+        if (settled) return;
+        settled = true;
         reject(
           new DeckSystemError(
             'STORAGE_UNAVAILABLE',
             'خطا در خواندن فایل‌های مجموعه.'
           )
         );
+      };
+
+      let tx: IDBTransaction;
+      let req: IDBRequest<StoredDeckAsset[]>;
+      try {
+        tx = db.transaction(STORE_ASSETS, 'readonly');
+        const store = tx.objectStore(STORE_ASSETS);
+        const index = store.index('byDeck');
+        req = index.getAll(deckId) as IDBRequest<StoredDeckAsset[]>;
+      } catch {
+        fail();
+        return;
+      }
+
+      let rows: StoredDeckAsset[] = [];
+      req.onsuccess = () => {
+        rows = Array.isArray(req.result) ? req.result : [];
+      };
+      req.onerror = fail;
+      tx.onabort = fail;
+      tx.onerror = fail;
+      tx.oncomplete = () => {
+        if (settled) return;
+        settled = true;
+        resolve(rows);
+      };
     });
   }
 
@@ -204,8 +234,6 @@ export class IndexedDBDeckBlobStore implements DeckBlobStore {
     if (assets.length === 0) return;
     const db = await this.openDb();
     return new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_ASSETS, 'readwrite');
-      const store = tx.objectStore(STORE_ASSETS);
       let settled = false;
       const fail = () => {
         if (settled) return;
@@ -217,9 +245,20 @@ export class IndexedDBDeckBlobStore implements DeckBlobStore {
           )
         );
       };
-      for (const asset of assets) {
-        store.put(asset);
+
+      let tx: IDBTransaction;
+      try {
+        tx = db.transaction(STORE_ASSETS, 'readwrite');
+        const store = tx.objectStore(STORE_ASSETS);
+        for (const asset of assets) {
+          const req = store.put(asset);
+          req.onerror = fail;
+        }
+      } catch {
+        fail();
+        return;
       }
+
       tx.oncomplete = () => {
         if (settled) return;
         settled = true;
@@ -245,8 +284,6 @@ export class IndexedDBDeckBlobStore implements DeckBlobStore {
 
     const db = await this.openDb();
     return new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_ASSETS, 'readwrite');
-      const store = tx.objectStore(STORE_ASSETS);
       let settled = false;
       const fail = () => {
         if (settled) return;
@@ -258,9 +295,20 @@ export class IndexedDBDeckBlobStore implements DeckBlobStore {
           )
         );
       };
-      for (const ak of keysToDelete) {
-        store.delete(makeAssetCompositeKey(deckId, ak));
+
+      let tx: IDBTransaction;
+      try {
+        tx = db.transaction(STORE_ASSETS, 'readwrite');
+        const store = tx.objectStore(STORE_ASSETS);
+        for (const ak of keysToDelete) {
+          const req = store.delete(makeAssetCompositeKey(deckId, ak));
+          req.onerror = fail;
+        }
+      } catch {
+        fail();
+        return;
       }
+
       tx.oncomplete = () => {
         if (settled) return;
         settled = true;
@@ -274,11 +322,37 @@ export class IndexedDBDeckBlobStore implements DeckBlobStore {
   async clearAll(): Promise<void> {
     const db = await this.openDb();
     await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction([STORE_MANIFESTS, STORE_ASSETS], 'readwrite');
-      tx.objectStore(STORE_MANIFESTS).clear();
-      tx.objectStore(STORE_ASSETS).clear();
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
+      let settled = false;
+      const fail = () => {
+        if (settled) return;
+        settled = true;
+        reject(
+          new DeckSystemError(
+            'STORAGE_UNAVAILABLE',
+            'خطا در پاک‌سازی حافظه آفلاین مجموعه‌ها.'
+          )
+        );
+      };
+
+      let tx: IDBTransaction;
+      try {
+        tx = db.transaction([STORE_MANIFESTS, STORE_ASSETS], 'readwrite');
+        const reqManifests = tx.objectStore(STORE_MANIFESTS).clear();
+        const reqAssets = tx.objectStore(STORE_ASSETS).clear();
+        reqManifests.onerror = fail;
+        reqAssets.onerror = fail;
+      } catch {
+        fail();
+        return;
+      }
+
+      tx.oncomplete = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      tx.onabort = fail;
+      tx.onerror = fail;
     });
   }
 }
